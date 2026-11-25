@@ -227,16 +227,63 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
+/// The most API requests that run at the same time. The others wait on the
+/// runtime thread, with no blocking thread.
+pub const MAX_REQUESTS: usize = 64;
+
+/// The blocking threads that the API can hold: one for each request in
+/// progress, and one for the writer of each streamed answer ([`stream`]).
+/// The runtime of the API needs at least this many blocking threads, or a
+/// streamed answer can wait for a thread that never comes (#814).
+pub const BLOCKING_THREADS: usize = 2 * MAX_REQUESTS;
+
+/// The slots of [`MAX_REQUESTS`], one for each runtime.
+static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+
 /// Runs the rest of the request (the measure count and the handler) on a
 /// blocking thread. `iris serve` has one runtime thread, which also answers
 /// the command socket: a handler that waits for a store connection there
 /// stops each other request (#700). The runtime thread keeps the drivers of
-/// I/O and time, so the handler can still await them.
+/// I/O and time, so the handler can still await them. The request holds one
+/// of the [`MAX_REQUESTS`] slots until the end of its body, so the requests
+/// and their stream writers never hold more than [`BLOCKING_THREADS`].
 async fn off_runtime(req: axum::extract::Request, next: middleware::Next) -> Response {
+    let slots = SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS)));
+    let Ok(slot) = slots.clone().acquire_owned().await else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed");
+    };
     let rt = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || rt.block_on(next.run(req)))
-        .await
-        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed"))
+    match tokio::task::spawn_blocking(move || rt.block_on(next.run(req))).await {
+        Ok(res) => res.map(|body| Body::new(Held { body, _slot: slot })),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed"),
+    }
+}
+
+/// A body that holds the slot of its request until the body ends or drops.
+struct Held {
+    body: Body,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl http_body::Body for Held {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>>
+    {
+        std::pin::Pin::new(&mut self.body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
 }
 
 async fn get_status(State(s): State<Arc<Store>>) -> Result<Response> {
@@ -406,8 +453,8 @@ struct AskBody {
     question: String,
 }
 
-/// One question of the person. The model call runs on a blocking thread,
-/// so the other requests go on.
+/// One question of the person. The model call runs on the blocking thread
+/// of the request (see [`off_runtime`]), so the other requests go on.
 async fn post_ask(
     State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
     b: std::result::Result<Json<AskBody>, JsonRejection>,
@@ -415,9 +462,7 @@ async fn post_ask(
     let b = body(b)?;
     let connect =
         connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
-    let a = tokio::task::spawn_blocking(move || answer(&s, &connect, &b.question, now_ms()))
-        .await
-        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    let a = answer(&s, &connect, &b.question, now_ms())?;
     Ok(Json(a).into_response())
 }
 
@@ -438,8 +483,8 @@ struct DraftBody {
 }
 
 /// A draft of the reply in the voice of the person (R3-04 intent path,
-/// R3-05). The model call runs on a blocking thread, so the other requests
-/// go on. The draft is saved in the store; nothing goes to Gmail.
+/// R3-05). The model call runs on the blocking thread of the request, so
+/// the other requests go on. The draft is saved in the store; nothing goes to Gmail.
 async fn post_draft(
     State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
     Path(id): Path<String>,
@@ -448,11 +493,7 @@ async fn post_draft(
     let b = body(b)?;
     let connect =
         connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
-    let d = tokio::task::spawn_blocking(move || {
-        write::draft(&s, &connect, &id, &b.parent, &b.intent, &b.to, now_ms)
-    })
-    .await
-    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    let d = write::draft(&s, &connect, &id, &b.parent, &b.intent, &b.to, now_ms)?;
     Ok(d.map_or_else(not_found, |v| Json(v).into_response()))
 }
 
@@ -701,11 +742,7 @@ async fn get_raw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
 }
 
 async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
-    let rss = tokio::task::spawn_blocking(measures::rss_kib)
-        .await
-        .ok()
-        .flatten();
-    Ok(Json(measures::measures(&s, rss)?).into_response())
+    Ok(Json(measures::measures(&s, measures::rss_kib())?).into_response())
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
@@ -751,13 +788,13 @@ struct ConfirmBody {
     sha256: String,
 }
 
-/// Runs `f` on a blocking thread. Each policy writer waits for the backup
-/// lock (a backup can hold it for minutes), and the server has one runtime
-/// thread: a wait there stops each other request (issue 143).
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
+/// Runs `f` in place. Each policy writer waits for the backup lock (a
+/// backup can hold it for minutes), and the server has one runtime thread:
+/// a wait there stops each other request (issue 143). [`off_runtime`] runs
+/// each handler on a blocking thread already, so `f` needs no second thread
+/// (#814, #817).
+async fn blocking<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    f()
 }
 
 /// [`policy::change`] on a blocking thread, see [`blocking`].
@@ -1217,31 +1254,23 @@ async fn post_account_remove(
             "The address is not the address of this account.".into(),
         ));
     }
-    let task = s.clone();
-    tokio::task::spawn_blocking(move || {
-        let id = task
-            .remove_account_id(row, &b.address, now_ms())
-            .map_err(|e| match e {
-                iris_store::Error::Account(why) => Error::Conflict(why.into()),
-                e => e.into(),
-            })?;
-        Ok::<_, Error>(delete_removed(&task, Some(id))?)
-    })
-    .await
-    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    let id = s
+        .remove_account_id(row, &b.address, now_ms())
+        .map_err(|e| match e {
+            iris_store::Error::Account(why) => Error::Conflict(why.into()),
+            e => e.into(),
+        })?;
+    delete_removed(&s, Some(id))?;
     Ok(Json(read::status(&s)?).into_response())
 }
 
 /// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
 /// sessions that this stop ended), `live` (the sessions that are not reaped
 /// yet) and `busy` (a Gmail call still ran). The stop is complete only when
-/// `live` is 0 and `busy` is false. The wait of up to 20 seconds runs on a
-/// blocking thread, so the other routes still answer.
+/// `live` is 0 and `busy` is false. The wait of up to 20 seconds runs on the
+/// blocking thread of the request, so the other routes still answer.
 async fn post_stop(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
-    let done = tokio::task::spawn_blocking(move || iris_apply::stop(&s))
-        .await
-        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
-        .map_err(apply_error)?;
+    let done = iris_apply::stop(&s).map_err(apply_error)?;
     Ok(Json(serde_json::json!({
         "stopped": true,
         "since": rfc3339(done.since),
