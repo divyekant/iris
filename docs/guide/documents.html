@@ -39,7 +39,7 @@ fields. The schema is
 <tr><td><code>confidence</code></td><td>no</td><td>A number from 0 to 1. Not permitted when <code>derived.by</code> is <code>person</code>.</td></tr>
 <tr><td><code>matter</code></td><td>no</td><td>The <code>g-</code> ID of the matter of the item, or <code>null</code>.</td></tr>
 <tr><td><code>account</code></td><td>no</td><td>Since version 1.1. The <code>a-</code> ID of the account (the mailbox) of the item. Not permitted in a document of version 1.0.</td></tr>
-<tr><td><code>ready</code></td><td>no</td><td><code>"draft"</code> when Iris prepared a reply draft, and <code>"summary"</code> (since version 1.4) when Iris prepared a summary of the thread. The engine sets it when it reads the item.</td></tr>
+<tr><td><code>ready</code></td><td>no</td><td>An array of one or two values, each one time: <code>"draft"</code> when Iris prepared a reply draft, and <code>"summary"</code> (since version 1.4) when Iris prepared a summary of the thread. For example, <code>["draft", "summary"]</code>. The engine sets it when it reads the item.</td></tr>
 <tr><td><code>attention</code></td><td>no</td><td><code>state</code> is <code>shown</code>, <code>bundled</code> or <code>hidden</code>, with the policy rule and the reason.</td></tr>
 </table>
 <p>A source has the fields <code>message</code> (an <code>m-</code> ID),

@@ -409,7 +409,7 @@ Thanks. MY-REPLY-TEXT
 <!-- sample: commitments/c-1.json -->
 ````json
 {
-  "model": "iris/1.3",
+  "model": "iris/1.4",
   "id": "c-1",
   "form": "commitment",
   "sources": ["m-1"]
@@ -419,7 +419,7 @@ Thanks. MY-REPLY-TEXT
 <!-- sample: people/p-1.json -->
 ````json
 {
-  "model": "iris/1.3",
+  "model": "iris/1.4",
   "id": "p-1",
   "address": "dana@example.com",
   "names": ["Dana"],
