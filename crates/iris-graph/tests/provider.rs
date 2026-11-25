@@ -438,3 +438,36 @@ fn more_removals_than_the_page_token_keeps_still_give_each_move() {
         assert_eq!(last_labels(&records, id), Some(want), "{id}");
     }
 }
+
+/// Issue #976: a list of a label other than `SENT` never asks the sent
+/// source, so a failed source cannot break an INBOX list.
+#[test]
+fn a_label_list_other_than_sent_does_not_ask_the_sent_source() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let fake = FakeGraph::start(Mailbox::new(5, 40)).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let outlook = Outlook::new(graph(&fake)).with_sent_source(move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Err("disk I/O error".into())
+    });
+    let mut listed = 0;
+    let mut page: Option<String> = None;
+    loop {
+        let p = outlook
+            .messages(TOKEN, Some("INBOX"), page.as_deref())
+            .unwrap();
+        listed += p.messages.len();
+        match p.next_page_token {
+            Some(t) => page = Some(t),
+            None => break,
+        }
+    }
+    assert!(listed > 0, "the INBOX list is empty");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    // The counter works: a `SENT` list asks the source and gets its error.
+    let err = outlook.messages(TOKEN, Some("SENT"), None);
+    assert!(err.is_err());
+    assert!(calls.load(Ordering::SeqCst) > 0);
+}
