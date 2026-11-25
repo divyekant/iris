@@ -1819,8 +1819,30 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             Ok(())
         }
         Command::Backup { path } => {
-            let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
-            println!("iris: backup in {} ({files} content files)", path.display());
+            let done = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
+            println!(
+                "iris: backup in {} ({} content files)",
+                path.display(),
+                done.files
+            );
+            // Issue 1063: name each draft of a job that the copy left out, so
+            // that the person can copy it by hand.
+            for s in &done.skipped {
+                for name in &s.large {
+                    println!(
+                        "iris: not in the backup, over 1 MiB: {}",
+                        s.folder.join(name).display()
+                    );
+                }
+                if s.more > 0 {
+                    println!(
+                        "iris: not in the backup, after the first {} files: {} files of {}",
+                        iris_store::DRAFT_FILES_MAX,
+                        s.more,
+                        s.folder.display()
+                    );
+                }
+            }
             Ok(())
         }
         Command::Export { path } => {

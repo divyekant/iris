@@ -209,10 +209,12 @@ To roll back, do these steps:
 
    CAUTION: `iris backup` copies only the `drafts` folder of each job
    workspace: each regular file of at most 1 MiB, at most 256 files for each
-   job. An agent draft that a job wrote after the backup, or a larger draft,
-   is only in the `workspaces` folder of the moved data folder (issue #1063). Before you
-   start Iris in step 4, copy such a draft from the moved data folder into
-   the restored data folder.
+   job. An agent draft that a job wrote after the backup, or a draft that
+   the backup did not take, is only in the `workspaces` folder of the moved
+   data folder. `iris backup` prints a line `iris: not in the backup` for
+   each draft over 1 MiB and for each `drafts` folder with more than 256
+   files (issue #1063). Before you start Iris in step 4, copy such a draft
+   from the moved data folder into the restored data folder.
 
 3. If the bad release migrated the store, move the data folder away and copy
    the backup in its place. Use the data folder of your installation: the
