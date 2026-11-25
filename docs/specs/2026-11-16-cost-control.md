@@ -207,8 +207,11 @@ Then it fails with "a run is in progress", as before.
   yield`), the nudge step before each thread. The summary step makes the
   calls of one thread only, so it needs no probe.
 - The OS releases the want lock of a waiter that crashes, so no signal
-  stays. A second waiter does not get the want lock while the first holds
-  it, but it still tries the run lock.
+  stays. Waiters take the run lock in turn: only the holder of the want
+  lock tries the run lock, and it releases the want lock when it returns.
+- A scan that stops for a waiter says so (`store::Scan::yielded`), also
+  the fixed check at the end of a pass. The run then ends with `stop =
+  yield`, not `done`.
 - Limit: a model call that runs when the waiter comes is not stopped. A
   call can take up to `timeout_s` (default 120 seconds), so a waiter can
   still fail after 60 seconds (limit #1126).
