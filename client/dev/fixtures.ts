@@ -25,6 +25,8 @@ const byForm = (form: string) => items.filter((i) => i.form === form);
 
 export const status: Status = {
   mode: "observe",
+  time_zone: "Europe/London",
+  time_zone_set: false,
   accounts: [
     {
       id: 1,
@@ -65,7 +67,7 @@ export const gate: GatePage = {
   count: 3,
   next: null,
   senders: [
-    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [strangers[1], strangers[0]] },
+    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [{ ...strangers[1], ready: ["draft"] }, strangers[0]] },
     { id: "p-72", name: "Leo Park", address: "leo@quartzlabs.example", count: 1, items: [strangers[2]] },
     { id: "p-73", name: null, address: "billing@vendorhub.example", count: 1, items: [strangers[3]] },
   ],
@@ -498,6 +500,15 @@ export const notices = [
     message: { id: "m-3", thread: "t-3", date: "2026-11-16T09:00:00Z", from: { name: "First Harbor Bank", address: "alerts@bank.example" }, subject: "Your sign-in code", labels: ["INBOX"] } },
 ];
 
+/** The time zone of the owner (issue 891): sets it in the status. An empty name or a name that the computer does not know is a 400. */
+export function zonePost(body: { zone?: string | null }): [number, unknown] {
+  const zone = body.zone ?? null;
+  if (zone !== null && zone !== "UTC" && !Intl.supportedValuesOf("timeZone").includes(zone)) return [400, { error: `not a time zone: "${zone}"` }];
+  status.time_zone = zone ?? "Europe/London";
+  status.time_zone_set = zone !== null;
+  return [200, { time_zone: status.time_zone, time_zone_set: status.time_zone_set }];
+}
+
 export function noticePost(path: string): [number, unknown] | undefined {
   const done = path.match(/^\/notices\/([^/?]+)\/done$/);
   if (!done) return undefined;
@@ -600,7 +611,9 @@ const jobPage = (state: string | null) => {
   const list = Object.values(jobs)
     .filter((j) => (state && state !== "open" ? j.state === state : j.state !== "done"))
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
-  return { jobs: list, next: null };
+  // The newest session of each working job (issue 791), as the API gives it.
+  const sessions = Object.fromEntries(list.filter((j) => j.state === "working").map((j) => [j.id, jobDetails[j.id]?.session ?? null]));
+  return { jobs: list, next: null, sessions };
 };
 
 /** The stop switch of the fixtures (docs/specs/2026-11-17-stop.md). */

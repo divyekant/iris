@@ -2,7 +2,7 @@
 
 - Date: 2026-11-25
 - Card: none (open-issues sweep of 2026-11-25, session group: issues #505 and #406)
-- Status: Draft
+- Status: Built (read paths); allow_local to come
 
 ## Problem
 
@@ -70,6 +70,16 @@ checks it.
 **Invariant.** No read path shows an object of a protected folder: the
 data folder, a home folder as a whole, or a folder of system state.
 
+**Who the checks hold against.** The checks hold against a wrong or
+careless `agents.toml` and against the agent of a session, which cannot
+rename or mount a host file. A process of the person on the host has the
+rights of the engine: it can read the data folder directly, so a race by
+such a process (for example a rename exchange of a read path and a
+file of the data folder between two checks) gives it nothing new and is
+out of scope. The helper still binds the opened object, and compares its
+current path (`/proc/self/fd/<n>`) with the checked real path, so a
+change of the path between the checks stops the start.
+
 **The home folders.** `HOME` can be absent or wrong (a service, or a data
 folder that `IRIS_DATA` or `--data` sets). So the protected home folders
 are each of these that exists: the real path of `HOME` of the engine, the
@@ -112,6 +122,12 @@ The launch refuses the run, with the path and the reason, if:
   through a read-only bind, because a network namespace does not block a
   Unix socket. The walk does not follow links, and it stops with a
   refusal after 200,000 entries;
+- the tree of the path holds a regular file with more than one hard link
+  on the device of the data folder or of a home folder. A hard link shows
+  a file of a protected folder under a second name, and the place checks
+  compare names. A hard link stays on one device, so a file on another
+  device passes. A tool folder that a package manager filled with hard
+  links (for example the store of `pnpm`) on that device is refused;
 - the tree of the path holds a mount point. `bwrap` binds a tree with its
   mounts, and a nested mount has a place of its own that the checks above
   do not compare. The walk compares the mount ID of each entry (`statx`
@@ -140,13 +156,17 @@ launch takes a new egress port in that case.
   mount, a process of the person can change a part of the path into a
   link. So the hold helper opens each read path again, just before it
   starts `bwrap`, with `openat2` and `RESOLVE_NO_SYMLINKS` (`O_PATH`):
-  the open fails if a part of the path is a link. The helper checks that
-  the open file is on the same device and inode that the launch checked,
-  then gives the file descriptor to `bwrap` with `--ro-bind-fd <fd>
-  <real>`. `bwrap` mounts the object of the descriptor, not a path. If
+  the open fails if a part of the path is a link. The helper then runs
+  each check of the launch again on the object of the descriptor (its
+  place, the protected folders and the walk), and gives the descriptor to
+  `bwrap` with `--ro-bind-fd <fd> <real>`. The invariant needs no compare
+  with the object of the launch: an object that passes each check shows
+  no protected folder. If another folder takes the path, the session
+  sees that folder only if it passes each check, as a change of
+  `agents.toml` would. `bwrap` mounts the object of the descriptor, not a path. If
   an open or a check fails, no session starts. `bwrap` has
-  `--ro-bind-fd` since version 0.5.0; the check of the isolation refuses
-  an older `bwrap` when an adapter has read paths.
+  `--ro-bind-fd` since version 0.5.0. An older `bwrap` refuses the
+  unknown option and exits, so no session starts (fail closed).
 - The binds come after the system folders, the private home and the
   program files, and before the empty mount of the data folder. So a read
   path that holds a part of the data folder cannot show it (the check
@@ -209,12 +229,13 @@ fails at its first call.
 | `HOME` absent or wrong, and a read path that is or holds the home folder of the user database (for example `/home/alice`) | The run is refused, with the path | launch test with `HOME` unset |
 | The user database gives no home folder for the user of the engine | The run of an adapter with read paths is refused | unit test |
 | A read path with a socket, a FIFO or a device in its tree | The run is refused, with the path of the entry | launch test |
+| A read path with a hard link to a file of the data folder | The run is refused, with the path of the entry | unit test |
 | A read path with a mount point in its tree, also a bind mount on the same device | The run is refused, with the path of the entry | launch test (Linux: a bind mount in a private mount namespace of the test, if the test can make one; else a unit test of the mount ID compare) |
 | A kernel that gives no mount ID (`STATX_MNT_ID`) | The run of an adapter with read paths is refused | unit test |
 | A tree of more than 200,000 entries | The run is refused | launch test |
 | A part of a read path that changes into a link after the launch checks | Linux: the open of the helper fails, and no session starts. macOS: Seatbelt checks the real path at each access | Linux helper test with a swap between the check and the open |
-| A read path that changes to another object (other device or inode) after the launch checks | The helper refuses it, and no session starts | Linux helper test |
-| `bwrap` older than 0.5.0 and an adapter with read paths | The check refuses the run | unit test of the version parse |
+| A read path that changes to another folder after the launch checks | The helper checks the new folder: a protected or unsafe folder stops the start; a clean folder is bound | Linux helper test with a swap to the data folder |
+| `bwrap` older than 0.5.0 and an adapter with read paths | `bwrap` refuses the option and exits; no session starts | not testable in CI (the CI has 0.9) |
 | A write to a read path | The system refuses it (read-only bind) | Linux sandbox test |
 | A connection to a local port other than `allow_local` | Refused: no listener in the namespace (Linux), the profile denies it (macOS) | Linux sandbox test |
 | `allow_local` with no server on the port | The relay closes the connection | Linux sandbox test |

@@ -170,8 +170,10 @@ the engine has them: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 adapters pass `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` (a token
 of `claude setup-token`, for a Claude subscription) (`claude-code`), and
 `OPENAI_API_KEY` and `CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
-mailbox. The Linux sandbox shows no host folder other than the workspace
-and the program files: `HOME` is an empty private folder, and a
+mailbox. The Linux sandbox shows no host folder other than the workspace,
+the program files and the read paths of an `agents.toml` adapter
+(`docs/specs/2026-11-25-agents-read-paths-local-port.md`; the built-in
+adapters have none): `HOME` is an empty private folder, and a
 `CODEX_HOME` outside the view is not visible. So the agent tool reads no
 settings or login files of the person, and authenticates only with a key
 variable (sandbox spec, "Files"; known limit with an issue). A session with an egress port also gets `HTTPS_PROXY` and
@@ -499,8 +501,11 @@ The one exception is the egress port of the session (see
 [Model egress](#model-egress)).
 It shows the agent only the workspace (read and write), a private empty
 home and `/tmp` (read and write), and the programs and system files of the
-sandbox spec (read only). It shows no settings or credential file of the
-person. It ends each process in it when the session ends: on Linux by the
+sandbox spec (read only), and the read paths that the person lists for an
+`agents.toml` adapter (read only;
+`docs/specs/2026-11-25-agents-read-paths-local-port.md`). It shows no
+settings or credential file of the person, other than a file that the
+person puts in a read path. It ends each process in it when the session ends: on Linux by the
 lifetime rule, on macOS by `stop` before the reap (the macOS exception
 below).
 

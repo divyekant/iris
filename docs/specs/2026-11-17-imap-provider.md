@@ -30,8 +30,12 @@ choose it for the account.
   setting of the provider spec, section 6. `create_draft`, `draft_raw`,
   `drafts_with_id` and `send_draft` give a definite rejection
   (`Error::Api` status 400, reason `notSupported`) until a later card.
-- Moves (archive, inbox, trash, untrash, folder labels). The provider spec
-  (section 4) says that a provider with location IDs refuses them.
+- Moves through `modify`, `trash` and `untrash`, and folder labels. These
+  calls refuse each move (section 7). Archive, inbox, trash and untrash
+  move mail only through `move_plan` and `relocate`
+  (`docs/specs/2026-11-25-imap-moves.md`). Until the apply uses those two
+  calls (the next stage of that spec), the verbs stay refused for an IMAP
+  account.
 - A server without `CONDSTORE`. `profile` gives `Error::Api` status 400,
   reason `noCondstore`, so the account cannot sync. A full compare at each
   sync would be the only way, and the sync would need the old UID set,
@@ -223,7 +227,8 @@ needed. Each change of `SENT` or a label of `iris_store::DRAFT_OR_COPY`
 also clears `understood_at`.
 
 Each folder label has the kind `system`, a folder that the person made
-too: the provider refuses each folder change (section 7), and the
+too: `modify` refuses each folder change (section 7; only `relocate`
+moves mail, between inbox, archive and trash), and the
 provider spec (section 4) gives `system` to each folder that a provider
 cannot change as a user label. So a `label` action cannot target a
 folder. A message in the `\Archive` folder has its folder label, no
@@ -394,6 +399,7 @@ mirror does not have.
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
 | `create_label(name)` | `Api` 400 `notSupported`, also with the flag writes (limit issue #652). IMAP has no call that makes a keyword with no message: if the targets of the action are gone before the apply, a created label would have no `STORE` behind it, and the next `labels` would not list it. A label action can use a keyword that a folder lists in `FLAGS` or `PERMANENTFLAGS` (section 4). Its ID is the lowercase `kw:` ID, so the ledger and the undo use the same ID as `labels`, `minimal` and `changes` |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
+| `move_plan`, `relocate` (`location_ids` is true) | `archive`, `inbox`, `trash` and `untrash` with `UID MOVE` and `COPYUID`, on a server with `MOVE` and `UIDPLUS`: `docs/specs/2026-11-25-imap-moves.md`. `modify`, `trash` and `untrash` keep their refusal of each move |
 | drafts and send | `Api` 400 `notSupported` |
 
 A `modify` checks all IDs and labels before the first write. It then

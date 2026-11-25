@@ -117,10 +117,17 @@ pub struct Paths {
     pub tmp: PathBuf,
     /// The adapter program and the `iris` program.
     pub programs: Vec<PathBuf>,
+    /// The read paths of the adapter, which the launch checked
+    /// (`crate::read_paths`). Read only, with each file below them.
+    pub reads: Vec<PathBuf>,
+    /// The real path of the data folder. The profile denies it after the
+    /// read paths, as a second guard.
+    pub data_dir: PathBuf,
 }
 
 /// The macOS isolation.
 pub struct Seatbelt {
+    data_dir: PathBuf,
     sessions: PathBuf,
     /// The full SHA-256 of the real path of the data folder, in hex.
     tag: String,
@@ -144,6 +151,7 @@ impl Seatbelt {
         Ok(Self {
             tag,
             sessions: data_dir.join("sessions"),
+            data_dir,
             sys,
         })
     }
@@ -472,6 +480,8 @@ impl Isolation for Seatbelt {
             home: test.clone(),
             tmp: test,
             programs: vec!["/usr/bin/true".into()],
+            reads: Vec::new(),
+            data_dir: self.data_dir.clone(),
         };
         let mut argv: Vec<OsString> = vec![SANDBOX_EXEC.into()];
         argv.extend(sandbox_args(&paths, None));
@@ -517,6 +527,7 @@ impl Isolation for Seatbelt {
         egress_port: Option<u16>,
         program: &Path,
         args: &[String],
+        reads: &[PathBuf],
     ) -> Command {
         let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let program = real(program);
@@ -529,6 +540,8 @@ impl Isolation for Seatbelt {
                 .into_iter()
                 .flatten()
                 .collect(),
+            reads: reads.to_vec(),
+            data_dir: self.data_dir.clone(),
         };
         let mut a = sandbox_args(&paths, egress_port);
         a.push("/usr/bin/env".into());
@@ -700,6 +713,9 @@ pub fn profile(p: &Paths, egress_port: Option<u16>) -> (String, Vec<(String, Pat
     for f in &p.programs {
         reads.push(format!("(literal {})", param(f)));
     }
+    for r in &p.reads {
+        reads.push(format!("(subpath {})", param(r)));
+    }
     // Each folder above an allowed path, for the resolution of paths only.
     let mut above: Vec<PathBuf> = Vec::new();
     let allowed = SYSTEM_READS
@@ -707,6 +723,7 @@ pub fn profile(p: &Paths, egress_port: Option<u16>) -> (String, Vec<(String, Pat
         .chain(FILE_READS)
         .map(PathBuf::from)
         .chain(p.programs.iter().cloned())
+        .chain(p.reads.iter().cloned())
         .chain([p.workspace.clone(), p.home.clone(), p.tmp.clone()]);
     for path in allowed {
         for a in path.ancestors().skip(1) {
@@ -715,6 +732,11 @@ pub fn profile(p: &Paths, egress_port: Option<u16>) -> (String, Vec<(String, Pat
             }
         }
     }
+    let inside: Vec<PathBuf> = above
+        .iter()
+        .filter(|a| a.starts_with(&p.data_dir))
+        .cloned()
+        .collect();
     let above: Vec<String> = above
         .iter()
         .map(|a| format!("(literal {})", param(a)))
@@ -731,6 +753,21 @@ pub fn profile(p: &Paths, egress_port: Option<u16>) -> (String, Vec<(String, Pat
     s.push_str(&format!(
         "(allow network-outbound (remote unix-socket (path-literal {socket})))\n"
     ));
+    // The data folder is never readable through a read path. The folders
+    // of the session in it come back below, by their own real path.
+    if !p.reads.is_empty() {
+        let data = param(&p.data_dir);
+        s.push_str(&format!("(deny file-read* file-write* (subpath {data}))\n"));
+        // The folders above the workspace in the data folder, again for the
+        // resolution of paths only.
+        if !inside.is_empty() {
+            let lits: Vec<String> = inside
+                .iter()
+                .map(|a| format!("(literal {})", param(a)))
+                .collect();
+            s.push_str(&format!("(allow file-read-metadata {})\n", lits.join(" ")));
+        }
+    }
     // The second path of the user volume never gives access. The folders of
     // the session come after this rule, by their own real path.
     s.push_str("(deny file-read* file-write* (subpath \"/System/Volumes/Data\"))\n");

@@ -122,6 +122,9 @@ a caller that does not know the new rule cannot move mail.
 3. The `OK` answer must hold `[COPYUID <validity> <source uids> <target uids>]`
    (RFC 4315 section 3). Each target UID with the target `UIDVALIDITY` and
    the target folder name gives the new ID.
+   Each `COPYUID` of one call must give the same target `UIDVALIDITY`. A
+   change makes the new IDs of the earlier folders stale, so the result is
+   `Transport` (unknown).
 
 `UID MOVE` moves only UIDs that are in the selected source folder now. So
 the source folder is the condition of the move (provider spec, section 4):
@@ -266,6 +269,7 @@ write, or `Transport` (unknown) after the first write.
 | A lost connection during the plan read | no ledger entry, the action stays approved, nothing moves | `move_plan_transport_error` |
 | A new `UIDVALIDITY` before the first `UID MOVE` | `NotFound`, nothing sent | `move_uidvalidity` |
 | A new `UIDVALIDITY` after a `UID MOVE` of another folder | `Transport`, no more writes | `move_uidvalidity` |
+| A new target `UIDVALIDITY` between two `UID MOVE` commands | `Transport` (unknown) | `move_target_uidvalidity` |
 | `OK` with no `COPYUID`, or without each asked UID | `Transport` | `move_partial_copyuid` |
 | `NO` or `BAD` to `UID MOVE` | `Transport` | `move_refused_is_unknown` |
 | A lost answer after a `UID MOVE` that moved the message (old ID `NotFound`) | the recovery sets `listed = 'unknown'`, the entry ends `failed`, no second `UID MOVE`, no rebind | `move_unknown_is_not_retried` |

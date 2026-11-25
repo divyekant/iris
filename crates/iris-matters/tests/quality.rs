@@ -432,9 +432,9 @@ fn the_oracle_scores_one() {
     let (out, call, s) = measure("oracle", || Box::new(Oracle(set())));
     assert_all_sent(&call);
     assert!(call.usable);
-    print("oracle", &out, &s);
     assert_eq!(s.expected, 6 + 3 + 3 + 3);
     assert_eq!((s.precision(), s.recall()), (Some(1.0), Some(1.0)), "{s:?}");
+    print("oracle", &out, &s);
 }
 
 /// A real model of a local server, when `IRIS_EVAL_LOCAL_MODEL` names one.

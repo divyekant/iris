@@ -178,8 +178,21 @@ pub struct Message {
     /// sender with no row or no kind yet is a `stranger`. A hostile sender can
     /// send a message with no hostile mark.
     pub sender_kind: String,
+    /// The sender row of the `From` address when only the near-copy rule
+    /// makes it hostile, so the person can trust it (`POST
+    /// /api/senders/{id}/trust`, issue #49). `None` for each other sender.
+    pub near_copy: Option<NearCopy>,
     /// The items that are not gone and that have this message as a source.
     pub items: Vec<String>,
+}
+
+/// A sender that the near-copy rule marks hostile.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct NearCopy {
+    /// The `p-` ID of the sender row.
+    pub sender: String,
+    /// The known domain that the domain of the sender looks like.
+    pub of: String,
 }
 
 /// One section of the brief: the full count, and at most [`MAX_LIMIT`] items.
@@ -476,6 +489,7 @@ pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Me
         return Ok(None);
     };
     more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
+    more.near_copy = near_copy(c, summary.from.address.as_deref())?;
     // The same items as `GET /api/items/{id}` shows: none of hostile mail.
     let mut st = c.prepare_cached(concat!(
         "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
@@ -1233,6 +1247,28 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
     Ok(kind.unwrap_or_else(|| "stranger".into()))
 }
 
+/// The near-copy sender row of `address`: kind `hostile` from the engine
+/// (the near-copy rule is the only engine rule that gives `hostile`).
+fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<NearCopy>> {
+    let Some(address) = address else {
+        return Ok(None);
+    };
+    c.query_row(
+        "SELECT id, substr(basis, length('near copy of ') + 1) FROM sender
+          WHERE address = ?1 COLLATE NOCASE AND kind = 'hostile'
+            AND decided_by IS NOT 'person' AND basis LIKE 'near copy of %'
+          ORDER BY id LIMIT 1",
+        [address],
+        |r| {
+            Ok(NearCopy {
+                sender: format_id(Kind::Sender, r.get(0)?),
+                of: r.get(1)?,
+            })
+        },
+    )
+    .optional()
+}
+
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
 pub(crate) fn message_row(
@@ -1270,6 +1306,7 @@ pub(crate) fn message_row(
                             .and_then(|h| serde_json::from_str(&h).ok())
                             .unwrap_or_default(),
                         sender_kind: String::new(),
+                        near_copy: None,
                         items: Vec::new(),
                     },
                 ))

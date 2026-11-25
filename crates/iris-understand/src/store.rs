@@ -279,7 +279,7 @@ fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, phishing:
     a
 }
 
-/// The record of `message.fixed_rules` that the backfill of migration 57
+/// The record of `message.fixed_rules` that the backfill of migration 58
 /// writes when it cannot tell how the last run completed the message.
 const UNKNOWN_RULES: &str = "unknown";
 
@@ -328,13 +328,13 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
             [id],
             |r| r.get(0),
         )?;
-        // The rules that completed the last understanding (migration 57),
+        // The rules that completed the last understanding (migration 58),
         // also of pinned items; `None` when the model made an item.
         let rules: Option<String> =
             c.query_row("SELECT fixed_rules FROM message WHERE id = ?1", [id], |r| {
                 r.get(0)
             })?;
-        // `unknown`: the backfill of migration 57 could not tell how the
+        // `unknown`: the backfill of migration 58 could not tell how the
         // last run completed the message; the check runs it again.
         let unknown = rules.as_deref() == Some(UNKNOWN_RULES);
         let rules: Option<Vec<String>> =
@@ -742,7 +742,7 @@ pub struct Seen {
     from_name: Option<String>,
     from_addr: Option<String>,
     /// The gate of the sender (decision D29): its decline, and the row ID
-    /// and `gate_rev` of its row (migration 57). Each decline or reopen
+    /// and `gate_rev` of its row (migration 58). Each decline or reopen
     /// during the call is a changed input (#934).
     gate: (bool, Option<(i64, i64)>),
 }

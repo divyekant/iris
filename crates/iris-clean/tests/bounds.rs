@@ -252,6 +252,38 @@ fn memory_and_time_stay_bounded() {
     eprintln!("peak: {peak} bytes (PDF with many empty code maps)");
     assert!(peak < 16 * 1024 * 1024, "peak {peak}");
 
+    // Many pages, each with its own font and /Differences: the encoding
+    // tables stay inside their limit.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    for p in 0..4000u32 {
+        let (page, content, font) = (10 + 3 * p, 11 + 3 * p, 12 + 3 * p);
+        pdf.extend(
+            format!(
+                "{page} 0 obj<</Type /Page /Contents {content} 0 R /Resources <</Font <</F1 {font} 0 R>>>>>>endobj\n\
+                 {content} 0 obj<</Length 20>>stream\nBT /F1 9 Tf (ab) Tj\nendstream endobj\n\
+                 {font} 0 obj<</Encoding <</Differences [97 /quoteright /fi]>>>>endobj\n"
+            )
+            .bytes(),
+        );
+    }
+    for chunk in pdf.chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, clean) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF with 4,000 fonts with /Differences)");
+    assert!(peak < 12 * 1024 * 1024, "peak {peak}");
+    let text = clean.attachments[0].text.as_deref().unwrap_or("");
+    assert!(
+        text.starts_with("\u{2019}\u{fb01}"),
+        "{:?}",
+        &text[..text.len().min(40)]
+    );
+
     // A code map with one source code of 4 MiB.
     let mut raw = message(1000, 0);
     raw.truncate(raw.len() - b"--m--\r\n".len());

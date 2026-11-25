@@ -103,7 +103,7 @@ test("in the brief, an answered sender keeps its row and its Undo after the brie
   // After the accept, the engine gives a brief with Maria out of the gate and her ask under You owe.
   const after = { ...fx.brief, gate: { count: 2, senders: fx.gate.senders.slice(1), next: null } };
   const asked = serve((path) => (path === "brief" ? [200, after] : [200, row("p-71")]));
-  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], idle: [], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
   try {
     const gate = () => view.target.querySelector("#strangers").closest("section");
     [...gate().querySelectorAll("button")].find((b) => b.textContent.trim() === "Accept").click();
@@ -314,6 +314,21 @@ test("an answer with no reply of the engine says that Iris does not know if it s
     await until(() => text(view.target).includes("Iris does not know if it saved the answer. Reload the page to see."));
     assert.equal(buttons(view, "Accept").length, 3);
     assert.doesNotMatch(text(view.target), /Try again/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("an item at the gate with a reply draft shows Draft ready, as a brief line does (issue 478)", async () => {
+  const [maria, ...rest] = fx.gate.senders;
+  const marked = { ...maria, items: [{ ...maria.items[0], ready: ["draft"] }, maria.items[1]] };
+  const view = await mount("/src/views/Gate.svelte", { page: { ...fx.gate, senders: [marked, ...rest] }, declined: 0 });
+  try {
+    const pills = [...view.target.querySelectorAll(".asks .ready")];
+    assert.equal(pills.length, 1, "only the item with a ready draft");
+    assert.equal(text(pills[0]).trim(), "Draft ready");
+    assert.equal(pills[0].closest("li").querySelector("a").textContent, maria.items[0].title);
+    assert.equal(pills[0].closest("a"), null, "the pill is no link at the gate");
   } finally {
     view.destroy();
   }

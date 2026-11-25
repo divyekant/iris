@@ -142,6 +142,8 @@ export type Status = {
   waits_model?: number;
   /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
   time_zone?: string | null;
+  /** True when the owner set the time zone (`iris zone` or the Accounts page), false when it is the zone of the machine that runs Iris. */
+  time_zone_set?: boolean;
   /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
   model_retry_at?: string;
 };
@@ -427,7 +429,11 @@ export type Job = {
   question?: string;
   end?: "complete" | "cancel";
 };
-export type JobPage = { jobs: Job[]; next: string | null };
+/**
+ * `sessions`: the newest session of each working job of the page, by job ID, or null for a job with no session
+ * (issue 791). An engine from before the field leaves it out: then the list does not know the session.
+ */
+export type JobPage = { jobs: Job[]; next: string | null; sessions?: Record<string, JobSession | null> };
 /** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
 export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
@@ -640,6 +646,21 @@ function takeStatus(n: number, s: Status): boolean {
   access.accounts = accountNames(accounts);
   access.zone = s.time_zone ?? null;
   return true;
+}
+
+/** The answer of `POST /api/zone`: the time zone fields of the status. */
+export type Zone = Pick<Status, "time_zone" | "time_zone_set">;
+
+/**
+ * Set the time zone of the owner (issue 891): an IANA name, or null for the zone of the machine that
+ * runs Iris. The answer is the newest status of the zone: it takes a status number when it arrives,
+ * so a status read that started before it cannot put the old zone back in `access.zone`.
+ */
+export async function postZone(zone: string | null): Promise<Zone> {
+  const z = await post<Zone>("zone", { zone });
+  statusTaken = ++statusStarted;
+  access.zone = z.time_zone ?? null;
+  return z;
 }
 
 async function statusRead(): Promise<[Status, boolean]> {

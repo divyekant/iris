@@ -2653,7 +2653,7 @@ fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
 /// (a correction) stays, and the mail waits for the model when the rule
 /// stops applying, as for an item that is not pinned. This holds right
 /// after the pin, after a new understanding of the message with the pinned
-/// item, and after the upgrade of a version 56 store (the backfill).
+/// item, and after the upgrade of a version 57 store (the backfill).
 #[test]
 fn a_pinned_rule_item_whose_rule_stops_applying_makes_the_mail_wait() {
     use iris_understand::store::recheck_fixed;
@@ -2709,7 +2709,7 @@ Your one-time code is 918273. It ends in 10 minutes.
                 sql(
                     &b,
                     "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
-                     ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 56;",
+                     ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
                     _dir,
@@ -2761,7 +2761,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     }
 }
 
-/// Issue #946, the backfill of migration 57: a pinned model item from an
+/// Issue #946, the backfill of migration 58: a pinned model item from an
 /// earlier run and a code-rule item from the last run. The record says
 /// that the rule completed the message, so a change to `stranger` makes
 /// the mail wait for the model.
@@ -2811,7 +2811,7 @@ Your one-time code is 918273. It ends in 10 minutes.
         .write(|tx| {
             Ok(tx.execute_batch(
                 "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
-                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 56;",
+                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
         .unwrap();
@@ -2834,7 +2834,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     );
 }
 
-/// Issue #946, the backfill of migration 57: a pinned code item, and a
+/// Issue #946, the backfill of migration 58: a pinned code item, and a
 /// later run as a stranger, before the upgrade. The store cannot show if
 /// the model read the message (a model run with no item) or not (the bug
 /// of #946). With no rule that applies now, the queued fixed check makes
@@ -2887,7 +2887,7 @@ Your one-time code is 918273. It ends in 10 minutes.
         .write(|tx| {
             Ok(tx.execute_batch(
                 "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
-                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 56;",
+                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
         .unwrap();
