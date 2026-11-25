@@ -2223,6 +2223,35 @@ fn a_mark_does_not_send_other_content() {
     assert_eq!(why.as_deref(), Some(iris_changeset::DRAFT_CHANGED));
 }
 
+/// A read-only sign-in stops a held send at its claim, also when the step
+/// that releases it started before the sign-in (issue #683).
+#[test]
+fn no_send_leaves_a_read_only_account() {
+    let b = setup("read-only");
+    let (s, _) = b.new_mail(AGED);
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE account SET state = 'read_only'", [])?))
+        .unwrap();
+    assert_eq!(b.release(s).unwrap(), Outcome::ReadOnly);
+    assert_eq!(b.sends(), 0);
+    assert_eq!(b.state(s), "held");
+}
+
+/// A read-only sign-in stops a draft change at its claim: no
+/// `drafts.update` and no ledger entry (issue #683).
+#[test]
+fn no_change_leaves_a_read_only_account() {
+    let b = setup("change-read-only");
+    let (change, _, _) = b.changed(new_text());
+    let before = b.row();
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE account SET state = 'read_only'", [])?))
+        .unwrap();
+    assert_eq!(b.apply(change).unwrap(), Outcome::ReadOnly);
+    assert_eq!(b.puts(), 0);
+    assert_eq!(b.row(), before);
+}
+
 impl Box {
     /// The row ID of the ledger entry of `action`.
     fn ledger_of(&self, action: i64) -> i64 {

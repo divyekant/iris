@@ -1355,10 +1355,11 @@ fn a_failed_label_create_checks_the_mode_again() {
 }
 
 /// A change of the action during the read of the labels stops the create:
-/// no label comes to Gmail from an action that does not apply (#223).
+/// no label comes to Gmail from an action that does not apply (#223). A
+/// read-only sign-in during the step stops it too (#683).
 #[test]
 fn a_change_before_the_label_create_makes_no_label() {
-    for change in ["observe", "withdraw", "stop"] {
+    for change in ["observe", "withdraw", "stop", "read_only"] {
         let b = setup(&format!("label-recheck-{change}"), 60, Some(APPLY_POLICY));
         let ms = b.messages(IN_INBOX, 2);
         let a = b.labelled("label", "Never", &ms);
@@ -1382,6 +1383,9 @@ fn a_change_before_the_label_create_makes_no_label() {
                                 iris_changeset::withdraw_in(tx, cs, None).unwrap();
                                 0
                             }
+                            "read_only" => {
+                                tx.execute("UPDATE account SET state = 'read_only'", [])?
+                            }
                             _ => 0,
                         };
                         Ok(())
@@ -1395,6 +1399,7 @@ fn a_change_before_the_label_create_makes_no_label() {
         match change {
             "observe" => assert_eq!(r.unwrap(), Outcome::Waiting),
             "stop" => assert_eq!(r.unwrap(), Outcome::Stopped),
+            "read_only" => assert_eq!(r.unwrap(), Outcome::ReadOnly),
             _ => assert!(matches!(r, Err(iris_apply::Error::NotApproved(_))), "{r:?}"),
         }
         assert_eq!(b.calls("/labels"), 0, "{change}");
