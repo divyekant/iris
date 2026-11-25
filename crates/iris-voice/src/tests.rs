@@ -2130,3 +2130,33 @@ fn a_snapshot_reads_one_state_of_the_thread() {
     let next = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
     assert_eq!(next.count, s.count + 1);
 }
+
+/// A message with an older date that comes after the draft (a late sync)
+/// makes the draft stale, also after understanding reads it (#479). A
+/// draft of an older build (no `seen`) keeps the rules of `based_on`.
+#[test]
+fn a_late_older_message_makes_the_draft_stale() {
+    let (b, t) = mailbox("late-older");
+    write(&b.store, t, None, &Fake::new(r#"{"body": "ok"}"#), 1).unwrap();
+    assert!(ready(&b.store, t));
+    let old = msg(
+        "late-old",
+        "t1",
+        150,
+        "INBOX",
+        "ana@example.org",
+        "me@example.com",
+        Some("Old"),
+    );
+    b.store.put_messages(1, &[old]).unwrap();
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 1", [])?))
+        .unwrap();
+    // The newest message is the same, and each message is understood.
+    assert!(checks_pass_on(&b.store, t));
+    assert!(!ready(&b.store, t));
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE reply_draft SET seen = NULL", [])?))
+        .unwrap();
+    assert!(ready(&b.store, t));
+}

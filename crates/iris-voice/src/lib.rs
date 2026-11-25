@@ -251,9 +251,14 @@ fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
                                            WHERE json_extract(e.value, '$.item') = {i}))"
         )
     });
+    // No message that a reply can answer came after the draft, also not
+    // one with an older date (a late sync): `seen` is the highest message
+    // row ID of the thread at the save (#479).
+    let in_thread = messages_sql("d.thread_id");
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
            AND {fresh}
+           AND NOT EXISTS (SELECT 1 {in_thread} {ANSWERABLE} AND m.id > d.seen)
            AND (d.ask IS NULL OR d.ask = {key}) {mine})"
     )
 }
@@ -994,13 +999,13 @@ fn write_when(
                 return Ok(false);
             }
             tx.execute(
-                "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
-               created_at, ask)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                &format!("INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
+               created_at, ask, seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, (SELECT max(m.id) {IN_THREAD}))
              ON CONFLICT(thread_id) DO UPDATE SET
                based_on = excluded.based_on, intent = excluded.intent, body = excluded.body,
                model = excluded.model, prompt = excluded.prompt, samples = excluded.samples,
-               created_at = excluded.created_at, ask = excluded.ask",
+               created_at = excluded.created_at, ask = excluded.ask, seen = excluded.seen"),
                 params![
                     thread,
                     based_on,

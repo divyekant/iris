@@ -116,7 +116,7 @@ fn an_old_store_keeps_its_notices_and_a_job_move_adds_a_row() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 65);
+        assert_eq!(iris_store::schema_version(tx)?, 66);
         let rows: Vec<(i64, i64, Option<i64>)> = tx
             .prepare("SELECT id, message_id, done_at FROM notice ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
