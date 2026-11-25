@@ -30,8 +30,12 @@ choose it for the account.
   setting of the provider spec, section 6. `create_draft`, `draft_raw`,
   `drafts_with_id` and `send_draft` give a definite rejection
   (`Error::Api` status 400, reason `notSupported`) until a later card.
-- Moves (archive, inbox, trash, untrash, folder labels). The provider spec
-  (section 4) says that a provider with location IDs refuses them.
+- Moves through `modify`, `trash` and `untrash`, and folder labels. These
+  calls refuse each move (section 7). Archive, inbox, trash and untrash
+  move mail only through `move_plan` and `relocate`
+  (`docs/specs/2026-11-25-imap-moves.md`). Until the apply uses those two
+  calls (the next stage of that spec), the verbs stay refused for an IMAP
+  account.
 - A server without `CONDSTORE`. `profile` gives `Error::Api` status 400,
   reason `noCondstore`, so the account cannot sync. A full compare at each
   sync would be the only way, and the sync would need the old UID set,
