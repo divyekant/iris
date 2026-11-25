@@ -52,6 +52,28 @@ pub struct PolicyWrite {
     pub saved: Option<std::path::PathBuf>,
 }
 
+/// What [`Store::backup`] copied, and the drafts that it did not copy.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Backup {
+    /// The content files of the copy.
+    pub files: u64,
+    /// Each `drafts/` folder of a job workspace with a file that the copy
+    /// did not take (issue #1063), by job name.
+    pub skipped: Vec<SkippedDrafts>,
+}
+
+/// The drafts of one job workspace that a backup did not copy.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SkippedDrafts {
+    /// The `drafts/` folder in the data folder.
+    pub folder: std::path::PathBuf,
+    /// The names of the files over [`DRAFT_FILE_MAX`] bytes. At most
+    /// [`DRAFT_FILES_MAX`], because the copy reads only that many names.
+    pub large: Vec<std::ffi::OsString>,
+    /// The count of the files after the first [`DRAFT_FILES_MAX`] names.
+    pub more: u64,
+}
+
 /// What [`Store::clean_gone`] removed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Cleaned {
@@ -76,9 +98,10 @@ impl Store {
 
     /// Copy the data folder to `dest` while the engine runs (section 5.1).
     /// `dest` must not exist, or must be an empty folder. Gives the number
-    /// of content files in the copy. A content file that the database
-    /// refers to and that is not there is an error: the copy is not complete.
-    pub fn backup(&self, dest: &Path) -> Result<u64> {
+    /// of content files in the copy, and the drafts that the copy did not
+    /// take. A content file that the database refers to and that is not
+    /// there is an error: the copy is not complete.
+    pub fn backup(&self, dest: &Path) -> Result<Backup> {
         let _lock = self.backup_lock()?;
         // The copy holds the key and the mail.
         new_private_dir(dest)?;
@@ -144,7 +167,7 @@ impl Store {
 
         // The drafts of each job workspace (issue #350): the build makes the
         // other files of a workspace again from the store.
-        copy_drafts(&self.dir.join("workspaces"), &dest.join("workspaces"))?;
+        let skipped = copy_drafts(&self.dir.join("workspaces"), &dest.join("workspaces"))?;
 
         // Without the key, the copy cannot decrypt the secrets.
         copy_private(&self.dir.join("key"), &dest.join("key"))?;
@@ -153,7 +176,7 @@ impl Store {
             copy_private(&policy, &dest.join("policy.toml"))?;
         }
         sync_dir(dest)?;
-        Ok(files)
+        Ok(Backup { files, skipped })
     }
 
     /// Puts `text` at `policy.toml` (section 5.1), or no file for `None`,
@@ -598,15 +621,17 @@ fn copy_attachments(src: &Path, dest: &Path) -> Result<()> {
 /// so a folder with many entries does not grow the memory of the engine. A
 /// file that goes away, or that is not a regular file when the copy opens
 /// it, is not copied. A file that changes during the copy gives the bytes of
-/// one read, at most [`DRAFT_FILE_MAX`].
+/// one read, at most [`DRAFT_FILE_MAX`]. Gives the folders with a file
+/// that the copy did not take for its size or for the count.
 #[cfg(unix)]
-fn copy_drafts(src: &Path, dest: &Path) -> Result<()> {
+fn copy_drafts(src: &Path, dest: &Path) -> Result<Vec<SkippedDrafts>> {
     let Some(root) = dir_at(None, src.as_os_str())? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let mut any = false;
+    let mut skipped = Vec::new();
     // The engine makes each job folder; a session cannot add one here.
-    for job in smallest_names(&root, usize::MAX, true)? {
+    for job in smallest_names(&root, usize::MAX, true)?.0 {
         let Some(job_dir) = dir_at(Some(&root), &job)? else {
             continue;
         };
@@ -614,7 +639,12 @@ fn copy_drafts(src: &Path, dest: &Path) -> Result<()> {
             continue;
         };
         let to_job = dest.join(&job);
-        if copy_from(&drafts, &to_job.join("drafts"))? {
+        let (made, mut skip) = copy_from(&drafts, &to_job.join("drafts"))?;
+        if !skip.large.is_empty() || skip.more > 0 {
+            skip.folder = src.join(&job).join("drafts");
+            skipped.push(skip);
+        }
+        if made {
             // The new `drafts` entry is in the job folder, and the new job
             // entry is in `dest`: sync both before the backup says done.
             sync_dir(&to_job)?;
@@ -624,22 +654,32 @@ fn copy_drafts(src: &Path, dest: &Path) -> Result<()> {
     if any {
         sync_dir(dest)?;
     }
-    Ok(())
+    Ok(skipped)
 }
 
 #[cfg(not(unix))]
-fn copy_drafts(_src: &Path, _dest: &Path) -> Result<()> {
-    Ok(())
+fn copy_drafts(_src: &Path, _dest: &Path) -> Result<Vec<SkippedDrafts>> {
+    Ok(Vec::new())
 }
 
 /// Copy the drafts of one opened `drafts/` folder to `to_dir`. True if the
-/// copy made `to_dir`.
+/// copy made `to_dir`, and the files that it did not take (with no folder).
 #[cfg(unix)]
-fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
+fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<(bool, SkippedDrafts)> {
     let mut made = false;
-    for name in smallest_names(drafts, DRAFT_FILES_MAX, false)? {
-        let Some(bytes) = read_draft(drafts, &name)? else {
-            continue;
+    let (names, more) = smallest_names(drafts, DRAFT_FILES_MAX, false)?;
+    let mut skip = SkippedDrafts {
+        more,
+        ..SkippedDrafts::default()
+    };
+    for name in names {
+        let bytes = match read_draft(drafts, &name)? {
+            Draft::Bytes(b) => b,
+            Draft::Large => {
+                skip.large.push(name);
+                continue;
+            }
+            Draft::None => continue,
         };
         make_private_dir(to_dir)?;
         made = true;
@@ -650,7 +690,7 @@ fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
     if made {
         sync_dir(to_dir)?;
     }
-    Ok(made)
+    Ok((made, skip))
 }
 
 /// Open the folder `name` relative to `parent` (or the path `name` with no
@@ -690,15 +730,16 @@ fn open_at(
 }
 
 /// The `max` smallest names (by byte order) of the entries of the folder
-/// `dir` that can be folders (`dirs`) or regular files, sorted. The scan
-/// keeps at most `max` names in memory. The caller checks the type again
+/// `dir` that can be folders (`dirs`) or regular files, sorted, and the
+/// count of the other such entries. The scan keeps at most `max` names in
+/// memory. The caller checks the type again
 /// at the open, because an entry can change after the scan.
 #[cfg(unix)]
 fn smallest_names(
     dir: &std::os::fd::OwnedFd,
     max: usize,
     dirs: bool,
-) -> io::Result<Vec<std::ffi::OsString>> {
+) -> io::Result<(Vec<std::ffi::OsString>, u64)> {
     use std::os::fd::IntoRawFd;
     use std::os::unix::ffi::OsStrExt;
     // `fdopendir` takes the descriptor, so give it a copy.
@@ -720,6 +761,7 @@ fn smallest_names(
     // SAFETY: `d.0` is an open DIR.
     unsafe { libc::rewinddir(d.0) };
     let mut heap = std::collections::BinaryHeap::new();
+    let mut more = 0u64;
     loop {
         // `readdir` gives NULL at the end and on an error: only errno tells
         // the two apart, so a failed read does not look like the end.
@@ -752,13 +794,15 @@ fn smallest_names(
         heap.push(name);
         if heap.len() > max {
             heap.pop();
+            more += 1;
         }
     }
-    Ok(heap
+    let names = heap
         .into_sorted_vec()
         .into_iter()
         .map(|n| std::ffi::OsStr::from_bytes(&n).to_owned())
-        .collect())
+        .collect();
+    Ok((names, more))
 }
 
 #[cfg(unix)]
@@ -776,26 +820,38 @@ fn set_errno(v: libc::c_int) {
     }
 }
 
-/// The bytes of the file `name` of the opened folder `dir`, or `None` if it
-/// is gone, is not a regular file, or has more than [`DRAFT_FILE_MAX`] bytes.
+/// A file of `drafts/` as the copy reads it.
 #[cfg(unix)]
-fn read_draft(dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> Result<Option<Vec<u8>>> {
+enum Draft {
+    Bytes(Vec<u8>),
+    /// A regular file of more than [`DRAFT_FILE_MAX`] bytes.
+    Large,
+    /// Gone, or not a regular file.
+    None,
+}
+
+/// The bytes of the file `name` of the opened folder `dir`.
+#[cfg(unix)]
+fn read_draft(dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> Result<Draft> {
     use std::io::Read as _;
     // The type check below refuses a folder, a FIFO and a device.
     let Some(fd) = open_at(Some(dir), name, 0)? else {
-        return Ok(None);
+        return Ok(Draft::None);
     };
     let file = File::from(fd);
     let m = file.metadata()?;
-    if !m.is_file() || m.len() > DRAFT_FILE_MAX {
-        return Ok(None);
+    if !m.is_file() {
+        return Ok(Draft::None);
+    }
+    if m.len() > DRAFT_FILE_MAX {
+        return Ok(Draft::Large);
     }
     let mut bytes = Vec::new();
     file.take(DRAFT_FILE_MAX + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > DRAFT_FILE_MAX {
-        return Ok(None);
+        return Ok(Draft::Large);
     }
-    Ok(Some(bytes))
+    Ok(Draft::Bytes(bytes))
 }
 
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
@@ -840,7 +896,7 @@ mod tests {
         std::os::unix::fs::symlink(&data, &drafts).unwrap();
 
         let to = d.join("out/drafts");
-        assert!(copy_from(&pinned, &to).unwrap());
+        assert!(copy_from(&pinned, &to).unwrap().0);
         assert_eq!(fs::read(to.join("key")).unwrap(), b"draft");
         // A new open of the path refuses the link.
         assert!(dir_at(Some(&job), OsStr::new("drafts")).unwrap().is_none());
@@ -856,13 +912,13 @@ mod tests {
         }
         fs::create_dir(d.join("0000a")).unwrap();
         let dir = dir_at(None, d.as_os_str()).unwrap().unwrap();
-        let names = smallest_names(&dir, 3, false).unwrap();
+        let (names, more) = smallest_names(&dir, 3, false).unwrap();
         // The folder `0000a` is not a file, so it takes no place.
         assert_eq!(names, ["0000", "0001", "0002"]);
-        assert_eq!(
-            smallest_names(&dir, DRAFT_FILES_MAX, false).unwrap().len(),
-            DRAFT_FILES_MAX
-        );
+        assert_eq!(more, 597);
+        let (names, more) = smallest_names(&dir, DRAFT_FILES_MAX, false).unwrap();
+        assert_eq!(names.len(), DRAFT_FILES_MAX);
+        assert_eq!(more, 600 - DRAFT_FILES_MAX as u64);
         let _ = fs::remove_dir_all(&d);
     }
 }

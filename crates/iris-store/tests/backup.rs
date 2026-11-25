@@ -323,7 +323,7 @@ fn a_backup_restores_to_a_new_folder_with_secrets_and_policy() {
         .put_messages(acc, &[msg(&store, "a", b"raw a", "apple")])
         .unwrap()[0];
 
-    assert_eq!(store.backup(&dest.0).unwrap(), 1);
+    assert_eq!(store.backup(&dest.0).unwrap().files, 1);
     drop(store);
     // The restore is the copy at a new path: the engine opens it as it is.
     let restored = Store::open(&dest.0).unwrap();
@@ -612,7 +612,23 @@ fn a_backup_keeps_the_drafts_of_each_job_and_only_safe_files() {
         fs::write(many.join(format!("d{i:04}.md")), "d").unwrap();
     }
 
-    store.backup(&dest.0).unwrap();
+    let report = store.backup(&dest.0).unwrap();
+    // Issue 1063: the report names each draft that the copy did not take.
+    assert_eq!(
+        report.skipped,
+        [
+            iris_store::SkippedDrafts {
+                folder: ws.join("j-1/drafts"),
+                large: vec!["big.md".into()],
+                more: 0,
+            },
+            iris_store::SkippedDrafts {
+                folder: ws.join("j-3/drafts"),
+                large: vec![],
+                more: 5,
+            },
+        ]
+    );
     let copy = dest.0.join("workspaces");
     assert_eq!(
         fs::read_to_string(copy.join("j-1/drafts/reply.md")).unwrap(),
