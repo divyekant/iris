@@ -1970,3 +1970,87 @@ fn a_change_in_writing_recovers_after_a_restart() {
         }
     }
 }
+
+impl Box {
+    /// Move the time of the ledger entry of `action` back by `ms`, as a
+    /// clock does. `ledger_change` forbids a change of `at`: drop and
+    /// remake the trigger in this test store only.
+    fn age_entry(&self, action: i64, ms: i64) {
+        self.store
+            .write(|tx| {
+                let sql: String = tx.query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name = 'ledger_change'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                tx.execute_batch("DROP TRIGGER ledger_change")?;
+                tx.execute(
+                    "UPDATE ledger SET at = at - ?2 WHERE action_id = ?1",
+                    params![action, ms],
+                )?;
+                tx.execute_batch(&sql)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+/// The person edits the draft in Gmail between the update and the read
+/// back (change spec, section 7): the entry fails with the reason of the
+/// window, and the row keeps the text of the person.
+#[test]
+fn an_edit_during_the_update_is_kept() {
+    let b = setup("change-during");
+    let (change, _, provider) = b.changed(new_text());
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    let edited = String::from_utf8(raw).unwrap().replace("Here.", "Edited.");
+    let fake = b.fake.clone();
+    let id = provider.clone();
+    b.fake.before_next_matching("PUT", move || {
+        let f = fake.clone();
+        fake.before_next_matching("GET /gmail/v1/users/me/drafts/", move || {
+            assert!(f.edit_draft(&id, edited.as_bytes()));
+        });
+    });
+    match b.apply(change) {
+        Ok(Outcome::Failed { error, .. }) => assert_eq!(error, iris_apply::CHANGE_DURING),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 1);
+    assert!(b.row().1.contains("Edited."), "{}", b.row().1);
+}
+
+/// Recovery when the draft ID is gone and each read of the lookup by
+/// Message-ID fails: the entry waits, and fails after 24 hours with no
+/// second call (change spec, section 4).
+#[test]
+fn a_failed_lookup_ends_after_a_day() {
+    let b = setup("change-lookup");
+    let (change, _, provider) = b.changed(new_text());
+    let fake = b.fake.clone();
+    b.fake.before_next_matching("PUT", move || {
+        fake.fail_next_write(&[503], false);
+        fake.fail_next_matching("GET /gmail/v1/users/me/drafts/", 400);
+    });
+    assert!(matches!(b.apply(change), Ok(Outcome::Pending)));
+    assert!(b.fake.delete_draft(&provider));
+    let recover = |b: &Box| {
+        b.fake
+            .fail_next_matching("GET /gmail/v1/users/me/drafts?", 400);
+        let (t, mut renew) = b.token();
+        let mut token = Token {
+            token: t,
+            renew: &mut renew,
+            refused: false,
+        };
+        iris_apply::recover_step(&b.store, &b.gmail, &mut token, b.account).unwrap();
+    };
+    recover(&b);
+    assert_eq!(b.entry(change).0, "writing");
+    b.age_entry(change, 24 * 60 * 60 * 1000 + 1);
+    recover(&b);
+    let (state, _, _, error) = b.entry(change);
+    assert_eq!(state, "failed");
+    assert_eq!(error.as_deref(), Some(iris_apply::CHANGE_UNKNOWN));
+    assert_eq!(b.puts(), 1);
+}

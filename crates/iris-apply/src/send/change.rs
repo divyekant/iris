@@ -25,6 +25,8 @@ pub const NEW_MAIL: &str = "A new mail came into this thread. Write a new reply.
 /// An attachment of the stored draft has no file (section 1): the undo
 /// could not compose the old draft again.
 pub const OLD_FILE: &str = "A file of the draft is not in Iris. Change it in Gmail.";
+/// The read back after a call that applied has another hash (section 7).
+pub const DURING: &str = "The draft changed at Gmail during the change. Look at it in Gmail.";
 /// Recovery cannot show that the call applied (section 4, step 3).
 pub const UNKNOWN: &str = "Iris does not know if the draft changed. Look at it in Gmail.";
 
@@ -188,7 +190,7 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
             // Step 6: read the draft back. A failed read leaves the row in
             // `writing`, and recovery completes it.
             match run.call(|g, t| g.draft_raw(t, &new.id)) {
-                Ok(back) => settle(run, ledger, &new.id, &back.raw.unwrap_or_default()),
+                Ok(back) => settle(run, ledger, &new.id, &back.raw.unwrap_or_default(), DURING),
                 Err(_) => Ok(Outcome::Pending),
             }
         }
@@ -304,9 +306,10 @@ fn deny_in(tx: &Connection, action: i64, why: &str, t: i64) -> rusqlite::Result<
 
 /// The draft `id` at Gmail, with the message `raw`, after the call or in
 /// recovery. Its hash is the new hash of the ops: the call applied (step
-/// 6). Else the row is `failed` with [`UNKNOWN`], and the draft row
-/// refreshes from Gmail (section 4, step 3).
-fn settle(run: &mut Run<'_, '_>, ledger: i64, id: &str, raw: &[u8]) -> Result<Outcome> {
+/// 6). Else the row is `failed` with `why` ([`DURING`] after a call that
+/// applied, [`UNKNOWN`] in recovery), and the draft row refreshes from
+/// Gmail and keeps the draft ID `id` (sections 4 and 7).
+fn settle(run: &mut Run<'_, '_>, ledger: i64, id: &str, raw: &[u8], why: &str) -> Result<Outcome> {
     let (ops, post) = row(run.store, ledger)?;
     let Ops::Update {
         draft,
@@ -328,16 +331,21 @@ fn settle(run: &mut Run<'_, '_>, ledger: i64, id: &str, raw: &[u8]) -> Result<Ou
         run.store.write(|tx| {
             let n = tx.execute(
                 "UPDATE ledger SET state = 'failed', error = ?2 WHERE id = ?1 AND state = 'writing'",
-                params![ledger, UNKNOWN],
+                params![ledger, why],
             )?;
             if n == 1 {
+                // Each later read and send uses the ID that Gmail gave last.
+                tx.execute(
+                    "UPDATE draft SET provider_id = ?2 WHERE id = ?1",
+                    params![draft, id],
+                )?;
                 refresh(tx, draft, &message_id, read, raw, new_ids, t)?;
             }
             Ok(())
         })?;
         return Ok(Outcome::Failed {
             counts: Default::default(),
-            error: UNKNOWN.into(),
+            error: why.into(),
         });
     }
     let read = read.expect("applied");
@@ -386,19 +394,33 @@ pub(super) fn recover(run: &mut Run<'_, '_>, ledger: i64, at: i64) -> Result<Out
     else {
         unreachable!("a change row")
     };
+    // A read that fails: wait for a later run, and fail after 24 hours.
+    let read_failed = |run: &Run<'_, '_>| -> Result<Outcome> {
+        if now() - at >= UNKNOWN_MS {
+            end(run, ledger, "failed", Some(UNKNOWN.into()), false)
+        } else {
+            Ok(Outcome::Pending)
+        }
+    };
     match run.call(|g, t| g.draft_raw(t, &provider_id)) {
-        Ok(d) => settle(run, ledger, &provider_id, &d.raw.unwrap_or_default()),
+        Ok(d) => settle(
+            run,
+            ledger,
+            &provider_id,
+            &d.raw.unwrap_or_default(),
+            UNKNOWN,
+        ),
         // Gmail can give the changed draft a new ID: look for it by the
         // Message-ID. Exactly one draft with the new hash is the change.
         Err(GmailError::NotFound) => {
-            let found = run
-                .call(|g, t| g.drafts_with_id(t, &message_id))
-                .map_err(Error::Provider)?;
+            let Ok(found) = run.call(|g, t| g.drafts_with_id(t, &message_id)) else {
+                return read_failed(run);
+            };
             let mut hits = Vec::new();
             for f in found {
-                let back = run
-                    .call(|g, t| g.draft_raw(t, &f.id))
-                    .map_err(Error::Provider)?;
+                let Ok(back) = run.call(|g, t| g.draft_raw(t, &f.id)) else {
+                    return read_failed(run);
+                };
                 let raw = back.raw.unwrap_or_default();
                 let same = iris_compose::read(&raw, &run.address)
                     .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == hash);
@@ -407,13 +429,10 @@ pub(super) fn recover(run: &mut Run<'_, '_>, ledger: i64, at: i64) -> Result<Out
                 }
             }
             match hits.as_slice() {
-                [(id, raw)] => settle(run, ledger, id, raw),
+                [(id, raw)] => settle(run, ledger, id, raw, UNKNOWN),
                 _ => end(run, ledger, "failed", Some(UNKNOWN.into()), false),
             }
         }
-        Err(_) if now() - at >= UNKNOWN_MS => {
-            end(run, ledger, "failed", Some(UNKNOWN.into()), false)
-        }
-        Err(_) => Ok(Outcome::Pending),
+        Err(_) => read_failed(run),
     }
 }

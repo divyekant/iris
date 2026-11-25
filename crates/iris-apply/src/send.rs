@@ -19,8 +19,8 @@ use iris_store::Store;
 
 mod change;
 pub use change::{
-    CHANGED as CHANGE_CHANGED, GONE as CHANGE_GONE, NEW_MAIL as CHANGE_NEW_MAIL,
-    OLD_FILE as CHANGE_OLD_FILE, UNKNOWN as CHANGE_UNKNOWN,
+    CHANGED as CHANGE_CHANGED, DURING as CHANGE_DURING, GONE as CHANGE_GONE,
+    NEW_MAIL as CHANGE_NEW_MAIL, OLD_FILE as CHANGE_OLD_FILE, UNKNOWN as CHANGE_UNKNOWN,
 };
 
 /// The hold delay of a send after its approval (spec 2, section 7.5).
