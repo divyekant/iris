@@ -174,6 +174,27 @@
     }
   }
 
+  // Issue 208: the person changes the text of a send of the request. The press denies this
+  // send only, then the write view opens its draft (#/write/d-N), as "Change and send" of the
+  // Outbox. The next press of Send there is a new write of the person, with its own hold.
+  async function changeSend(a: (typeof actions)[number], draft: string) {
+    // A deny is a decision too: only after each row of each waiting change shows (spec 2 section 5.5).
+    if (!ready) return;
+    busy = true;
+    problem = saved = "";
+    try {
+      await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: [{ revision: a.revision, n: a.n, approve: false, hash: a.hash }] }));
+      location.hash = href.change(draft);
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      if (status === 409) await refresh("Iris did not deny this send, because the request changed after you opened it. Here it is as it is now.");
+      else if (status === undefined || status >= 500) await refresh("Iris does not know if it denied this send. Here is the request as it is now.");
+      else problem = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   // One request for each decision: the engine approves the ticked changes, with the hash that
   // this screen showed, and denies the others. If one is refused, it writes nothing (409).
   // Spec 2 section 5.5: the person can withdraw an open request. The store cancels each change
@@ -342,6 +363,10 @@
             {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}
             {#if !approves(a)}<p class="denied">Iris will deny this change.</p>{/if}
             {#if d}{@render draft(d)}{/if}
+            {#if a.verb === "send" && d?.readable && d.draft}
+              {@const id = d.draft}
+              <button type="button" class="quiet change" disabled={!ready} onclick={() => changeSend(a, id)}>Deny this send and change it yourself</button>
+            {/if}
             {@render lines(a)}
           </div>
         </li>
