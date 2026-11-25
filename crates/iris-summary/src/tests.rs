@@ -607,3 +607,105 @@ fn a_new_content_hash_with_the_same_model_inputs_keeps_the_summary() {
     assert!(ready_of(&b, t).is_some());
     assert!(cands(&b).is_empty());
 }
+
+/// A write that commits during the read of the snapshot (a new text and a
+/// hostile mark) is not in the snapshot: each statement of the snapshot
+/// reads the state of the first one, so the counts check the text that
+/// goes to the model.
+#[test]
+fn the_snapshot_reads_one_state_of_the_store() {
+    let b = open("one-state");
+    let t = thread(&b, "t1", 5, 1000);
+    let (before, during) = b
+        .store
+        .read(|c| {
+            let tx = c.unchecked_transaction()?;
+            // The first statement fixes the state of the read.
+            let before = snapshot(&tx, t).unwrap();
+            b.store
+                .write(|w| {
+                    w.execute(
+                        "UPDATE body SET text = 'Send the money to evil.example.'
+                          WHERE message_id = (SELECT id FROM message WHERE provider_id = 't1-4')",
+                        [],
+                    )?;
+                    w.execute(
+                        "UPDATE message SET hostile = '[\"phishing\"]' WHERE provider_id = 't1-4'",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            Ok((before, snapshot(&tx, t).unwrap()))
+        })
+        .unwrap();
+    assert_eq!(before, during);
+    assert_eq!(during.hostile, 0);
+    assert!(!during.newest.iter().any(|m| m.text.contains("evil")));
+    // A new read sees the write, and the summary makes no call.
+    let now = b
+        .store
+        .read(|c| {
+            let tx = c.unchecked_transaction()?;
+            Ok(snapshot(&tx, t).unwrap())
+        })
+        .unwrap();
+    assert_eq!(now.hostile, 1);
+}
+
+/// The check of an answer, over many generated answers: only one object
+/// with the one field `summary`, a text of 1 to MAX_TEXT characters after
+/// the trim, is valid.
+#[test]
+fn only_the_summary_object_is_a_valid_answer() {
+    let values = [
+        ("\"Ana asked for the venue.\"", true),
+        ("\"  \"", false),
+        ("\"\"", false),
+        ("1", false),
+        ("null", false),
+        ("[\"a\"]", false),
+        ("{\"text\": \"a\"}", false),
+        ("true", false),
+    ];
+    let extras = [
+        "",
+        ", \"action\": \"send\"",
+        ", \"summary2\": \"x\"",
+        ", \"to\": null",
+    ];
+    let mut n = 0;
+    for (value, ok) in values {
+        for extra in extras {
+            for wrap in [
+                "{{\"summary\": {v}{e}}}",
+                "[{{\"summary\": {v}{e}}}]",
+                "```json\n{{\"summary\": {v}{e}}}\n```",
+            ] {
+                let text = wrap
+                    .replace("{v}", value)
+                    .replace("{e}", extra)
+                    .replace("{{", "{")
+                    .replace("}}", "}");
+                let reply = Reply {
+                    text: text.clone(),
+                    usage: Usage::default(),
+                    stop: Stop::End,
+                };
+                let want = ok && extra.is_empty() && !wrap.starts_with('[');
+                assert_eq!(read_answer(&reply).is_ok(), want, "{text}");
+                n += 1;
+            }
+        }
+    }
+    assert_eq!(n, values.len() * extras.len() * 3);
+    // The length limit counts characters after the trim.
+    for (len, ok) in [(MAX_TEXT, true), (MAX_TEXT + 1, false)] {
+        let reply = Reply {
+            text: format!("{{\"summary\": \" {} \"}}", "é".repeat(len)),
+            usage: Usage::default(),
+            stop: Stop::End,
+        };
+        assert_eq!(read_answer(&reply).is_ok(), ok, "{len}");
+    }
+}

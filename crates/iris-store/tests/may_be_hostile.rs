@@ -56,8 +56,8 @@ const ALLOWED: [(&str, usize, &str); 10] = [
     ),
     (
         "iris-summary/src/tests.rs",
-        2,
-        "the tests of a message with new content end its link check, as the check does",
+        3,
+        "the tests of a message with new content end its link check, as the check does; the snapshot test writes a hostile mark",
     ),
 ];
 

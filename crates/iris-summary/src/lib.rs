@@ -23,7 +23,7 @@ use std::fmt;
 use iris_store::Store;
 use iris_understand::Model;
 use iris_voice::{fresh_sql, messages_sql, ANSWERABLE, HOSTILE, NEWEST};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 /// The version of the prompt. `thread_summary.prompt` records it.
@@ -314,7 +314,10 @@ struct Snapshot {
     newest: Vec<Msg>,
 }
 
-fn snapshot(c: &Connection, thread: i64) -> Result<Snapshot> {
+/// The snapshot of `thread`. It takes a transaction, so each of its
+/// statements reads the same state of the store: the hostile and unread
+/// counts check the same text that goes to the model.
+fn snapshot(c: &Transaction<'_>, thread: i64) -> Result<Snapshot> {
     let owner: Option<String> = c
         .query_row(
             "SELECT a.address FROM thread t JOIN account a ON a.id = t.account_id WHERE t.id = ?1",
@@ -406,10 +409,14 @@ fn read_answer(reply: &iris_model::Reply) -> Result<String> {
     let v = reply
         .json()
         .map_err(|_| Error::BadAnswer("the answer is not JSON"))?;
-    let text = v
-        .get("summary")
-        .and_then(Value::as_str)
-        .ok_or(Error::BadAnswer("the answer has no text \"summary\""))?;
+    // Only the object of the instruction: one field, `summary`, a string.
+    let text = match v.as_object() {
+        Some(o) if o.len() == 1 => o.get("summary").and_then(Value::as_str),
+        _ => None,
+    }
+    .ok_or(Error::BadAnswer(
+        "the answer is not the object {\"summary\": text}",
+    ))?;
     // The answer can repeat text of the mail: no control character but a
     // line break and a tab, so no escape sequence reaches a terminal.
     let text: String = text
@@ -440,7 +447,11 @@ pub fn summarize(
     now_ms: i64,
 ) -> Result<Saved> {
     let thread = candidate.thread;
-    let snap = store.read(|c| Ok(snapshot(c, thread)))??;
+    let snap = store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        Ok(snapshot(&tx, thread))
+        // The drop of `tx` ends the read.
+    })??;
     if snap.hostile > 0 {
         return Err(Error::Hostile);
     }
