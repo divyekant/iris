@@ -1454,30 +1454,22 @@ pub fn summary(store: &Store, id: &str, now: i64) -> Result<Option<Value>> {
     let Some(form) = FORMS.iter().find(|(_, k)| *k == kind).map(|(f, _)| *f) else {
         return Err(bad_id(id));
     };
+    // One statement reads the item and the summary: one snapshot.
+    let threads = format!(
+        "SELECT ({ORIGIN_THREAD}) FROM item WHERE id = ?1 AND form = ?2 AND {}",
+        summary_sql(now)
+    );
     Ok(store.read(|c| {
-        let thread: Option<i64> = c
-            .query_row(
-                &format!(
-                    "SELECT ({ORIGIN_THREAD}) FROM item
-                     WHERE id = ?1 AND form = ?2 AND {}",
-                    summary_sql(now)
-                ),
-                params![row, form],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let Some(thread) = thread else {
-            return Ok(None);
-        };
-        Ok(iris_summary::ready(c, thread)?.map(|s| {
-            serde_json::json!({
-                "text": s.text,
-                "based_on": iris_store::format_id(iris_store::Kind::Message, s.based_on),
-                "created": rfc3339(s.created_at),
-                "model": s.model,
-            })
-        }))
+        Ok(
+            iris_summary::ready_in(c, &threads, params![row, form])?.map(|s| {
+                serde_json::json!({
+                    "text": s.text,
+                    "based_on": iris_store::format_id(iris_store::Kind::Message, s.based_on),
+                    "created": rfc3339(s.created_at),
+                    "model": s.model,
+                })
+            }),
+        )
     })?)
 }
 
