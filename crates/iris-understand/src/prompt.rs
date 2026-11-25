@@ -387,7 +387,7 @@ fn in_mail(quote: &str, a: &Analysis) -> bool {
 
 /// `s` in lowercase, with each run of white space as one space, and the
 /// typographic forms of a quote mark, an apostrophe, a dash and an ellipsis
-/// as their plain forms. Models often change these forms (#102). The fold
+/// as their plain forms, in the composed Unicode form (NFC). Models often change these forms (#102). The fold
 /// is the same on both sides and changes no letter or digit, so a made-up
 /// quote still fails.
 pub(crate) fn squash(s: &str) -> String {
@@ -402,7 +402,11 @@ pub(crate) fn squash(s: &str) -> String {
 pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
     // Lowercase the whole text first, as before the fold: a final sigma
     // needs the context of the word. The marks and white space have no case.
-    let s = s.to_lowercase();
+    // The composed form (NFC) on both sides: a model often writes "é" as
+    // one character where the mail has "e" and a combining mark (#102).
+    // NFC changes no letter: canonical forms show the same text.
+    let s: String =
+        unicode_normalization::UnicodeNormalization::nfc(s.to_lowercase().as_str()).collect();
     let mut out = String::with_capacity(s.len());
     let mut from = Vec::new();
     let mut space = false;
