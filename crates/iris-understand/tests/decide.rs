@@ -216,6 +216,40 @@ Hello.
     );
 }
 
+/// #102: the composed and the decomposed forms of a letter (Unicode
+/// canonical equivalence, NFC) match, on either side.
+#[test]
+fn a_quote_in_another_unicode_form_matches_the_mail() {
+    let mail = |t: &str| {
+        format!(
+            "From: Ana Lee <ana@example.org>
+To: owner@example.com
+Subject: Lunch
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+{t}
+"
+        )
+    };
+    let item = |q: &str| {
+        json!([{"form": "commitment", "title": "Book", "quote": q,
+                "direction": "you_owe", "kind": "task"}])
+    };
+    let (nfc, nfd) = (
+        "Book the Caf\u{e9} Lune for Ren\u{e9}e.",
+        "Book the Cafe\u{301} Lune for Rene\u{301}e.",
+    );
+    for (text, q) in [(nfd, nfc), (nfc, nfd)] {
+        let m = Fake::with(vec![answer(item(q))]);
+        let d = run(&mail(text), Kind::Person, &[], &[], Some(&m))
+            .1
+            .unwrap();
+        assert_eq!((d.calls, d.drafts.len()), (1, 1), "{q:?}");
+    }
+}
+
 #[test]
 fn phishing_is_hostile_with_no_item() {
     let m = Fake::with(vec![Ok(text(r#"{"items": [], "phishing": true}"#))]);
