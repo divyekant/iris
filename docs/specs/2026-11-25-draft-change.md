@@ -227,7 +227,11 @@ draft waits in the outbox, or after the send. A sent mail cannot change.
 
 A ledger row of a change in `writing` after a crash or a lost answer:
 
-1. Read the draft at Gmail and read it back.
+1. Read the draft at Gmail by the `provider_id` of `ops`, and read it
+   back. If Gmail answers "not found", look for the draft by the
+   `Message-ID` of `ops` (`drafts_with_id`): one draft with the new hash
+   is the changed draft, and recovery stores its ID. No draft, or more
+   than one, is the "other result" of step 3.
 2. Its hash is the new `hash` of `ops`: the call applied. Do step 6 of
    section 2. The new hash is never the `pre_hash` (section 2, step 3),
    so this result cannot come from a call that did not apply.
@@ -362,9 +366,12 @@ for Gmail) during one change. A create holds one copy.
 
 - Gmail `drafts.update` replaces the message of a draft and keeps the
   draft ID (Gmail API reference, `users.drafts.update`). Pending: check
-  on the owner's Mac before the change is on for a real mailbox. The
-  design does not depend on it: step 6 always stores the ID of the
-  answer (section 2).
+  on the owner's Mac before the change is on for a real mailbox. Step 6
+  always stores the ID of the answer (section 2). If the ID changes and
+  the answer is lost, recovery looks for the draft by its `Message-ID`
+  (section 4). If Gmail also set its own `Message-ID`, recovery finds
+  nothing and the row is `failed` with "Look at it in Gmail.": no write
+  and no loss, but the person must check the draft.
 - Gmail can set its own `Message-ID` on a changed draft, as on a created
   draft (send spec, assumption 3). The rule of `changed_at_gmail`
   already covers this. Evidence: `sets_draft_message_id` in

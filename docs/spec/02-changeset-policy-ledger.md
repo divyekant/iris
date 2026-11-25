@@ -1019,6 +1019,12 @@ An undo of an undo is a new action, not a delete of the record.
 | A write of `undone_by` with an entry that is not its undo | The ledger shows a wrong undo | The trigger `ledger_undone_by` refuses it: only the entry of action 1 of its own undo makes an entry `undone`. |
 | An undo of `label` or `unlabel` whose label Gmail deleted after the entry | The undo makes again a label that the person deleted, or Gmail refuses the call | Before step 2, the apply reads `labels.list`. If the label ID of the entry is not there, the engine denies the undo action, by `engine`, with no write call. The entry keeps its state. |
 
+   A draft change entry has no message result: when the `draft` action
+   of its undo is `applied` (the read back at Gmail has the hash of
+   `pre`), the same transaction sets `undone_by` of the change entry to
+   the undo entry, and the trigger `ledger_state` moves its action to
+   `undone` (`docs/specs/2026-11-25-draft-change.md`, section 3). A
+   failed or denied undo leaves the change entry `applied`.
 ### 7.5 Release 3: draft, send and the held outbox
 
 The text of a nudge comes first (R3-07). When a person is late on a
