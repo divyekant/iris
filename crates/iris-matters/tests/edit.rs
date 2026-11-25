@@ -397,6 +397,19 @@ fn a_read_sees_the_expiry_at_once() {
         q::<String>(&b, "SELECT status FROM item WHERE id = 6"),
         "active"
     );
+    // A pending addition of the signal leaves `matter_add_live`, which the
+    // matter view of the API reads.
+    let b = setup("expired-add", 4, &FORMS);
+    let m = confirmed(&b, &[1, 2]);
+    sql(
+        &b,
+        &format!("INSERT INTO matter_add(item_id, matter_id, created_at) VALUES (6, {m}, 1)"),
+    )
+    .unwrap();
+    let pending = "SELECT count(*) FROM matter_add_live WHERE item_id = 6";
+    assert_eq!(q::<i64>(&b, pending), 1);
+    sql(&b, past).unwrap();
+    assert_eq!(q::<i64>(&b, pending), 0);
 }
 
 #[test]
