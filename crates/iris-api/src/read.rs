@@ -1254,7 +1254,17 @@ pub fn brief_section(
 /// shortcut: the case-insensitive match scans the sender table, one scan
 /// for each message detail and never for a search (about 4 ms for 100,000
 /// senders). Add a `lower(address)` index to the store if it shows in a profile.
-fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String> {
+/// True if the message has the label `SENT`: the owner sent it.
+pub(crate) fn is_sent(c: &Connection, message: i64) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                         WHERE ml.message_id = ?1 AND l.provider_id = 'SENT')",
+        [message],
+        |r| r.get(0),
+    )
+}
+
+pub(crate) fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String> {
     let Some(address) = address else {
         return Ok("stranger".into());
     };
