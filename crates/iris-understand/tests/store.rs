@@ -3975,3 +3975,46 @@ fn a_known_party_that_starts_to_fit_runs_the_later_one_again() {
     assert_eq!(runs(&fake), before + 1, "m2 runs again");
     assert!(last[&m2].contains("Ann <x1@example.net>"));
 }
+
+/// Issue 1144: the record holds the text of each known party that the data
+/// holds. A new name that changes only bytes after the cut (`MAX_FIELD`,
+/// 1,000 bytes) runs nothing again. A change before the cut runs the later
+/// mail again.
+#[test]
+fn a_name_change_after_the_cut_of_a_party_runs_nothing_again() {
+    let b = store("context-parties-cut");
+    b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let set_name = |name: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sender(address, name, kind, decided_by)
+                     VALUES ('x1@example.net', ?1, 'person', 'person')
+                     ON CONFLICT(address) DO UPDATE SET name = ?1, kind = 'person',
+                       decided_by = 'person'",
+                    [name],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    let head = "A".repeat(1200);
+    set_name(&format!("{head}x"));
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains(&"A".repeat(900)), "the party is data");
+    let calls = fake.calls.borrow().len();
+    // Only the bytes after the cut change.
+    set_name(&format!("{head}y"));
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), calls, "nothing runs again");
+    // A change before the cut runs the later mail again.
+    set_name(&format!("B{head}"));
+    drain(&b, &fake, &mut last);
+    assert!(
+        fake.calls.borrow().len() > calls,
+        "the later mail runs again"
+    );
+}

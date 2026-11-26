@@ -86,10 +86,16 @@ pub struct Kept {
 
 /// The line of one known party in the data.
 pub(crate) fn party_line(p: &str) -> String {
-    let mut line = String::from("Known party: ");
-    push_cut(&mut line, p, MAX_FIELD);
-    line.push('\n');
-    line
+    format!("Known party: {}\n", party_text(p))
+}
+
+/// The text of one known party that the data holds: the party cut to
+/// `MAX_FIELD` bytes and escaped. The context record hashes this text, so a
+/// change after the cut does not change the record (issue 1144).
+pub(crate) fn party_text(p: &str) -> String {
+    let mut text = String::new();
+    push_cut(&mut text, p, MAX_FIELD);
+    text
 }
 
 /// The count of the first `parties` whose lines fit in `room` bytes: the
