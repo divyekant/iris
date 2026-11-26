@@ -55,6 +55,9 @@ struct Script {
     /// The next `ask_cancel` sends on it and gives no answer until its
     /// cancel test gives true (issue #1126).
     hang: RefCell<Option<std::sync::mpsc::Sender<()>>>,
+    /// As `hang`, but the call then gives its scripted answer: an answer
+    /// that comes after a waiter came (issue #1126).
+    late: RefCell<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl Script {
@@ -97,6 +100,15 @@ impl Model for Fake {
     }
 
     fn ask_cancel(&self, i: &str, d: &str, cancel: &dyn Fn() -> bool) -> Result<Reply, ModelError> {
+        if let Some(started) = self.0.late.borrow_mut().take() {
+            started.send(()).unwrap();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !cancel() {
+                assert!(std::time::Instant::now() < end, "no waiter");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            return self.ask(i, d);
+        }
         let Some(started) = self.0.hang.borrow_mut().take() else {
             return self.ask(i, d);
         };
@@ -2256,4 +2268,36 @@ fn a_waiter_cancels_the_call_in_flight() {
     let r = b.run(&Limits::default()).unwrap();
     assert_eq!(r.stop.as_deref(), Some("done"));
     assert!(b.understood(m));
+}
+
+/// Issue #1126: an answer that comes after a waiter came starts no second
+/// request. Here the answer is no JSON, so the steps would ask again: the
+/// budget wrapper sees the waiter before the request and starts none.
+#[test]
+fn a_waiter_stops_the_retry_of_an_answer_that_came_late() {
+    let b = store("late");
+    b.model(true, Some(10_000));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    b.script.push(Ok(("no json".into(), usage(100, 10))));
+    let dir = b.store.dir().to_path_buf();
+    let (started, wait) = std::sync::mpsc::channel::<()>();
+    *b.script.late.borrow_mut() = Some(started);
+    let waiter = std::thread::spawn(move || {
+        let store = Store::open(&dir).unwrap();
+        wait.recv().unwrap();
+        batch::lock_wait(&store, batch::WAIT).is_ok()
+    });
+    let r = b.run(&Limits::default()).unwrap();
+    assert!(waiter.join().unwrap(), "the waiter gets the run lock");
+    assert_eq!(b.script.calls(), 1, "no second request");
+    assert_eq!(r.stop.as_deref(), Some("yield"));
+    assert_eq!((r.calls, r.unknown_calls), (1, 0));
+    assert_eq!(b.col("SELECT retry_failures FROM model_setting"), Some(0));
+    assert!(!b.understood(m));
+    assert_eq!(
+        b.col(&format!(
+            "SELECT tries + waits_model + coalesce(retry_at, 0) FROM message WHERE id = {m}"
+        )),
+        Some(0)
+    );
 }

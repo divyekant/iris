@@ -294,6 +294,13 @@ impl Model for Budgeted<'_> {
         if self.state.get().cancelled {
             return Err(iris_model::Error::Cancelled);
         }
+        // A waiter that came before the request (for example during the
+        // call before a retry) gets the lock now: no request starts, so no
+        // cost counts (issue #1126).
+        if self.yields && crate::batch::wanted(self.store) {
+            self.set(|s| s.cancelled = true);
+            return Err(iris_model::Error::Cancelled);
+        }
         let Some(price) = self.price else {
             return self.ask_free(instruction, data);
         };

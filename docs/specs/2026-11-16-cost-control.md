@@ -366,6 +366,13 @@ counts one unknown call. The wrapper sets `State::cancelled` and gives
 `Error::Cancelled` to each later call of the holder, so no request goes
 out after the cancel and no mail gets a refusal mark.
 
+Before each request, the wrapper also reads the waiter test
+(`batch::wanted`). If a waiter came, for example while the answer of the
+call before a retry came in, the wrapper starts no request. It gives
+`Error::Cancelled` and sets `State::cancelled`, but counts no call and no
+cost, because no request went out. So a waiter never causes one more paid
+request.
+
 Limit (issue #1158): the call of a cancelled
 request is not stopped. Its thread ends with the answer, or at the time
 limit of the call, and drops the answer. So for that time one more HTTP
