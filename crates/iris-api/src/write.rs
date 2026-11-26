@@ -495,18 +495,19 @@ pub fn reply(store: &Store, thread: &str) -> Result<Option<Value>> {
 }
 
 /// The `Reply-To` addresses of the raw content `sha`, comma-separated, as
-/// understanding writes them. `None` if the file cannot be read or has no
-/// such header: the reply then goes to `From`, as before the migration.
-fn head_reply_to(store: &Store, sha: &str) -> Option<String> {
+/// understanding writes them, or `None` if it has no such header. An error
+/// if the file cannot be read (issue #1174).
+fn head_reply_to(store: &Store, sha: &str) -> std::io::Result<Option<String>> {
     use std::io::Read as _;
+    let path = store
+        .content_path(sha)
+        .ok_or_else(|| std::io::Error::other("not a content hash"))?;
     let mut raw = Vec::new();
-    std::fs::File::open(store.content_path(sha)?)
-        .ok()?
+    std::fs::File::open(path)?
         .take(iris_understand::head::HEAD_LIMIT as u64)
-        .read_to_end(&mut raw)
-        .ok()?;
+        .read_to_end(&mut raw)?;
     let h = iris_understand::Head::parse(&raw, None);
-    (!h.reply_to.is_empty()).then(|| h.reply_to.join(","))
+    Ok((!h.reply_to.is_empty()).then(|| h.reply_to.join(",")))
 }
 
 fn reply_in(store: &Store, c: &Connection, thread: i64) -> Result<Option<Value>> {
@@ -593,7 +594,19 @@ fn reply_in(store: &Store, c: &Connection, thread: i64) -> Result<Option<Value>>
     } else {
         // A header row of an older build has no `reply_to` (migration
         // 70, issue #1131): read it from the head of the raw content.
-        let reply_to = reply_to.or_else(|| sha.as_deref().and_then(|h| head_reply_to(store, h)));
+        // If that file cannot be read, the form does not open: the reply
+        // must not go to `From` in place of a `Reply-To` (issue #1174).
+        let reply_to = match (reply_to, sha.as_deref()) {
+            (Some(r), _) => Some(r),
+            (None, Some(h)) => head_reply_to(store, h).map_err(|_| {
+                Error::Conflict(
+                    "Iris cannot read the newest mail of this thread from the data folder, \
+                     so it cannot find who gets the reply."
+                        .into(),
+                )
+            })?,
+            (None, None) => None,
+        };
         let wanted = list(reply_to.as_deref());
         let to_list = if wanted.is_empty() {
             list(Some(&from))
