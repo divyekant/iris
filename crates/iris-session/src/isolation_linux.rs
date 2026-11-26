@@ -243,12 +243,13 @@ impl Bwrap {
         }
     }
 
-    /// [`Isolation::spawn`] with the egress port of the session.
+    /// [`Isolation::spawn`] with the egress port of the session and the
+    /// helper end of the socket pair of its proxy.
     pub(crate) fn spawn_with(
         &self,
         session: i64,
         command: &mut std::process::Command,
-        egress_port: Option<u16>,
+        egress: Option<(u16, OwnedFd)>,
     ) -> io::Result<Child> {
         // The read paths of the command: each one is opened and checked
         // again here, just before bwrap starts, and bwrap binds the object
@@ -300,10 +301,10 @@ impl Bwrap {
                 Ok(())
             });
         }
-        // The engine: the relay connects only while it runs.
+        // The engine: the relay of the local port connects only while it
+        // runs.
         // SAFETY: getppid has no memory effects.
         let engine = pidfd_open(unsafe { libc::getppid() })?;
-        let engine_local = engine.try_clone()?;
         let mut child = command.spawn().map_err(|e| {
             if has_overlays {
                 // Names the cause for the person (read paths spec, "Linux").
@@ -329,18 +330,15 @@ impl Bwrap {
                 identify(pid)?.ok_or_else(|| io::Error::other("the init of the sandbox exited"))?;
             init = Some(fd);
             self.write_record(session, &info)?;
-            if let Some(port) = egress_port {
-                // The proxy of the session takes only this address.
-                let from = crate::egress::session_peer(session)
-                    .ok_or_else(|| io::Error::other("the session has no session address"))?;
+            if let Some((port, channel)) = egress {
                 let listener = listen_in(info.pid, port, deadline)?;
-                start_relay(listener, port, from, engine)?;
+                start_handoff(listener, channel)?;
             }
             if let Some(port) = local_port {
                 // The server on the port is a program of the person, not
                 // an Iris proxy: the relay connects from 127.0.0.1.
                 let listener = listen_in(info.pid, port, deadline)?;
-                start_relay(listener, port, Ipv4Addr::LOCALHOST, engine_local)?;
+                start_relay(listener, port, Ipv4Addr::LOCALHOST, engine)?;
             }
             // bwrap runs the program of the adapter after this byte.
             (&File::from(block_w)).write_all(b"x")
@@ -557,7 +555,11 @@ impl Isolation for Bwrap {
         let port = std::env::var("HTTPS_PROXY")
             .ok()
             .and_then(|v| v.strip_prefix("http://127.0.0.1:")?.parse::<u16>().ok());
-        self.spawn_with(session, command, port)
+        let egress = match port {
+            Some(port) => Some((port, take_channel()?)),
+            None => None,
+        };
+        self.spawn_with(session, command, egress)
     }
 }
 
@@ -1086,7 +1088,7 @@ unsafe fn join_and_bind(net: &CString, own_user: u64, port: u16, sock: RawFd) ->
 /// # Safety
 ///
 /// Only system calls on the stack: safe in the child of a fork.
-unsafe fn send_fd(sock: RawFd, fd: RawFd) -> i32 {
+pub(crate) unsafe fn send_fd(sock: RawFd, fd: RawFd) -> i32 {
     let mut byte = [0u8; 1];
     let mut iov = libc::iovec {
         iov_base: byte.as_mut_ptr() as *mut libc::c_void,
@@ -1118,38 +1120,57 @@ fn recv_fd(sock: &std::os::unix::net::UnixStream, wait: Duration) -> io::Result<
             "no listener in the time limit",
         ));
     }
-    let mut byte = [0u8; 1];
-    let mut iov = libc::iovec {
-        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
-        iov_len: 1,
+    crate::egress::recv_fd(sock.as_raw_fd())?
+        .ok_or_else(|| io::Error::other("the child sent no listener"))
+}
+
+/// Takes the helper end of the socket pair of the egress proxy:
+/// [`EGRESS_FD`](crate::egress::EGRESS_FD), which the launch gives to the helper. It gets
+/// close-on-exec, so no program of the session gets it.
+fn take_channel() -> io::Result<OwnedFd> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat writes into `st`; fcntl has no memory effects.
+    let ok = unsafe {
+        libc::fstat(crate::egress::EGRESS_FD, &mut st) == 0
+            && st.st_mode & libc::S_IFMT == libc::S_IFSOCK
+            && libc::fcntl(crate::egress::EGRESS_FD, libc::F_SETFD, libc::FD_CLOEXEC) == 0
     };
-    let mut space = [0u64; 4];
-    // SAFETY: msg points to valid buffers that live for the call.
-    unsafe {
-        let mut msg: libc::msghdr = std::mem::zeroed();
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = space.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = std::mem::size_of_val(&space) as _;
-        let n = libc::recvmsg(sock.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC);
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let cmsg = libc::CMSG_FIRSTHDR(&msg);
-        if n != 1
-            || cmsg.is_null()
-            || (*cmsg).cmsg_level != libc::SOL_SOCKET
-            || (*cmsg).cmsg_type != libc::SCM_RIGHTS
-        {
-            return Err(io::Error::other("the child sent no listener"));
-        }
-        let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const RawFd);
-        Ok(OwnedFd::from_raw_fd(fd))
+    if !ok {
+        return Err(io::Error::other(
+            "the helper has no egress channel from the engine",
+        ));
     }
+    // SAFETY: the launch gave this descriptor to the helper, and nothing
+    // else in the helper owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(crate::egress::EGRESS_FD) })
+}
+
+/// Starts the handoff thread of the egress listener: it sends each
+/// connection to `listener` (in the sandbox) to the proxy of the session
+/// on `channel`, and keeps no copy. The relay makes no connection on the
+/// host. If the engine end of the pair closed (the engine ended), the send
+/// fails, the thread ends and the listener closes (issue 507).
+pub(crate) fn start_handoff(listener: TcpListener, channel: OwnedFd) -> io::Result<()> {
+    thread::Builder::new()
+        .name("iris-handoff".into())
+        .spawn(move || {
+            for inner in listener.incoming() {
+                let Ok(inner) = inner else {
+                    // For example no file descriptor: wait, do not spin.
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                };
+                // SAFETY: both descriptors are open for the call.
+                if unsafe { send_fd(channel.as_raw_fd(), inner.as_raw_fd()) } != 0 {
+                    return; // the listener closes
+                }
+            }
+        })?;
+    Ok(())
 }
 
 /// Starts the relay thread: each connection to `listener` (in the sandbox)
-/// goes to `127.0.0.1:<port>` of the host from the session address `from`,
+/// goes to `127.0.0.1:<port>` of the host from the address `from`,
 /// at most [`RELAY_MAX`] at a time, while the process of `engine` runs. The
 /// threads end with the helper.
 pub(crate) fn start_relay(
@@ -1168,9 +1189,7 @@ pub(crate) fn start_relay(
                     thread::sleep(Duration::from_millis(50));
                     continue;
                 };
-                // A second guard: the proxy of another session refuses the
-                // session address in all cases (an engine crash frees the
-                // port). After the end of the engine, make no new connection.
+                // After the end of the engine, make no new connection.
                 if readable(engine.as_raw_fd(), Duration::ZERO).unwrap_or(true) {
                     return; // the listener closes
                 }

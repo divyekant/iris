@@ -147,9 +147,11 @@ A link inside a read path that points outside it stays a link in the
 view. Its target is visible only if the view holds the target.
 
 The launch refuses `allow_local` when it is the same port as the egress
-port of the session: the start stops with a reason. The egress port comes
-from the system, so this is rare, and the next run of the job gets a new
-egress port.
+port of the session: the start stops with a reason. On macOS, the egress
+port comes from the system, so this is rare, and the next run of the job
+gets a new egress port. On Linux, the egress port is in the namespace of
+the session: `3128`, or `3129` when `allow_local` is `3128`
+(`sandbox_port`), so the two are never the same.
 
 ### Linux
 
