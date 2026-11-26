@@ -1021,9 +1021,16 @@ fn with_reads(session: i64, reads: &[PathBuf], script: &str) -> String {
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::piped());
     let child = iso.spawn_with(session, &mut cmd, None).unwrap();
-    String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+    let out = child.wait_with_output().unwrap();
+    // The errors of bwrap and of the script go into the assert message.
+    format!(
+        "{}\n[{}] {}",
+        String::from_utf8_lossy(&out.stdout),
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    )
 }
 
 /// A read path in another read path starts in each order: the child of
