@@ -151,6 +151,14 @@ pub struct Scan {
 
 /// [`recheck_links`] that says if it stopped for a waiter.
 pub fn recheck_links_scan(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Result<Scan> {
+    // Issue 1121: old mail with a deceptive link only in an attached
+    // message joins the queue first, so this scan gives it the mark.
+    if recheck_old_links(store)? {
+        return Ok(Scan {
+            count: 0,
+            yielded: true,
+        });
+    }
     let mut marked = 0;
     let mut after = 0;
     loop {
@@ -199,6 +207,47 @@ pub fn recheck_links_scan(store: &Store, now_ms: i64, max_marks: Option<u64>) ->
             }
             let done = store.write(|tx| link_check_done(tx, row, id, &read))?;
             marked += u64::from(mark && done);
+        }
+    }
+}
+
+/// Issue 1121: one more link check of each message of `link_recheck`
+/// (store migration 72: mail checked before the links of attached
+/// messages counted), in pages of [`LINK_CHECKS`], with no model. A
+/// message with a deceptive link moves to `link_check`, so the normal
+/// check gives it the mark. Each row goes after its read. A file that Iris
+/// cannot read now gives no mark: its first check had the same file.
+/// Gives true if it stopped for a waiter of the run lock (#279).
+fn recheck_old_links(store: &Store) -> Result<bool> {
+    loop {
+        let page: Vec<i64> = store.read(|c| {
+            let v = c
+                .prepare_cached("SELECT message_id FROM link_recheck ORDER BY message_id LIMIT ?1")?
+                .query_map([LINK_CHECKS], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })?;
+        if page.is_empty() {
+            return Ok(false);
+        }
+        for id in page {
+            if crate::batch::wanted(store) {
+                return Ok(true);
+            }
+            let mark = link_read(store, id).is_some_and(|r| r.mark);
+            store.write(|tx| {
+                if mark {
+                    // A new row, as the triggers of migration 20 make it.
+                    tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+                    tx.execute(
+                        "INSERT INTO link_check(message_id) SELECT id FROM message
+                          WHERE id = ?1 AND gone_at IS NULL AND content_sha256 IS NOT NULL",
+                        [id],
+                    )?;
+                }
+                tx.execute("DELETE FROM link_recheck WHERE message_id = ?1", [id])?;
+                Ok(())
+            })?;
         }
     }
 }
