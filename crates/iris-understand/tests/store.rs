@@ -2456,12 +2456,25 @@ Your one-time code is 918273. It ends in 10 minutes.
             id,
         )
     };
+    // Issue #1163: the notices read `model_read!` to show the words of a mail.
+    let model_read = |id: i64| {
+        b.col::<bool>(
+            concat!(
+                "SELECT ",
+                iris_store::model_read!("m"),
+                " FROM message m WHERE m.id = ?1"
+            ),
+            id,
+        )
+    };
+    assert!(model_read(m));
 
     // A service now: the code rule gives the signal, with no model.
     set("no-reply@bank.example.com", "service");
     assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
     assert_eq!(rule(m).as_deref(), Some("code"));
     assert!(!pending(m));
+    assert!(!model_read(m), "a fixed rule completed it");
     // The queue is empty: a second check does nothing.
     assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 0);
     // Not a service: the rule item does not hold, the mail waits for the model.

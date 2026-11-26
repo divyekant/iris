@@ -508,3 +508,56 @@ fn ask_cancel_stops_the_wait_for_a_slow_call() {
     let r = client.ask_cancel("i", "d", &|| false).unwrap();
     assert_eq!(r.text, "ok");
 }
+
+/// Issue #1158: a cancel closes the connection of the call at once. The
+/// server sees the end of the connection long before the time limit.
+#[test]
+fn ask_cancel_closes_the_connection() {
+    use std::io::Read;
+    use std::time::Instant;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (closed_tx, closed) = std::sync::mpsc::channel();
+    // The cancel comes only after the request reached the server, so a slow
+    // call thread cannot meet the cancel before its connect (issue #1186).
+    let read = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let read_srv = read.clone();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        let mut buf = [0u8; 4096];
+        // Read the request, and never answer. A read of 0 bytes or an error
+        // other than the time-out is the end of the connection.
+        let end = loop {
+            match s.read(&mut buf) {
+                Ok(0) => break true,
+                Ok(_) => read_srv.store(true, std::sync::atomic::Ordering::SeqCst),
+                Err(e) => {
+                    break !matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    )
+                }
+            }
+        };
+        let _ = closed_tx.send((end, Instant::now()));
+    });
+    let mut config = Config::local(format!("http://{addr}/v1"), "m");
+    config.timeout = Duration::from_secs(60);
+    let client = Client::new(config);
+    let start = Instant::now();
+    let r = client.ask_cancel("i", "d", &|| {
+        read.load(std::sync::atomic::Ordering::SeqCst) || start.elapsed() >= Duration::from_secs(30)
+    });
+    assert!(matches!(r, Err(Error::Cancelled)), "{r:?}");
+    assert!(
+        read.load(std::sync::atomic::Ordering::SeqCst),
+        "the request did not reach the server"
+    );
+    let cancelled = Instant::now();
+    let (end, at) = closed
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the server thread reports");
+    assert!(end, "the connection stays open after the cancel");
+    assert!(at.duration_since(cancelled) < Duration::from_secs(5));
+}

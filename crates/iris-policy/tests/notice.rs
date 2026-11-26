@@ -804,3 +804,133 @@ fn the_cleanup_of_gone_mail_settles_unchecked_notices() {
         .collect();
     assert_eq!(left, [(Some(checked), "Lunch?".to_string())]);
 }
+
+fn set_model(s: &Store) {
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// Issue #1163: with a model set, a notice shows the words of a mail only
+/// after the model read the mail (`iris_store::model_read!`). Understanding
+/// that a fixed rule completed (`fixed_rules` names a rule) or that a
+/// declined sender ended (`model_declined`) had no model `phishing` check.
+#[test]
+fn a_notice_shows_mail_words_only_after_the_model_read_the_mail() {
+    let (_d, s) = store("model-read");
+    activate(&s, ANN);
+    set_model(&s);
+    let read = |fixed: Option<&str>, declined: bool, n: usize| {
+        let id = put(
+            &s,
+            &Mail {
+                understood_ago: Some(0),
+                ..mail()
+            },
+            n,
+        );
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE message SET fixed_rules = ?2 WHERE id = ?1",
+                params![id, fixed],
+            )?;
+            if declined {
+                tx.execute("INSERT INTO model_declined(message_id) VALUES (?1)", [id])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        id
+    };
+    let model_item = read(None, false, 0);
+    let model_no_item = read(Some("[]"), false, 1);
+    let code = read(Some("[\"code\"]"), false, 2);
+    let unknown = read(Some("unknown"), false, 3);
+    let declined = read(Some("[]"), true, 4);
+    let new = notice::refresh(&s, NOW).unwrap();
+    let checked: Vec<(i64, bool)> = new
+        .iter()
+        .map(|n| (n.message_id.unwrap(), n.checked))
+        .collect();
+    assert_eq!(
+        checked,
+        [
+            (model_item, true),
+            (model_no_item, true),
+            (code, false),
+            (unknown, false),
+            (declined, false)
+        ]
+    );
+    for n in s.read(notice::list).unwrap() {
+        let id = n.message_id.unwrap();
+        let shown = (n.title.as_str(), n.text.as_str(), n.checked);
+        if id == model_item || id == model_no_item {
+            assert_eq!(shown.1, "Lunch?");
+        } else {
+            assert_eq!(
+                shown,
+                (notice::UNCHECKED_TITLE, notice::UNCHECKED_TEXT, false)
+            );
+        }
+    }
+}
+
+/// Issue #1168: a notice of mail that the model did not read, made with no
+/// model, stays hidden after the cleanup deletes the message row and a
+/// model is set later.
+#[test]
+fn a_deleted_unread_message_does_not_make_its_notice_checked() {
+    let (_d, s) = store("deleted-unread");
+    activate(&s, ANN);
+    let m = put(&s, &mail(), 0);
+    assert_eq!(notices_now(&s), [m]);
+    s.write(|tx| {
+        tx.execute("UPDATE message SET gone_at = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    s.clean_gone(NOW + iris_store::GONE_KEEP_MS)
+        .unwrap()
+        .unwrap();
+    assert!(
+        s.read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get::<_, i64>(0))?))
+            .unwrap()
+            == 0
+    );
+    set_model(&s);
+    let left: Vec<(String, bool)> = s
+        .read(notice::list)
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.text, n.checked))
+        .collect();
+    assert!(left.iter().all(|(t, _)| t != "Lunch?"), "{left:?}");
+}
+
+/// Issue #1168, data from before the fix: an open notice whose message row
+/// the old cleanup deleted with no model set. Migration 73 marks it done, so
+/// a model set later shows no words of the mail.
+#[test]
+fn migration_73_settles_an_old_notice_with_no_message_row() {
+    let (d, s) = store("orphan");
+    activate(&s, ANN);
+    let m = put(&s, &mail(), 0);
+    assert_eq!(notices_now(&s), [m]);
+    s.write(|tx| {
+        tx.execute("DELETE FROM message WHERE id = ?1", [m])?;
+        tx.execute_batch("PRAGMA user_version = 72")?;
+        Ok(())
+    })
+    .unwrap();
+    drop(s);
+    let s = Store::open(&d.0).unwrap();
+    set_model(&s);
+    assert!(s.read(notice::list).unwrap().is_empty());
+}

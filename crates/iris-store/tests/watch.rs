@@ -374,7 +374,8 @@ fn a_match_that_becomes_hostile_gives_no_notice() {
 /// Decision D33 with the content cleanup: the cleanup deletes the header
 /// (the sender evidence) and then the message row (the marks and labels) of
 /// gone mail. A notice or a watch match on hostile mail must stay hidden
-/// after that; a safe one stays as it is.
+/// after that; a safe one stays as it is. A notice of mail that the model
+/// did not read is settled too (issue #1168).
 #[test]
 fn the_cleanup_keeps_a_hostile_match_hidden() {
     let dir = TempDir::new("clean-hostile");
@@ -389,7 +390,13 @@ fn the_cleanup_keeps_a_hostile_match_hidden() {
             "INSERT INTO sender(address, kind, decided_by)
                SELECT from_addr, 'hostile', 'engine' FROM header WHERE message_id = ?1",
         ),
-        ("safe", "UPDATE message SET hostile = hostile WHERE id = ?1"),
+        ("safe", "UPDATE message SET understood_at = 1 WHERE id = ?1"),
+        // Issue #1168: safe mail that the model did not read keeps its
+        // watch match, and its notice is settled.
+        (
+            "unread",
+            "UPDATE message SET hostile = hostile WHERE id = ?1",
+        ),
     ];
     let notice = |id: i64| {
         store
@@ -437,9 +444,12 @@ fn the_cleanup_keeps_a_hostile_match_hidden() {
     assert_eq!(left, 0, "the cleanup deleted the evidence");
     for (name, w, m) in rows {
         let got = store.watch(w).unwrap().unwrap();
-        let safe = name == "safe";
-        assert_eq!(got.message.is_some(), safe, "{name}");
-        assert_eq!(open(m), safe, "{name}");
+        assert_eq!(
+            got.message.is_some(),
+            matches!(name, "safe" | "unread"),
+            "{name}"
+        );
+        assert_eq!(open(m), name == "safe", "{name}");
     }
 }
 

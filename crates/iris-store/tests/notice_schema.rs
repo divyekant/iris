@@ -116,12 +116,17 @@ fn an_old_store_keeps_its_notices_and_a_job_move_adds_a_row() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 72);
+        assert_eq!(iris_store::schema_version(tx)?, 73);
         let rows: Vec<(i64, i64, Option<i64>)> = tx
             .prepare("SELECT id, message_id, done_at FROM notice ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        assert_eq!(rows, vec![(1, 10, None), (2, 11, Some(7))]);
+        // Migration 73 (issue #1168) marks done an open notice with no
+        // message row: notice 1 has none here. A done notice keeps its time.
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].0, rows[0].1), (1, 10));
+        assert!(rows[0].2.is_some_and(|t| t > 7));
+        assert_eq!(rows[1], (2, 11, Some(7)));
         // ID 3 never comes again.
         assert_eq!(rule_row(tx, 13)?, 4);
 

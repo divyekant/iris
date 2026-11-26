@@ -381,10 +381,17 @@ call before a retry came in, the wrapper starts no request. It gives
 cost, because no request went out. So a waiter never causes one more paid
 request.
 
-Limit (issue #1158): the call of a cancelled
-request is not stopped. Its thread ends with the answer, or at the time
-limit of the call, and drops the answer. So for that time one more HTTP
-connection and one thread stay open, and the real cost is not known.
+A cancel stops the call (issue #1158): each cancellable call has its own
+HTTP agent, and the cancel shuts that agent down. The connection closes, and
+the thread of the call ends at once and drops the answer. The request can
+be out, so the real cost is not known, and the worst case stays taken.
+
+Limit (issue #1182): the shutdown does not stop name resolution or a TCP
+connect in progress. A cancel in one of these steps leaves the thread of
+the call open until the step ends. Each step ends after 10 s at most
+(`iris_model::SETUP_LIMIT`, or the time limit of the call if it is
+shorter). A name lookup that passes its limit can keep a helper thread of
+ureq until the system lookup ends. No request goes out after the cancel.
 
 If a known usage is still larger than the reservation, the settle write
 takes the real cost, the budget can go below zero, and the run stops with
