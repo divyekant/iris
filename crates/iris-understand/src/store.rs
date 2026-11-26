@@ -1910,10 +1910,6 @@ pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize>
 /// before migration 69 whose thread is not in `talk_due`, in pages. The
 /// batch run does it first, before step 1 can change a context.
 pub fn record_unknown_contexts(store: &Store) -> iris_store::Result<()> {
-    // A known party in `To` or `Cc` only puts its threads in `talk_due`
-    // first, so the record below does not take that change as the context
-    // of the last run (issue 1135).
-    store.write(|tx| Ok(queue_party_threads(tx)?))?;
     while store.write(|tx| Ok(record_unknown(tx)?))? > 0 {}
     Ok(())
 }
@@ -1978,7 +1974,12 @@ pub fn queue_party_threads(tx: &rusqlite::Connection) -> rusqlite::Result<usize>
 /// label or a hostile mark) is not seen (limit #1173). A message whose
 /// thread is in `talk_due` keeps "?", and the check of the thread runs it
 /// again. Gives the count of rows.
-fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+#[doc(hidden)]
+pub fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    // A known party in `To` or `Cc` only puts its threads in `talk_due`
+    // first, in the same write, so no change of a sender between the two
+    // can become the record of the last run (issue 1135).
+    queue_party_threads(tx)?;
     let page: Vec<i64> = tx
         .prepare_cached(
             "SELECT m.id FROM message m WHERE m.context = '?'

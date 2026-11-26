@@ -4175,3 +4175,44 @@ fn a_cc_party_known_before_migration_71_runs_the_later_mail_after_the_upgrade() 
     drain(&b, &fake, &mut last);
     assert!(last[&m2].contains("Dee <dee@example.org>"), "{}", last[&m2]);
 }
+
+/// Issue 1135, pre-review of #1172: a page of "?" records and the party
+/// queue are one write. A person in `Cc` who becomes known just before the
+/// page keeps the later message out of the record: its thread is queued,
+/// and the check runs the message again.
+#[test]
+fn a_party_change_before_a_record_page_is_queued_in_the_same_write() {
+    let b = store("context-parties-race");
+    let cc = "From: x1@example.net\nTo: owner@example.com\nCc: dee@example.org\nSubject: S\n\nWords k1k.\n";
+    b.add_in("1", "t", NOW - 2 * DAY, cc, &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET context = '?'", [])?;
+            tx.execute("DELETE FROM talk_due", [])?;
+            tx.execute("DELETE FROM party_due", [])?;
+            // The change of the sender (the trigger fills `party_due`),
+            // then the page, with nothing between them.
+            tx.execute(
+                "INSERT INTO sender(address, name, kind, decided_by)
+                 VALUES ('dee@example.org', 'Dee', 'person', 'person')
+                 ON CONFLICT(address) DO UPDATE SET name = 'Dee', kind = 'person',
+                   decided_by = 'person'",
+                [],
+            )?;
+            iris_understand::store::record_unknown(tx)?;
+            Ok(())
+        })
+        .unwrap();
+    let context: Option<String> = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert_eq!(
+        context.as_deref(),
+        Some("?"),
+        "the queued thread keeps \"?\""
+    );
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Dee <dee@example.org>"), "{}", last[&m2]);
+}
