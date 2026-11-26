@@ -3975,3 +3975,85 @@ fn a_known_party_that_starts_to_fit_runs_the_later_one_again() {
     assert_eq!(runs(&fake), before + 1, "m2 runs again");
     assert!(last[&m2].contains("Ann <x1@example.net>"));
 }
+
+/// Issue 1135: the known parties of the data come from `From`, `To` and
+/// `Cc`. A person who is only in `Cc` of an earlier message and becomes a
+/// known person, or gets a new name, runs the later mail again.
+#[test]
+fn a_new_known_party_in_cc_only_runs_the_later_mail_again() {
+    let b = store("context-parties-cc");
+    let cc = "From: x1@example.net\nTo: owner@example.com\nCc: dee@example.org\nSubject: S\n\nWords k1k.\n";
+    b.add_in("1", "t", NOW - 2 * DAY, cc, &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("dee@example.org"));
+    let set = |name: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sender(address, name, kind, decided_by)
+                     VALUES ('dee@example.org', ?1, 'person', 'person')
+                     ON CONFLICT(address) DO UPDATE SET name = ?1, kind = 'person',
+                       decided_by = 'person'",
+                    [name],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    set("Dee");
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Dee <dee@example.org>"), "{}", last[&m2]);
+    set("Dee Ng");
+    drain(&b, &fake, &mut last);
+    assert!(
+        last[&m2].contains("Dee Ng <dee@example.org>"),
+        "{}",
+        last[&m2]
+    );
+    // The queue is clear: nothing more runs.
+    let calls = fake.calls.borrow().len();
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), calls);
+    let due: i64 = b.col("SELECT count(*) FROM party_due WHERE ?1 = ?1", 0);
+    assert_eq!(due, 0);
+}
+
+/// Issue 1119: a message understood before migration 69 ("?") whose
+/// earlier message went away or came after its run runs again: its run had
+/// another context. With no such change, nothing runs again (see
+/// `a_message_with_no_recorded_context_gets_one_and_does_not_run_again`).
+#[test]
+fn an_old_message_whose_earlier_mail_moved_after_its_run_runs_again() {
+    for change in ["gone_at", "fetched_at"] {
+        let b = store(&format!("context-old-{change}"));
+        let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+        let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+        let fake = Fake::default();
+        let mut last = std::collections::HashMap::new();
+        drain(&b, &fake, &mut last);
+        let calls = fake.calls.borrow().len();
+        // Before migration 69: no record, and then a change of m1 after
+        // the run of m2, which no check saw.
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE message SET context = '?'", [])?;
+                tx.execute(
+                    &format!("UPDATE message SET {change} = understood_at + 1 WHERE id = ?1"),
+                    [m1],
+                )?;
+                tx.execute("DELETE FROM talk_due", [])?;
+                Ok(())
+            })
+            .unwrap();
+        iris_understand::store::record_unknown_contexts(&b.store).unwrap();
+        let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+        assert_eq!(understood, None, "{change}: m2 runs again");
+        let m1_context: Option<String> = b.col("SELECT context FROM message WHERE id = ?1", m1);
+        assert_ne!(m1_context.as_deref(), Some("?"), "{change}: m1 is recorded");
+        drain(&b, &fake, &mut last);
+        assert!(fake.calls.borrow().len() > calls, "{change}");
+    }
+}
