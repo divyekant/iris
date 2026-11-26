@@ -1966,14 +1966,10 @@ pub fn queue_party_threads(tx: &rusqlite::Connection) -> rusqlite::Result<usize>
 
 /// Issue 1049: records the context now of a page of understood messages
 /// from before migration 69 (context "?") whose thread is not in
-/// `talk_due`. No change since the migration reached such a thread. If an
-/// earlier message came or went after the end of the last run
-/// ([`context_moved`]),
-/// the message runs again. Else the context now is the context of its last
-/// run, as far as Iris can know: a change with no time in the store (a
-/// label or a hostile mark) is not seen (limit #1173). A message whose
-/// thread is in `talk_due` keeps "?", and the check of the thread runs it
-/// again. Gives the count of rows.
+/// `talk_due`. No change since the migration reached such a thread, so the
+/// context now is the context of its last run, as far as Iris can know
+/// (limit #1119). A message whose thread is in `talk_due` keeps "?", and
+/// the check of the thread runs it again. Gives the count of rows.
 #[doc(hidden)]
 pub fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
     // A known party in `To` or `Cc` only puts its threads in `talk_due`
@@ -1989,17 +1985,6 @@ pub fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
         .query_map([CHECK_PAGE], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for &id in &page {
-        // Issue 1119: an earlier message of the thread that came, came
-        // again (new content) or went away after the last run changed the
-        // context of that run. The message runs again. `understand_reset`
-        // (migration 65) puts its thread in `talk_due`.
-        if context_moved(tx, id)? {
-            tx.execute(
-                "UPDATE message SET understood_at = NULL, context = NULL WHERE id = ?1",
-                [id],
-            )?;
-            continue;
-        }
         let now = context_key(tx, id, None, None, false)?;
         tx.execute(
             "UPDATE message SET context = ?2 WHERE id = ?1",
@@ -2007,28 +1992,6 @@ pub fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
         )?;
     }
     Ok(page.len())
-}
-
-/// Issue 1119: true when an earlier message of the thread of `id` (in the
-/// order of the runs) was fetched or went away after the end of the batch
-/// run that understood `id`. `understood_at` is the start of that run
-/// (`understand_run.started_at`), and a change during the run can be in
-/// the data of its call, so only the end of the run is evidence. With no
-/// such run (another runner), there is no evidence. The times are the only
-/// evidence in the store of a change of the context of a run from before
-/// migration 69.
-fn context_moved(tx: &rusqlite::Connection, id: i64) -> rusqlite::Result<bool> {
-    tx.prepare_cached(
-        "SELECT EXISTS (SELECT 1 FROM message m JOIN message e ON e.thread_id = m.thread_id
-           WHERE m.id = ?1 AND e.id <> m.id
-             AND ((e.internal_date IS NULL AND (m.internal_date IS NOT NULL OR e.id < m.id))
-                  OR e.internal_date < m.internal_date
-                  OR (e.internal_date = m.internal_date AND e.id < m.id))
-             AND (SELECT max(r.ended_at) FROM understand_run r
-                   WHERE r.started_at = m.understood_at) < max(
-                   coalesce(e.fetched_at, 0), coalesce(e.gone_at, 0)))",
-    )?
-    .query_row([id], |r| r.get(0))
 }
 
 /// Deletes the items of `message` that a new run replaces: the rows of the

@@ -118,18 +118,11 @@ pay again for the same mail.
   `talk_due` before that, and the check runs each "?" message of the
   thread again. So a change after the upgrade is never lost. A thread
   that was in `talk_due` at the upgrade runs its old messages once.
-- Before the first record of a "?" message (issue #1119), the step
-  looks for an earlier message of its thread (in the order of the runs)
-  that was fetched or went away after the end of the batch run that
-  understood it (`understand_run.ended_at` of the run whose `started_at`
-  is the `understood_at` of the message). Such a change came after the
-  model call, so the message runs again. A change during that run is not
-  evidence: the call can have read it.
-- Limit (issue #1173): a change before the upgrade with no time in the
-  store is not seen for a "?" message: a `SPAM` or `TRASH` label that went
-  away, a hostile mark, a fetch or a removal during its run, or a message
-  that a run outside the batch runner understood. Its first record is its
-  context at that time. `iris rebuild` runs each message again.
+- Limit (issue #1119): a change before the upgrade is not seen, because
+  the first record of a message is its context at that time. The store
+  holds no reliable evidence of such a change (a fetch time also changes
+  for a fetch of the same content), and `iris rebuild` runs each message
+  again.
 
 ## Not in scope
 
