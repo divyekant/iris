@@ -669,9 +669,24 @@ fn a_notice_of_mail_the_model_did_not_read_shows_no_mail_words() {
         == (notice::UNCHECKED_TITLE, notice::UNCHECKED_TEXT)));
     assert_eq!(words(refused), unchecked);
     assert_eq!(words(failed), unchecked);
-    // A model error wait (`retry_failures`) ends the wait of each mail.
+    // A model error wait that ended ("Try now", or its time passed) and a
+    // failed try whose retry time passed: the model can read, the mail waits.
     s.write(|tx| {
-        tx.execute("UPDATE model_setting SET retry_failures = 1", [])?;
+        tx.execute(
+            "UPDATE model_setting SET retry_failures = 1, retry_at = ?1",
+            [NOW],
+        )?;
+        tx.execute(
+            "UPDATE message SET tries = 1, retry_at = ?1, waits_model = 2 WHERE id = ?2",
+            params![NOW - MIN, waits],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notices_now(&s).is_empty());
+    // A running model error wait ends the wait of each mail.
+    s.write(|tx| {
+        tx.execute("UPDATE model_setting SET retry_at = ?1", [NOW + MIN])?;
         Ok(())
     })
     .unwrap();
@@ -732,6 +747,13 @@ fn a_model_set_after_the_notice_hides_the_words_of_unchecked_mail() {
         s.read(|c| notice::after(c, 0, 10)).unwrap()[0].text,
         notice::UNCHECKED_TEXT
     );
+    // The system notice reads the notice again at the show.
+    let id = s.read(notice::list).unwrap()[0].id;
+    let again = s.read(|c| notice::get_open(c, id)).unwrap().unwrap();
+    assert_eq!(
+        (again.text.as_str(), again.checked),
+        (notice::UNCHECKED_TEXT, false)
+    );
     s.write(|tx| {
         tx.execute(
             "UPDATE message SET understood_at = ?2 WHERE id = ?1",
@@ -741,4 +763,44 @@ fn a_model_set_after_the_notice_hides_the_words_of_unchecked_mail() {
     })
     .unwrap();
     assert_eq!(shown().1, "Lunch?");
+}
+
+/// Issue #1045: the content cleanup of gone mail marks done an open notice
+/// of mail that is not checked, before it deletes the evidence, and leaves
+/// a checked notice with its words.
+#[test]
+fn the_cleanup_of_gone_mail_settles_unchecked_notices() {
+    let (_d, s) = store("model-clean");
+    activate(&s, ANN);
+    let checked = put(&s, &mail(), 0);
+    let unchecked = put(
+        &s,
+        &Mail {
+            subject: "Pay now".into(),
+            ..mail()
+        },
+        1,
+    );
+    assert_eq!(notices_now(&s), [checked, unchecked]);
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        tx.execute("UPDATE message SET understood_at = ?2 WHERE id = ?1", params![checked, NOW])?;
+        tx.execute("UPDATE message SET gone_at = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    s.clean_gone(NOW + iris_store::GONE_KEEP_MS)
+        .unwrap()
+        .unwrap();
+    let left: Vec<(Option<i64>, String)> = s
+        .read(notice::list)
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.message_id, n.text))
+        .collect();
+    assert_eq!(left, [(Some(checked), "Lunch?".to_string())]);
 }

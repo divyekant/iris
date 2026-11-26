@@ -105,11 +105,17 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                    AND (m.understood_at IS NOT NULL
                         OR NOT EXISTS (SELECT 1 FROM model_setting)
                         OR m.fetched_at <= ?4
-                        OR NOT ", iris_store::model_can_read!(), ")
+                        OR NOT ", iris_store::model_can_read!("?5"), ")
                  ORDER BY m.id",
             ))?
             .query_map(
-                params![now_ms - WINDOW_MS, WINDOW_MS, now_ms - LATE_MS, now_ms - MODEL_WAIT_MS],
+                params![
+                    now_ms - WINDOW_MS,
+                    WINDOW_MS,
+                    now_ms - LATE_MS,
+                    now_ms - MODEL_WAIT_MS,
+                    now_ms
+                ],
                 |r| r.get(0),
             )?
             .collect::<rusqlite::Result<_>>()?;
@@ -168,10 +174,14 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
 /// mail, or with no model call when a fixed rule completes it or the
 /// sender is a declined stranger (spec 1 section 7.3, decision D29): the
 /// same end of understanding that guard 4 waits for (issue #321).
+///
+/// A notice whose message row is gone shows its words: before the content
+/// cleanup deletes the row of gone mail, it marks done each open notice of
+/// such mail that is not checked (`Store::clean_gone`).
 fn checked_sql(id: &str) -> String {
     format!(
         "(NOT EXISTS (SELECT 1 FROM model_setting)
-          OR EXISTS (SELECT 1 FROM message cm WHERE cm.id = {id} AND cm.understood_at IS NOT NULL))"
+          OR NOT EXISTS (SELECT 1 FROM message cm WHERE cm.id = {id} AND cm.understood_at IS NULL))"
     )
 }
 
@@ -247,9 +257,16 @@ const OPEN: &str = concat!(
 const INTERRUPTS: &str = "(notice.job_event_id IS NULL OR EXISTS (SELECT 1 FROM job_event e \
      WHERE e.id = notice.job_event_id AND e.by = 'engine'))";
 
-/// True while notice `id` is open ([`OPEN`]). The engine checks it again
-/// just before it shows a system notice, because a notice can wait in the
-/// queue while the mail becomes hostile.
+/// The notice `id` as a read shows it now, or `None` if it is not open
+/// ([`OPEN`]). The engine reads it again just before it shows a system
+/// notice, because a notice can wait in the queue while the mail becomes
+/// hostile, or while its check changes (issue #1045): the show uses the
+/// words of this read.
+pub fn get_open(conn: &Connection, id: i64) -> Result<Option<Notice>> {
+    Ok(select(conn, &format!("WHERE id = ?1 AND {OPEN}"), [id])?.pop())
+}
+
+/// True while notice `id` is open ([`OPEN`]).
 pub fn is_open(conn: &Connection, id: i64) -> Result<bool> {
     Ok(conn.query_row(
         &format!("SELECT EXISTS (SELECT 1 FROM notice WHERE id = ?1 AND {OPEN})"),
