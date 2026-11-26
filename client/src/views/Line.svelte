@@ -1,7 +1,10 @@
 <!--
   One item on one line. The whole line opens the item. The envelope opens the
   source mail in one step. An unread dot marks a conversation that waits for you.
-  A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09).
+  A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09),
+  and opens the reply form with it. A "Summary ready" pill marks an item whose
+  long thread has a summary of Iris (issue 478), and opens the item page, where
+  the summary shows. A conversation has a Reply icon (issue 582).
   On a commitment owed to you, the pill says "Nudge ready" when the draft is a
   reminder to a late person (card R3-07, option A: the pill only).
   With `ondone`, an open commitment starts with a round tick box: a click marks
@@ -49,8 +52,8 @@
     // A failure or a 404 (the draft became stale) keeps "Draft ready".
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
-        // A thread can hold two commitments: the nudge is for one of them only.
-        if (live && d.nudge && d.item === item.id) nudge = d;
+        // A nudge names the late commitments of one person only.
+        if (live && d.nudge && d.items.includes(item.id)) nudge = d;
       },
       () => {},
     );
@@ -117,6 +120,17 @@
     }
   });
   let waits = $derived(item.form === "conversation" && (item.your_turn || (item.new ?? 0) > 0));
+  // Reply from the line (issue 582): the write view of the thread, as on the item page. A gone conversation has no mail to answer.
+  let thread = $derived(item.form === "conversation" && item.status !== "gone" ? item.thread : undefined);
+  // The Draft ready pill opens the reply form, which fills with the draft (issue 743), only for a
+  // reply that is yours to write: a conversation or a commitment that you owe. A draft owed to you
+  // can be a nudge to another person, and other forms keep the pill that opens the item.
+  let drafted = $derived.by(() => {
+    if (!item.ready?.includes("draft")) return undefined;
+    if (item.form === "conversation") return thread;
+    if (item.form !== "commitment" || item.direction !== "you_owe") return undefined;
+    return (item.sources.find((s) => s.role === "origin") ?? item.sources[0])?.thread;
+  });
 </script>
 
 {#if phase.at !== "idle"}
@@ -156,14 +170,29 @@
     <p class="detail">
       {detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
     </p>
-    {#if item.ready?.includes("draft")}
+    {#if item.ready?.includes("draft") || item.ready?.includes("summary")}
       <p class="prepared">
-        <span class="ready" title={nudge ? "Iris wrote a reminder in your voice. Nothing is sent." : "Iris wrote a reply in your voice"}>
+        {#if item.ready?.includes("draft")}
+        {#snippet pill()}
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
             <path d="M10.5 2.5l3 3-7.5 7.5H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
           {nudge ? "Nudge ready" : "Draft ready"}
-        </span>
+        {/snippet}
+        {#if drafted}
+          <a class="ready" href={href.reply(drafted)} title="Open the reply that Iris wrote in your voice. Nothing is sent.">{@render pill()}</a>
+        {:else}
+          <span class="ready" title={nudge ? "Iris wrote a reminder in your voice. Nothing is sent." : "Iris wrote a reply in your voice"}>{@render pill()}</span>
+        {/if}
+        {/if}
+        {#if item.ready?.includes("summary")}
+          <a class="ready summary" href={href.item(item.id)} title="Open the item. Iris wrote a short summary of its long thread.">
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <path d="M3 4h10M3 8h10M3 12h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
+            Summary ready
+          </a>
+        {/if}
       </p>
     {/if}
     {#if note}<p class="note">{note}</p>{/if}
@@ -178,6 +207,13 @@
     <button class="away" type="button" aria-label={`${away.label}: ${item.title}`} onclick={() => tick(away.verb)}>{away.label}</button>
   {/if}
   <AccountPill {item} />
+  {#if thread}
+    <a class="reply" href={href.reply(thread)} aria-label={`Reply: ${item.title}`} title="Reply">
+      <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+        <path d="M8 5l-4.5 4.5L8 14M4 9.5h7a5.5 5.5 0 0 1 5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </a>
+  {/if}
   <a class="source" href={href.mail(origin(item))} aria-label="Open the source mail" title="Open the source mail">
     <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
       <rect x="2.5" y="4.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
@@ -273,8 +309,11 @@
   .due.late::after {
     background: var(--color-error);
   }
-  /* What Iris prepared: quiet pills under the detail. They are no control, so a click opens the item. */
+  /* What Iris prepared: quiet pills under the detail. A draft pill opens the reply; a nudge pill is no control, so a click opens the item. */
   .prepared {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
     margin: var(--space-1) 0 0;
   }
   .ready {
@@ -302,6 +341,20 @@
     overflow: hidden;
     clip-path: inset(50%);
   }
+  a.ready {
+    position: relative;
+    z-index: 1;
+    text-decoration: none;
+    transition: background var(--transition-fast);
+  }
+  a.ready:hover {
+    background: var(--color-background-elevated);
+  }
+  a.ready:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .reply,
   .source {
     position: relative;
     z-index: 1;
@@ -314,17 +367,21 @@
     color: var(--color-text-faint);
     transition: color var(--transition-fast), background var(--transition-fast);
   }
+  .reply:hover,
+  .reply:focus-visible,
   .source:hover,
   .source:focus-visible {
     color: var(--color-text);
     background: var(--color-background-elevated);
     outline: none;
   }
+  .reply:focus-visible,
   .source:focus-visible {
     box-shadow: 0 0 0 2px var(--color-primary);
   }
   /* A touch screen: the icon controls grow to the size of a finger tip. */
   @media (max-width: 600px), (any-pointer: coarse) {
+    .reply,
     .source,
     .box {
       width: var(--size-touch);
@@ -333,6 +390,10 @@
     .away {
       min-width: var(--size-touch);
       min-height: var(--size-touch);
+    }
+    a.ready {
+      min-height: var(--size-touch);
+      padding: 0 var(--space-3);
     }
   }
   /* The quiet verb: a text button that shows on hover or focus of the line. */
@@ -492,6 +553,8 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .line,
+    .reply,
+    a.ready,
     .source,
     .away,
     .box circle,

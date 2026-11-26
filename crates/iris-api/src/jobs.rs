@@ -21,6 +21,11 @@ pub struct JobPage {
     pub jobs: Vec<Value>,
     /// The `after` value of the next page, or `None` on the last page.
     pub next: Option<String>,
+    /// The newest session of each `working` job of the page, by job ID
+    /// (issue 791), so that the list can say when no agent works on a job.
+    /// A working job with no session has `null`. The job document itself
+    /// stays as the schema gives it.
+    pub sessions: Map<String, Value>,
 }
 
 fn job_error(e: iris_job::Error) -> Error {
@@ -48,16 +53,37 @@ pub fn jobs(store: &Store, state: &str, limit: u32, after: Option<&str>) -> Resu
                 .ok_or_else(|| Error::Query(format!("not a job ID: {a:?}")))?,
         ),
     };
-    let mut jobs = iris_job::page(store, &states, limit + 1, before).map_err(job_error)?;
+    // One read transaction: the page and the sessions come from the same
+    // snapshot, so a working job never shows a session of a later state.
+    store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        Ok(page_and_sessions(&tx, &states, limit, before))
+    })?
+}
+
+/// The page of [`jobs`] and the newest session of each working job, in the
+/// transaction `c` of the caller.
+fn page_and_sessions(
+    c: &Connection,
+    states: &[JobState],
+    limit: u32,
+    before: Option<i64>,
+) -> Result<JobPage> {
+    let mut jobs = iris_job::page_in(c, states, limit + 1, before).map_err(job_error)?;
     let next = if jobs.len() > limit as usize {
         jobs.truncate(limit as usize);
         jobs.last().map(|j| iris_job::format_job_id(j.id))
     } else {
         None
     };
+    let mut sessions = Map::new();
+    for j in jobs.iter().filter(|j| j.state == JobState::Working) {
+        sessions.insert(iris_job::format_job_id(j.id), newest_session(c, j.id)?);
+    }
     Ok(JobPage {
         jobs: jobs.iter().map(iris_job::job_json).collect(),
         next,
+        sessions,
     })
 }
 
@@ -91,6 +117,32 @@ pub fn answer_job(
 pub fn finish_job(store: &Store, row: i64, end: iris_job::End, now_ms: i64) -> Result<()> {
     iris_job::finish(store, row, By::Person, end, None, now_ms).map_err(|e| match e {
         iris_job::Error::Refused(_) => Error::Conflict("The job is done already.".into()),
+        e => job_error(e),
+    })
+}
+
+/// The person ends the wait of the job `row` (issue #959), if the job still
+/// waits and has the `events` events of the job document that the person
+/// saw. Else `Conflict`, and nothing changes. A wake by the person
+/// starts no session (docs/specs/2026-11-17-wait.md): the job page then
+/// shows the command that starts an agent.
+pub fn wake_job(store: &Store, row: i64, events: u64, now_ms: i64) -> Result<()> {
+    iris_job::transaction(store, |c| {
+        let j = iris_job::get_in(c, row)?;
+        let now: i64 = c.query_row(
+            "SELECT count(*) FROM job_event WHERE job_id = ?1",
+            [row],
+            |r| r.get(0),
+        )?;
+        if j.state != JobState::Waiting || u64::try_from(now).ok() != Some(events) {
+            return Err(iris_job::Error::Refused("the job does not wait now".into()));
+        }
+        iris_job::wake_in(c, row, By::Person, None, now_ms)
+    })
+    .map_err(|e| match e {
+        iris_job::Error::Refused(_) => {
+            Error::Conflict("The job does not wait now, or its wait changed.".into())
+        }
         e => job_error(e),
     })
 }

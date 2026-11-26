@@ -151,6 +151,9 @@ pub struct Me {
     pub id: String,
     pub mail: Option<String>,
     pub user_principal_name: String,
+    /// The name of the person of the mailbox, for `From` (#864).
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 impl Me {
@@ -347,7 +350,7 @@ impl Graph {
 
     /// `GET /me`.
     pub fn me(&self, token: &str) -> Result<Me> {
-        let url = self.url("/me?$select=id,mail,userPrincipalName");
+        let url = self.url("/me?$select=id,mail,userPrincipalName,displayName");
         self.json(token, &url, false)
     }
 
@@ -1115,6 +1118,7 @@ mod tests {
             id: "1".into(),
             mail: mail.map(String::from),
             user_principal_name: "u@example.com".into(),
+            display_name: None,
         };
         assert_eq!(me(Some("m@example.com")).address(), "m@example.com");
         assert_eq!(me(Some("")).address(), "u@example.com");

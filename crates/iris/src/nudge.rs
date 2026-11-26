@@ -19,7 +19,8 @@ pub const PAGE: usize = 20;
 
 /// One nudge step: a call for each late thread of one page of
 /// [`iris_voice::late`] (at most [`PAGE`] threads, the oldest try first),
-/// at most [`MAX_PER_TURN`] calls. No call when another run holds the
+/// at most [`MAX_PER_TURN`] calls. A thread starts only when its two calls
+/// (a call and one retry) fit in the rest of the limit. No call when another run holds the
 /// lock, when no model is set, or during the wait after a model error.
 /// Each try is in the store ([`iris_voice::tried`]): it moves the thread to
 /// the end of the order, so a thread that the budget cannot pay does not
@@ -49,10 +50,29 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
     let mut saved = 0;
     let mut calls = 0;
     for l in late {
-        if calls == MAX_PER_TURN {
+        // A draft or a question of the person waits for the lock (#279).
+        if batch::wanted(store) {
             break;
         }
-        let outcome = call(store, &row, model.as_ref(), &l, now_ms)?;
+        // A nudge can make two calls (a call and the retry of an invalid
+        // answer). With less room in the turn, the thread waits for the
+        // next step, so its retry is not lost.
+        if MAX_PER_TURN - calls < 2 {
+            break;
+        }
+        let (outcome, made) = call(
+            store,
+            &row,
+            model.as_ref(),
+            iris_voice::NUDGE_PROMPT,
+            now_ms,
+            |m| match iris_voice::nudge(store, &l, m, now_ms) {
+                Ok(_) => Done::Saved,
+                Err(iris_voice::Error::BadAnswer(_)) => Done::Invalid,
+                Err(_) => Done::Other,
+            },
+        )?;
+        calls += made;
         store
             .write(|tx| {
                 Ok(iris_voice::tried(
@@ -65,19 +85,27 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
             })
             .map_err(|e| e.to_string())?;
         match outcome {
-            // No call went out: the next thread can still fit the budget.
+            // The next thread can still fit the budget.
             Outcome::Refused => continue,
-            Outcome::ModelFailed => break,
+            Outcome::ModelFailed | Outcome::Yielded => break,
             Outcome::Saved => saved += 1,
             Outcome::Invalid | Outcome::Other => {}
         }
-        calls += 1;
     }
     Ok(saved)
 }
 
-enum Outcome {
-    /// The budget refused the call. No row stays.
+/// How a call under the budget ended, as the caller of [`call`] reads it.
+pub(crate) enum Done {
+    Saved,
+    /// The model answered, and the answer is not valid.
+    Invalid,
+    /// Nothing saved for another reason.
+    Other,
+}
+
+pub(crate) enum Outcome {
+    /// The budget refused a call. No row stays if no call went out.
     Refused,
     Saved,
     /// The model answered, and the answer is not a valid draft.
@@ -87,44 +115,55 @@ enum Outcome {
     Other,
     /// The model failed: the shared wait starts.
     ModelFailed,
+    /// A draft or a question waits for the run lock: the step stops.
+    Yielded,
 }
 
-/// One nudge call under the budget, as `iris write` makes it
-/// (`crate::reply`): an `understand_run` row for the counts of the call,
-/// and the shared model wait at its end. The caller holds the run lock.
-fn call(
+/// One prepared thing (a nudge, a thread summary) under the budget, as
+/// `iris write` makes it (`crate::reply`): `run` makes the calls through the
+/// budget wrapper. An `understand_run` row with the prompt `prompt` keeps
+/// the counts of the calls, and the shared model wait applies at its end.
+/// The caller holds the run lock. Gives the outcome and the count of model
+/// calls that went out.
+pub(crate) fn call(
     store: &Store,
     row: &ModelRow,
     model: &dyn Model,
-    late: &iris_voice::Late,
+    prompt: &str,
     now_ms: i64,
-) -> Result<Outcome, String> {
+    run_with: impl FnOnce(&dyn Model) -> Done,
+) -> Result<(Outcome, usize), String> {
     let run = store
         .write(|tx| {
             tx.execute(
                 "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
                                             unknown_cost_micro_usd)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![
-                    now_ms,
-                    row.model,
-                    iris_voice::NUDGE_PROMPT,
-                    row.price.is_some().then_some(0)
-                ],
+                params![now_ms, row.model, prompt, row.price.is_some().then_some(0)],
             )?;
             Ok(tx.last_insert_rowid())
         })
         .map_err(|e| e.to_string())?;
-    let budgeted = Budgeted::new(model, store, run, Some(row));
-    let result = iris_voice::nudge(store, late, &budgeted, now_ms);
+    let budgeted = Budgeted::new(model, store, run, Some(row)).yielding();
+    let waits = Yielding {
+        model: &budgeted,
+        store,
+        refused: std::cell::Cell::new(false),
+    };
+    let result = run_with(&waits);
     let s = budgeted.state();
-    let stop = if s.refused || s.overrun {
+    // A call stopped for a waiter (issue #1126) is a yield too: no model
+    // error, and the thing stays open for a later step.
+    let yielded = waits.refused.get() || s.cancelled;
+    let stop = if yielded {
+        "yield"
+    } else if s.refused || s.overrun {
         "budget"
     } else if s.unknown {
         "unknown"
     } else if s.key_refused || s.server_failed {
         "model"
-    } else if result.is_ok() {
+    } else if matches!(result, Done::Saved) {
         "done"
     } else {
         "error"
@@ -132,32 +171,65 @@ fn call(
     let failed = matches!(stop, "unknown" | "model");
     // A refusal before the call leaves no row: the step runs each turn.
     let refused = s.refused && !s.store_failed;
-    store
+    let made = store
         .write(|tx| {
             let r = batch::report(tx, run)?;
-            if refused && r.calls == 0 {
+            // A call with unknown usage went out too (#947).
+            let made = r.calls + r.unknown_calls;
+            if refused && made == 0 {
                 tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
-                return Ok(());
+                return Ok(0);
             }
             let ended = now_ms.max(crate::engine::now_ms());
             tx.execute(
                 "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
                 params![run, ended, stop],
             )?;
-            batch::update_wait(tx, failed, r.calls > 0, ended)?;
-            Ok(())
+            batch::update_wait(tx, failed, made > 0 && !s.cancelled, ended)?;
+            Ok(made.max(0) as usize)
         })
         .map_err(|e| e.to_string())?;
     if let Some(e) = budgeted.take_error() {
         return Err(format!("store: {e}"));
     }
-    Ok(match result {
+    let outcome = match result {
+        _ if yielded => Outcome::Yielded,
         _ if refused => Outcome::Refused,
         _ if failed => Outcome::ModelFailed,
-        Ok(_) => Outcome::Saved,
-        Err(iris_voice::Error::BadAnswer(_)) => Outcome::Invalid,
-        Err(_) => Outcome::Other,
-    })
+        Done::Saved => Outcome::Saved,
+        Done::Invalid => Outcome::Invalid,
+        Done::Other => Outcome::Other,
+    };
+    Ok((outcome, made))
+}
+
+/// The model of [`call`]: it refuses each call while a draft or a question
+/// waits for the run lock (#279), also the retry of an invalid answer. The
+/// refusal is no invalid answer, so the thing stays open for a later step.
+struct Yielding<'a> {
+    model: &'a dyn Model,
+    store: &'a Store,
+    refused: std::cell::Cell<bool>,
+}
+
+impl Model for Yielding<'_> {
+    fn name(&self) -> &str {
+        self.model.name()
+    }
+
+    fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
+        self.model.request_bytes(instruction, data)
+    }
+
+    fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        if batch::wanted(self.store) {
+            self.refused.set(true);
+            return Err(iris_model::Error::Budget(
+                "a draft or a question waits for the model".into(),
+            ));
+        }
+        self.model.ask(instruction, data)
+    }
 }
 
 #[cfg(test)]
@@ -182,7 +254,10 @@ mod tests {
 
         fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
             // The thread "t-big" costs more than any budget of the tests.
-            match data.contains(r#""subject":"t-big""#) {
+            // The thread "t-retry" does too, after the first call.
+            let big = data.contains(r#""subject":"t-big""#)
+                || (data.contains(r#""subject":"t-retry""#) && self.0.get() > 0);
+            match big {
                 true => 1 << 40,
                 false => (instruction.len() + data.len()) as u64,
             }
@@ -193,13 +268,18 @@ mod tests {
             if self.1 == "fail" {
                 return Err(iris_model::Error::Server(500));
             }
+            // "unknown:" gives the rest of the text with unknown usage.
+            let (text, known) = match self.1.strip_prefix("unknown:") {
+                Some(t) => (t, false),
+                None => (self.1, true),
+            };
             Ok(Reply {
-                text: self.1.into(),
+                text: text.into(),
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 10,
                     cost_micro_usd: None,
-                    known: true,
+                    known,
                 },
                 stop: Stop::End,
             })
@@ -303,7 +383,7 @@ mod tests {
         let (store, dir) = open("one");
         ask(&store, "t1", "Ana, can you send the slides?");
         let calls = Rc::new(Cell::new(0));
-        let answer = Cell::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+        let answer = Cell::new(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
         let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
             Ok(Box::new(Fake(calls.clone(), answer.get())))
         };
@@ -335,26 +415,26 @@ mod tests {
         assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(calls.get(), 1, "no call during the wait");
         calls.set(0);
-        // An invalid answer after the wait: one call, then no call again
-        // for the same newest message.
+        // An invalid answer after the wait: one call and its one retry
+        // (decision D7), then no call again for the same newest message.
         let late = wait;
         answer.set("not json");
         assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(step(&store, &connect, late), Ok(0));
-        assert_eq!((calls.get(), blocked(&store)), (1, 1));
+        assert_eq!((calls.get(), blocked(&store)), (2, 1));
         // A store that the engine opens again keeps the try: no new call.
         let again = Store::open(&dir).unwrap();
         assert_eq!(step(&again, &connect, late), Ok(0));
-        assert_eq!(calls.get(), 1);
+        assert_eq!(calls.get(), 2);
         store
             .write(|tx| {
                 tx.execute("DELETE FROM nudge_try", [])?;
                 Ok(())
             })
             .unwrap();
-        answer.set(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+        answer.set(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
         assert_eq!(
             count(
                 &store,
@@ -374,7 +454,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(step(&store, &connect, late + 60_000), Ok(0));
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
 
         // The lock is held: no call.
         store
@@ -386,6 +466,181 @@ mod tests {
         let lock = batch::lock(&store).unwrap();
         assert_eq!(step(&store, &connect, late), Ok(0));
         drop(lock);
+        assert_eq!(calls.get(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    type Want = Rc<std::cell::RefCell<Option<iris_store::FileLock>>>;
+
+    /// A model that takes the want lock in its first call, as a draft or
+    /// a question that starts to wait during the call.
+    struct Grab(Fake, Want, std::path::PathBuf);
+
+    impl Model for Grab {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn request_bytes(&self, i: &str, d: &str) -> u64 {
+            self.0.request_bytes(i, d)
+        }
+        fn ask(&self, i: &str, d: &str) -> Result<Reply, iris_model::Error> {
+            self.1
+                .borrow_mut()
+                .get_or_insert_with(|| iris_store::FileLock::try_take(&self.2).unwrap().unwrap());
+            self.0.ask(i, d)
+        }
+    }
+
+    /// A model whose call takes the want lock and then gives no answer
+    /// until its cancel test gives true (issue #1126).
+    struct Hang(Want, std::path::PathBuf, Rc<Cell<u32>>);
+
+    impl Model for Hang {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn request_bytes(&self, _: &str, _: &str) -> u64 {
+            100
+        }
+        fn ask(&self, _: &str, _: &str) -> Result<Reply, iris_model::Error> {
+            panic!("the step calls with a cancel test")
+        }
+        fn ask_cancel(
+            &self,
+            _: &str,
+            _: &str,
+            cancel: &dyn Fn() -> bool,
+        ) -> Result<Reply, iris_model::Error> {
+            self.2.set(self.2.get() + 1);
+            self.0
+                .borrow_mut()
+                .get_or_insert_with(|| iris_store::FileLock::try_take(&self.1).unwrap().unwrap());
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !cancel() {
+                assert!(std::time::Instant::now() < end, "no cancel");
+            }
+            Err(iris_model::Error::Cancelled)
+        }
+    }
+
+    /// Issue #1126: a waiter stops the call in flight of the nudge step.
+    /// The run says `yield`, the worst case stays as unknown cost, no model
+    /// wait starts, and the step makes no other call.
+    #[test]
+    fn a_waiter_cancels_the_call_in_flight() {
+        let (store, dir) = open("wantcancel");
+        ask(&store, "t1", "Ana, can you send the slides?");
+        ask(&store, "t2", "Ben, can you send the notes?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let want: Want = Rc::default();
+        let path = dir.join(batch::WANT_FILE);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Hang(want.clone(), path.clone(), calls.clone())))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (1, 0));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM understand_run WHERE stop = 'yield' AND unknown_calls = 1
+                   AND unknown_cost_micro_usd > 0"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM model_setting WHERE retry_failures = 0 AND retry_at IS NULL"
+            ),
+            1
+        );
+        drop(want.borrow_mut().take());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The retry of an invalid answer waits too (#279): no second call
+    /// while a waiter waits, the run says `yield`, and the thread is not
+    /// blocked, so a later step tries it again.
+    #[test]
+    fn a_retry_waits_for_a_waiter_and_the_thread_stays_open() {
+        let (store, dir) = open("wantretry");
+        ask(&store, "t1", "Ana, can you send the slides?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let want: Want = Rc::default();
+        let path = dir.join(batch::WANT_FILE);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Grab(
+                Fake(calls.clone(), "not json"),
+                want.clone(),
+                path.clone(),
+            )))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (1, 0));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM understand_run WHERE stop = 'yield'"
+            ),
+            1
+        );
+        drop(want.borrow_mut().take());
+        // The waiter is gone: the call and its retry, then the block.
+        let plain = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "not json")))
+        };
+        assert_eq!(step(&store, &plain, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (3, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A draft or a question that waits for the lock (#279): the step stops
+    /// before its next thread, and takes no lock while the waiter waits.
+    #[test]
+    fn a_step_stops_for_a_waiter_and_does_not_start_while_it_waits() {
+        let (store, dir) = open("want");
+        ask(&store, "t1", "Ana, can you send the slides?");
+        ask(&store, "t2", "Ana, can you send the deck?");
+        let calls = Rc::new(Cell::new(0));
+        let want: Want = Rc::default();
+        let path = dir.join(batch::WANT_FILE);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Grab(
+                Fake(
+                    calls.clone(),
+                    r#"{"body": "Hi Ana, any news on the slides or the deck? D", "named": [1]}"#,
+                ),
+                want.clone(),
+                path.clone(),
+            )))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(step(&store, &connect, late), Ok(1));
+        assert_eq!(calls.get(), 1, "the second thread waits");
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get(), 1, "no lock while the waiter waits");
+        drop(want.borrow_mut().take());
+        assert_eq!(step(&store, &connect, late), Ok(1));
         assert_eq!(calls.get(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -408,11 +663,11 @@ mod tests {
         };
         let late = 1_000 + iris_voice::LATE_AFTER_MS;
         // The big thread comes first and is refused; the small one gets its
-        // call. The answer is not valid: no draft.
+        // call and its retry. The answer is not valid: no draft.
         assert_eq!(step(&store, &connect, late), Ok(0));
-        assert_eq!((calls.get(), blocked(&store)), (1, 1));
+        assert_eq!((calls.get(), blocked(&store)), (2, 1));
         assert_eq!(step(&store, &connect, late), Ok(0));
-        assert_eq!(calls.get(), 1, "one call for one model version");
+        assert_eq!(calls.get(), 2, "one try for one model version");
         // A new model version: the small thread gets a new call.
         store
             .write(|tx| {
@@ -420,9 +675,136 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        answer.set(r#"{"body": "Hi Ana, any news? D"}"#);
+        answer.set(r#"{"body": "Hi Ana, any news on the slides or the deck? D", "named": [1]}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
+        assert_eq!(calls.get(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_step_starts_a_thread_only_when_its_retry_fits() {
+        let (store, dir) = open("limit");
+        for t in ["t1", "t2", "t3"] {
+            ask(&store, t, "Ana, can you send the slides?");
+        }
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        // The first thread gets a call and its retry. One call of the limit
+        // is left, too few for a call and a retry, so the other threads
+        // wait and stay open for the next step.
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (2, 1));
+        // The next step gives the second thread its call and its retry.
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (4, 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_retry_counts_the_first_call() {
+        let (store, dir) = open("refused-retry");
+        ask(&store, "t-retry", "Ana, can you send the deck?");
+        ask(&store, "t-next", "Ana, can you send the slides?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        // "t-retry": one paid call, then the budget refuses the retry. The
+        // run row stays with its call. "t-next": a call and its retry.
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get() as usize, MAX_PER_TURN);
+        assert_eq!(
+            count(&store, "SELECT coalesce(sum(calls), 0) FROM understand_run"),
+            MAX_PER_TURN as i64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calls_of_unknown_usage_count_toward_the_turn() {
+        let (store, dir) = open("unknown-turn");
+        for t in ["t-a", "t-b", "t-c", "t-d"] {
+            ask(&store, t, "Ana, can you send the deck?");
+        }
+        // A local model is free, and its server gives no usage.
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE model_setting SET provider = 'local',
+                       base_url = 'http://127.0.0.1:1/v1', price_in = NULL, price_out = NULL",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "unknown:not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        // The first thread makes its call and its retry. The next thread
+        // waits, because the turn has less room than two calls (#947).
+        assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(calls.get(), 2);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT coalesce(sum(unknown_calls), 0) FROM understand_run"
+            ),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A priced model whose invalid answer has unknown usage: the budget
+    /// refuses the retry, the run stops as `unknown`, the shared wait
+    /// starts, and the step stops (review of #964).
+    #[test]
+    fn a_priced_call_of_unknown_usage_starts_the_wait() {
+        let (store, dir) = open("unknown-priced");
+        ask(&store, "t-a", "Ana, can you send the deck?");
+        ask(&store, "t-b", "Ana, can you send the slides?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "unknown:not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get(), 1, "no retry and no next thread");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM understand_run WHERE stop = 'unknown' AND unknown_calls = 1"
+            ),
+            1
+        );
+        assert_eq!(
+            count(&store, "SELECT retry_at IS NOT NULL FROM model_setting"),
+            1,
+            "the shared wait starts"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,6 @@
 # Specification 4: the versions of the open model
 
-- Status: version 1.2
+- Status: version 1.4
 - Design: `docs/specs/2026-11-17-open-model-v1.md` (card R6-07)
 
 ## 1. Purpose
@@ -24,6 +24,11 @@ reads them (a reader). Iris is a producer and a reader.
    - an optional field;
    - a new value of an enum;
    - a new verb, with its arguments;
+   - a new target kind of a verb, for a new action of that verb (for
+     example, the `drafts` target of `draft` in 1.3, a change of a draft).
+     The actions of the older targets keep their meaning. Rule 8 applies:
+     a document that claims an older minor version and holds the new
+     target is not valid;
    - a new schema (a new document).
 3. A minor version never removes or renames a field or an enum value. It
    never changes the type or the meaning of a field. It never makes an
@@ -105,7 +110,7 @@ action from it.
 ## 6. The conformance kit
 
 The kit checks the documents of a producer with no Iris code. Its version
-is in [`VERSION`](VERSION) (`1.2`), and it names the newest minor version
+is in [`VERSION`](VERSION) (`1.4`), and it names the newest minor version
 that it knows.
 
 | Path | Content |
@@ -140,3 +145,5 @@ exits 0. [`conformance/README.md`](conformance/README.md) gives the steps.
 | 1.0 | The first stable version. | R6-07 |
 | 1.1 | The optional field `account` (an `a-` ID) of each item. | R6-02 |
 | 1.2 | Matters: signal members (`s-` IDs, the optional field `counts.signal`), `derived.by` `agent` and `person`, and the optional field `additions`. Changesets: the optional fields `withdrawn_by` (`author` or `person`, decision D16) and `comments` (the review comments of the person, decision D15). | P8 (`docs/specs/2026-11-24-matters-edit.md`), P7 (issues #221, #538) |
+| 1.3 | Changesets: a `draft` action can target one draft (`{"drafts": ["d-N"]}`), a change of that draft in place (decision D6). | P4 (`docs/specs/2026-11-25-draft-change.md`) |
+| 1.4 | Items: the value `summary` of the optional field `ready` (the thread of the origin message has a summary that is not stale, issue 478). | `docs/specs/2026-11-25-thread-summary.md` |

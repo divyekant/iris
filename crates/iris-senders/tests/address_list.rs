@@ -37,6 +37,10 @@ fn address(r: &mut Rng) -> String {
     let mut local: String = (0..n).map(|_| *r.pick(LOCAL)).collect();
     // A local part does not start or end with a dot.
     local = format!("a{local}z");
+    // A quoted local part with the signs of list syntax (issue #980).
+    if r.below(5) == 0 {
+        local = format!("\"{local} <x>, (y);\"");
+    }
     format!("{local}@{}", r.pick(DOMAINS))
 }
 
@@ -67,6 +71,8 @@ fn entry(r: &mut Rng, a: &str) -> String {
         7 => format!("\"Ana \\\", x@evil.example\" <{a}>"),
         // A quoted pair in a comment: `\)` does not end the comment.
         8 => format!("{a} (x\\), <b@evil.example>, tail)"),
+        // White space and a comment before the address in `<>`.
+        9 if r.below(2) == 0 => format!("Ana < (note, <x>) {a}>"),
         _ => format!("=?UTF-8?Q?Ana_Lee?= <{a}>"),
     }
 }
@@ -161,4 +167,118 @@ fn property_any_text_is_safe() {
             assert_eq!(a, a.to_ascii_lowercase(), "{text:?}");
         }
     }
+}
+
+/// The comment name of a bare address keeps its quoted pairs and its
+/// nested comments (issue #780).
+#[test]
+fn comment_name_reads_quoted_pairs_and_nested_comments() {
+    for (list, want) in [
+        ("a@example.org (Ana \\) Lee)", "Ana ) Lee"),
+        ("a@example.org (Ana \\( Lee)", "Ana ( Lee"),
+        ("a@example.org (Ana (work) Lee)", "Ana (work) Lee"),
+        ("a@example.org (Ana Lee), b@example.org", "Ana Lee"),
+    ] {
+        let got = addresses(list);
+        assert_eq!(got[0].0, "a@example.org", "{list:?}");
+        assert_eq!(got[0].1.as_deref(), Some(want), "{list:?}");
+    }
+    // An open comment gives no name, and the address stays.
+    assert_eq!(
+        addresses("a@example.org (Ana"),
+        vec![("a@example.org".into(), None)]
+    );
+}
+
+/// A domain literal holds `:` and `,` that are not list syntax. A `[` that
+/// does not follow `@`, or has no `]`, is text (issue #83).
+#[test]
+fn domain_literals() {
+    let got = |l: &str| addresses(l).into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+    assert_eq!(
+        got("user@[IPv6:2001:db8::1], b@example.org"),
+        ["user@[ipv6:2001:db8::1]", "b@example.org"]
+    );
+    assert_eq!(
+        got("T: <u@[IPv6:2001:db8::1]>, c@x.example;"),
+        ["u@[ipv6:2001:db8::1]", "c@x.example"]
+    );
+    assert_eq!(
+        got("Ana [work] <a@x.example>, b@y.example"),
+        ["a@x.example", "b@y.example"]
+    );
+    assert_eq!(got("a@[x, b@y.example"), ["a@[x", "b@y.example"]);
+}
+
+/// Many open domain literals with no `]` cost one pass, not a scan for
+/// each `[` (a hostile header can hold thousands).
+#[test]
+fn open_domain_literals_are_linear() {
+    let list = "a@[x, ".repeat(200_000);
+    let start = std::time::Instant::now();
+    let got = addresses(&list);
+    assert_eq!(got.len(), 200_000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// A quoted local part in `<>` can hold `<`, `>` and `,`: they are text, not
+/// list syntax (issue #980). A quote in `<>` with no closing `"@` is text,
+/// so an open quote cannot hide the rest of the list.
+#[test]
+fn quoted_local_parts_in_angle_brackets() {
+    let got = |l: &str| addresses(l).into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+    assert_eq!(
+        got("Ana <\"a<b\"@example.org>, c@example.org"),
+        ["\"a<b\"@example.org", "c@example.org"]
+    );
+    assert_eq!(
+        got("<\"a>, b\"@example.org>, c@example.org"),
+        ["\"a>, b\"@example.org", "c@example.org"]
+    );
+    assert_eq!(
+        got("< \"x\\\"<y\"@example.org>; d@example.org"),
+        ["\"x\\\"<y\"@example.org", "d@example.org"]
+    );
+    // An open quote: the rest of the list stays.
+    assert_eq!(
+        got("<\"a@example.org>, c@example.org, \"Bo\" <d@example.org>"),
+        ["\"a@example.org", "c@example.org", "d@example.org"]
+    );
+    // The display name of a quoted local part is kept.
+    assert_eq!(
+        addresses("Ana Lee <\"a>b\"@example.org>")[0].1.as_deref(),
+        Some("Ana Lee")
+    );
+}
+
+/// Many `<"` with no closing quote cost one bounded scan each, not a scan
+/// of the whole list.
+#[test]
+fn open_quoted_local_parts_are_linear() {
+    let list = "<\"a, ".repeat(200_000);
+    let start = std::time::Instant::now();
+    let _ = addresses(&list);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// A comment and white space can come before a quoted local part in `<>`.
+#[test]
+fn a_comment_before_a_quoted_local_part() {
+    let got = |l: &str| addresses(l).into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+    assert_eq!(
+        got("<(note)\"a<b\"@example.org>, c@example.org"),
+        ["\"a<b\"@example.org", "c@example.org"]
+    );
+    assert_eq!(
+        got("Ana < (x) (y\\)) \"a>, b\"@example.org>"),
+        ["\"a>, b\"@example.org"]
+    );
 }

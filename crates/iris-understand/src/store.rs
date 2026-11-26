@@ -88,6 +88,11 @@ pub struct Outcome {
     /// No fixed rule matched, and the message has 3 failed tries or a later
     /// `retry_at`: no model call, and step 8 wrote nothing.
     pub waiting: bool,
+    /// The sender is a stranger that the person declined at the gate
+    /// (decision D29): no model call. The message is understood with no
+    /// items, and its row in `model_declined` makes it pending again when
+    /// the decline stops applying (store migration 53).
+    pub declined: bool,
     /// The message changed in the store while the model worked (content,
     /// labels, sender kind or gone). Step 8 wrote nothing, and the message
     /// stays not understood for the next run.
@@ -113,6 +118,9 @@ struct Row {
     tries: i64,
     retry_at: Option<i64>,
     phishing: bool,
+    /// The hostile marks that the person released for the current content
+    /// (`message.released`, migration 64).
+    released: Vec<String>,
 }
 
 /// Rows of `link_check` in one read of [`recheck_links`].
@@ -129,6 +137,28 @@ pub const LINK_CHECKS: i64 = 200;
 /// count of messages that got the mark. With `max_marks`, it stops before
 /// one more message would get the mark: the run limit counts them.
 pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Result<u64> {
+    Ok(recheck_links_scan(store, now_ms, max_marks)?.count)
+}
+
+/// The result of a scan of a queue: the count of [`recheck_links`] or
+/// [`recheck_fixed`], and true if the scan stopped for a waiter of the run
+/// lock and left rows that it did not read (#279).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scan {
+    pub count: u64,
+    pub yielded: bool,
+}
+
+/// [`recheck_links`] that says if it stopped for a waiter.
+pub fn recheck_links_scan(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Result<Scan> {
+    // Issue 1121: old mail with a deceptive link only in an attached
+    // message joins the queue first, so this scan gives it the mark.
+    if recheck_old_links(store)? {
+        return Ok(Scan {
+            count: 0,
+            yielded: true,
+        });
+    }
     let mut marked = 0;
     let mut after = 0;
     loop {
@@ -142,73 +172,404 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
             Ok(rows)
         })?;
         let Some(&(last, _)) = rows.last() else {
-            return Ok(marked);
+            return Ok(Scan {
+                count: marked,
+                yielded: false,
+            });
         };
         after = last;
         for (row, id) in rows {
+            // A draft or a question waits for the run lock: the rest of
+            // the queue waits for the next run (#279).
+            if crate::batch::wanted(store) {
+                return Ok(Scan {
+                    count: marked,
+                    yielded: true,
+                });
+            }
             // The row ID first: a trigger that queues the message again
             // after this read gives it a new row, which this check keeps.
-            let Some((mark, sha)) = link_mark_of(store, id) else {
+            let Some(read) = link_read(store, id) else {
                 continue;
             };
+            let mark = read.mark;
             if mark && max_marks.is_some_and(|n| marked >= n) {
                 // The message limit of the run: the rest waits.
-                return Ok(marked);
+                return Ok(Scan {
+                    count: marked,
+                    yielded: false,
+                });
             }
             if mark {
                 // Hostile mail never reaches the model (section 6.7). An
                 // error leaves the row for the next run.
                 let _ = understand(store, id, &crate::budget::NoModel, now_ms);
             }
-            // The row goes only for the state that the check read (the same
-            // row, the same content), and, for a deceptive link, only when
-            // the message has the mark.
-            let done = store.write(|tx| {
-                let n = tx.execute(
-                    "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
-                       SELECT 1 FROM message m WHERE m.id = ?2
-                         AND (m.content_sha256 IS ?3 OR m.gone_at IS NOT NULL)
-                         AND (NOT ?4 OR EXISTS (
-                           SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
-                           WHERE value = 'link')))",
-                    params![row, id, sha, mark],
-                )?;
-                if n > 0 && !mark {
-                    // A mark of earlier content goes: the check of this
-                    // content found no deceptive link.
-                    tx.execute(
-                        "UPDATE message SET hostile = (
-                           SELECT json_group_array(value) FROM json_each(hostile)
-                           WHERE value <> 'link')
-                         WHERE id = ?1 AND content_sha256 IS ?2 AND EXISTS (
-                           SELECT 1 FROM json_each(coalesce(hostile, '[]'))
-                           WHERE value = 'link')",
-                        params![id, sha],
-                    )?;
-                }
-                Ok(n > 0)
-            })?;
+            let done = store.write(|tx| link_check_done(tx, row, id, &read))?;
             marked += u64::from(mark && done);
         }
     }
 }
 
-/// For the received message `id`: true when it has a deceptive link, with
-/// the content hash that the check read. False when it has none, is gone,
-/// is your own mail or has no content. `None` when Iris cannot read the
-/// row or the file now.
-fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
+/// Issue 1121: one more link check of each message of `link_recheck`
+/// (store migration 72: mail checked before the links of attached
+/// messages counted), in pages of [`LINK_CHECKS`], with no model. A
+/// message with a deceptive link moves to `link_check`, so the normal
+/// check gives it the mark. Each row goes after its read. A row whose file
+/// Iris cannot read now stays for a later run, as in `link_check`: the scan
+/// goes on after it. Gives true if it stopped for a waiter of the run lock
+/// (#279).
+fn recheck_old_links(store: &Store) -> Result<bool> {
+    let mut after = 0;
+    loop {
+        let page: Vec<i64> = store.read(|c| {
+            let v = c
+                .prepare_cached(
+                    "SELECT message_id FROM link_recheck WHERE message_id > ?1
+                      ORDER BY message_id LIMIT ?2",
+                )?
+                .query_map([after, LINK_CHECKS], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })?;
+        let Some(&last) = page.last() else {
+            return Ok(false);
+        };
+        after = last;
+        for id in page {
+            if crate::batch::wanted(store) {
+                return Ok(true);
+            }
+            // A file that Iris cannot read now keeps its row for a later run.
+            let Some(read) = link_read(store, id) else {
+                continue;
+            };
+            let mark = read.mark;
+            store.write(|tx| {
+                if mark {
+                    // A new row, as the triggers of migration 20 make it.
+                    tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+                    tx.execute(
+                        "INSERT INTO link_check(message_id) SELECT id FROM message
+                          WHERE id = ?1 AND gone_at IS NULL AND content_sha256 IS NOT NULL",
+                        [id],
+                    )?;
+                }
+                tx.execute("DELETE FROM link_recheck WHERE message_id = ?1", [id])?;
+                Ok(())
+            })?;
+        }
+    }
+}
+
+/// Rows of `fixed_due` in one read of [`recheck_fixed`].
+pub const FIXED_CHECKS: i64 = 200;
+
+/// The fixed check of each message in `fixed_due` (store migration 54,
+/// decision D31): mail whose sender became or stopped being a `service`, or
+/// whose display name is the old or the new name of a known person. It runs
+/// the fixed steps again with no model: the hostile marks (the spoof check
+/// reads the known names) and the fixed rules (the code-signal rule reads
+/// the kind `service`). Only when the result differs from the stored one,
+/// it understands the message again with no model:
+/// - a new mark makes the message hostile: its items go;
+/// - a rule that matches now gives its items;
+/// - mail that no fixed rule covers now, and that the model never read (it
+///   was hostile, or a rule made its items), waits for the model as new mail
+///   does.
+///
+/// The check never calls the model, and mail whose model items still hold
+/// keeps them. A row goes only when the check read the state of now: a
+/// change during the check gives the message a new row. Gives the count of
+/// messages that it understood again. With `max`, it stops before one more
+/// message would be understood again: the run limit counts them, and the
+/// rest of the queue waits for the next run.
+pub fn recheck_fixed(store: &Store, now_ms: i64, max: Option<u64>) -> Result<u64> {
+    Ok(recheck_fixed_scan(store, now_ms, max)?.count)
+}
+
+/// [`recheck_fixed`] that says if it stopped for a waiter.
+pub fn recheck_fixed_scan(store: &Store, now_ms: i64, max: Option<u64>) -> Result<Scan> {
+    let mut done = 0;
+    let mut after = 0;
+    loop {
+        let rows: Vec<(i64, i64)> = store.read(|c| {
+            let mut st = c.prepare(
+                "SELECT id, message_id FROM fixed_due WHERE id > ?1 ORDER BY id LIMIT ?2",
+            )?;
+            let rows = st
+                .query_map([after, FIXED_CHECKS], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })?;
+        let Some(&(last, _)) = rows.last() else {
+            return Ok(Scan {
+                count: done,
+                yielded: false,
+            });
+        };
+        after = last;
+        for (row, id) in rows {
+            // A draft or a question waits for the run lock: the rest of
+            // the queue waits for the next run (#279).
+            if crate::batch::wanted(store) {
+                return Ok(Scan {
+                    count: done,
+                    yielded: true,
+                });
+            }
+            let start = store.read(|c| Ok(state(c, id, true)?))?;
+            // A file that Iris cannot read now keeps the row for the next run.
+            let Ok(differs) = fixed_differs(store, id, now_ms) else {
+                continue;
+            };
+            if differs && max.is_some_and(|n| done >= n) {
+                return Ok(Scan {
+                    count: done,
+                    yielded: false,
+                });
+            }
+            if differs {
+                // No model: the run ends with a refusal when the message
+                // needs the model. Write 1 has made it pending then.
+                match understand(store, id, &crate::budget::NoModel, now_ms) {
+                    Ok(_) | Err(Error::Model(..)) => done += 1,
+                    Err(_) => continue,
+                }
+            }
+            store.write(|tx| {
+                // With no change, the row goes only for the state that the
+                // check read; after a new run, for any state.
+                let same = differs || state(tx, id, true)? == start;
+                if same {
+                    tx.execute("DELETE FROM fixed_due WHERE id = ?1", [row])?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+}
+
+/// Steps 1 to 3 for a message read from the store: one rule for
+/// [`understand`] and the fixed check. Mail past the read limit counts as
+/// cut text, the mark `phishing` stays until a rebuild, and a mark that the
+/// person released is left out (section 6.7).
+fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, row: &Row) -> Analysis {
+    let mut a = analyze_cut(raw, raw_cut, html_after, cx);
+    a.text.cut |= raw_cut;
+    a.marks
+        .retain(|m| !row.released.iter().any(|r| r == m.name()));
+    if row.phishing {
+        a.marks.push(Mark::Phishing);
+    }
+    a
+}
+
+/// The record of `message.fixed_rules` that the backfill of migration 58
+/// writes when it cannot tell how the last run completed the message.
+const UNKNOWN_RULES: &str = "unknown";
+
+/// True when the fixed result of the understood received message `id` now
+/// (its hostile marks, or the rules of its rule items) is not the stored
+/// one. False for mail that is gone or your own. For mail that is not
+/// understood: true when the fixed steps alone complete it now.
+fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
+    let row = read_row(store, id)?;
+    let own = row
+        .labels
+        .iter()
+        .any(|l| l == "SENT" || iris_store::DRAFT_OR_COPY.contains(&l.as_str()));
+    let understood: bool = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT understood_at IS NOT NULL FROM message WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?)
+    })?;
+    if row.gone || own || row.sha.is_none() {
+        return Ok(false);
+    }
+    let path = row
+        .sha
+        .as_deref()
+        .and_then(|s| store.content_path(s))
+        .ok_or(Error::NoMessage(id))?;
+    let (raw, raw_cut, html_after) = read_raw(&path)?;
+    let head = crate::Head::parse(&raw, row.authserv);
+    let (now, stored_marks, (stored_rules, unknown), model_items) = store.read(|c| {
+        let now = inputs(
+            c,
+            id,
+            row.thread,
+            row.internal_date,
+            head.from_name.as_deref(),
+            head.from_addr.as_deref(),
+        )?;
+        let kind = match head.from_addr.as_deref() {
+            Some(a) => sender_kind_in(c, a)?,
+            None => Kind::Stranger,
+        };
+        let marks: String = c.query_row(
+            "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        // The rules that completed the last understanding (migration 58),
+        // also of pinned items; `None` when the model made an item.
+        let rules: Option<String> =
+            c.query_row("SELECT fixed_rules FROM message WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })?;
+        // `unknown`: the backfill of migration 58 could not tell how the
+        // last run completed the message; the check runs it again.
+        let unknown = rules.as_deref() == Some(UNKNOWN_RULES);
+        let rules: Option<Vec<String>> =
+            rules.map(|r| serde_json::from_str(&r).unwrap_or_default());
+        let model = rules.is_none();
+        let rules = rules.unwrap_or_default();
+        Ok(((now, kind), marks, (rules, unknown), model))
+    })?;
+    let (inputs_now, kind) = now;
+    let known = |_: &str| inputs_now.known.clone();
+    let cx = Context {
+        me: &row.me,
+        kind,
+        labels: &row.labels,
+        authserv: row.authserv,
+        internal_date: row.internal_date,
+        now_ms,
+        known_person: &known,
+        existing: &inputs_now.pinned,
+        thread: &inputs_now.context,
+        same_sender: &inputs_now.same,
+        known: &inputs_now.parties,
+    };
+    let a = analysis(&raw, raw_cut, html_after, &cx, &row);
+    if !understood {
+        // Pending mail, or mail that a model try limit or a refusal holds:
+        // understood again only when the fixed steps alone complete it now.
+        return Ok(decide(&a, &cx, None).is_ok_and(|d| d.hostile || !d.waiting));
+    }
+    if marks_json(&a.marks, false) != stored_marks {
+        return Ok(true);
+    }
+    if unknown {
+        return Ok(true);
+    }
+    // With no model, `decide` makes no call and gives no error.
+    let Ok(d) = decide(&a, &cx, None) else {
+        return Ok(true);
+    };
+    if d.hostile {
+        return Ok(false);
+    }
+    let mut stored_rules = stored_rules;
+    stored_rules.sort();
+    Ok(if d.waiting {
+        // The model reads the mail: a rule item does not hold now.
+        !stored_rules.is_empty()
+    } else {
+        let mut now: Vec<String> = d.rules.iter().map(|r| r.to_string()).collect();
+        now.sort();
+        model_items || now != stored_rules
+    })
+}
+
+/// The record of `message.fixed_rules` for one decision: `None` when the
+/// model made a draft, else the rules that the fixed rules matched
+/// ([`crate::Decision::rules`]), also of a draft that a pinned item holds.
+fn fixed_rules(d: &crate::Decision) -> Option<String> {
+    if d.drafts.iter().any(|x| matches!(x.by, crate::By::Model)) {
+        return None;
+    }
+    let mut rules = d.rules.clone();
+    rules.sort();
+    Some(serde_json::to_string(&rules).expect("strings serialize"))
+}
+
+/// What the link check read of one message: the mark, and the state that
+/// the mark depends on (the content and the release). The write of the
+/// check ([`link_check_done`]) needs the same state.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct LinkRead {
+    pub mark: bool,
+    sha: Option<String>,
+    released: String,
+}
+
+/// The link mark of message `id` (its row ID) for the link check, or None
+/// when Iris cannot read the message now. Sent mail, drafts and gone mail
+/// get no mark.
+#[doc(hidden)]
+pub fn link_read(store: &Store, id: i64) -> Option<LinkRead> {
     let row = read_row(store, id).ok()?;
+    // As `release` writes it: a sorted JSON array; NULL reads as `[]`.
+    let released = serde_json::to_string(&row.released).expect("strings serialize");
     let own = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
     if row.gone || own || row.sha.is_none() {
-        return Some((false, row.sha));
+        return Some(LinkRead {
+            mark: false,
+            sha: row.sha,
+            released,
+        });
     }
     let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
     let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
     let c = iris_clean::clean_cut(&raw, raw_cut);
     let head = crate::Head::parse(&raw, row.authserv);
-    let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after);
-    Some((mark, row.sha))
+    // A released `link` mark is no mark (section 6.7).
+    let mark = crate::link_mark(
+        &head,
+        &c.links,
+        &c.attached_links,
+        c.links_cut || html_after,
+    ) && !row.released.iter().any(|r| r == "link");
+    Some(LinkRead {
+        mark,
+        sha: row.sha,
+        released,
+    })
+}
+
+/// The write of the link check of queue row `row` for message `id`, from
+/// `read`. The row goes only for the state that the check read: the same
+/// row, the same content and the same release (an undo after the read
+/// keeps the row and the restored mark). For a deceptive link, the row goes
+/// only when the message has the mark. With no deceptive link, a `link`
+/// mark of earlier content goes. True when the row went.
+#[doc(hidden)]
+pub fn link_check_done(
+    tx: &Transaction,
+    row: i64,
+    id: i64,
+    read: &LinkRead,
+) -> iris_store::Result<bool> {
+    let n = tx.execute(
+        "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
+           SELECT 1 FROM message m WHERE m.id = ?2
+             AND (m.gone_at IS NOT NULL OR (m.content_sha256 IS ?3
+                  AND coalesce(m.released, '[]') = ?5))
+             AND (NOT ?4 OR EXISTS (
+               SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
+               WHERE value = 'link')))",
+        params![row, id, read.sha, read.mark, read.released],
+    )?;
+    if n > 0 && !read.mark {
+        // A mark of earlier content goes: the check of this content found
+        // no deceptive link, or the person released it.
+        tx.execute(
+            "UPDATE message SET hostile = (
+               SELECT json_group_array(value) FROM json_each(hostile)
+               WHERE value <> 'link')
+             WHERE id = ?1 AND content_sha256 IS ?2 AND coalesce(released, '[]') = ?3
+               AND EXISTS (
+               SELECT 1 FROM json_each(coalesce(hostile, '[]'))
+               WHERE value = 'link')",
+            params![id, read.sha, read.released],
+        )?;
+    }
+    Ok(n > 0)
 }
 
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run
@@ -290,12 +651,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         same_sender: &first.same,
         known: &[],
     };
-    let mut a = analyze_cut(&raw, raw_cut, html_after, &cx);
-    a.text.cut |= raw_cut;
-    // The mark phishing stays until a rebuild (section 6.7).
-    if row.phishing {
-        a.marks.push(Mark::Phishing);
-    }
+    let a = analysis(&raw, raw_cut, html_after, &cx, &row);
     // A draft is not understood and is not hostile mail (section 6.7).
     let marks = if draft { Vec::new() } else { a.marks.clone() };
 
@@ -314,6 +670,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         text: a.text.text.clone(),
     };
     let mut decided = None;
+    let mut declined = false;
+    let mut gate_read = (false, None);
     let mut after = Inputs::default();
     let seen = store.write(|tx| {
         // Steps 1 and 2 used the state of the message and `first`.
@@ -326,6 +684,13 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         // In the transaction of the kind change, so no error loses a rerun.
         rerun_senders(tx, &d.rerun, now_ms)?;
         decided = Some(d);
+        // After the kind of this message: a decline applies only to a stranger.
+        gate_read = gate(tx, from_addr.as_deref())?;
+        declined = gate_read.0;
+        tx.execute(
+            "DELETE FROM model_declined WHERE message_id = ?1",
+            [message],
+        )?;
         // The clean text goes in the same checked write, so a sync between
         // two writes cannot leave the text of old content.
         iris_store::put_body(tx, message, &body)?;
@@ -381,6 +746,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         date: row.internal_date,
         from_name: from_name.clone(),
         from_addr: from_addr.clone(),
+        gate: gate_read,
     };
     // The engine does not understand a draft. It stays not understood, so
     // it runs when it is sent and loses the label DRAFT.
@@ -395,9 +761,13 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // fixed rules always run. Only the model call waits for `retry_at` and
     // stops after MAX_TRIES failed tries.
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
-    let d = decide(&a, &cx, (!held).then_some(model))
+    // The mail of a declined sender gets no model call (decision D29). The
+    // fixed rules and the hostile check still run.
+    let d = decide(&a, &cx, (!held && !declined).then_some(model))
         .map_err(|e| Error::Model(e, rerun.clone(), Box::new(read())))?;
-    if d.waiting {
+    // A declined sender with no rule that applies: understood, no items.
+    let skip = declined && d.waiting;
+    if d.waiting && !skip {
         // No rule supports the old items now, and the model cannot run.
         let same = store.write(|tx| {
             let same = state(tx, message, true)? == seen;
@@ -421,6 +791,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let mut out = Outcome {
         hostile: d.hostile,
+        declined: skip,
         failed: d.failed,
         calls: d.calls,
         usage: d.usage,
@@ -435,6 +806,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let written = store.write(|tx| {
         // The model saw `after`: each input must still be the same now, for
         // example with no later SPAM label on an earlier message.
+        // A decline, or the end of a decline, after write 1 changes the
+        // model step: save nothing, so the next run decides again.
         if !read.same(tx)? {
             changed = true;
             return Ok(Vec::new());
@@ -448,6 +821,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                  WHERE id = ?1",
                 params![message, now_ms + RETRY_MS],
             )?;
+            // Issue 1049: after its last try, this message is not context
+            // any more, and the later messages stop waiting for it.
+            check_after(tx, message)?;
             iris_talk::update(tx, row.thread, None, now_ms)?;
             return Ok(Vec::new());
         }
@@ -470,10 +846,55 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             )?);
         }
         keep_choices(tx, message)?;
+        // The thread context counts only through a model call, and only
+        // as far as the budget of the data held it.
+        let full: Vec<usize> = after
+            .context
+            .iter()
+            .rev()
+            .map(|e| crate::prompt::escape(e).len())
+            .collect();
+        let held = if d.calls == 0 {
+            Some(Vec::new())
+        } else if d.context_held != full {
+            Some(d.context_held.clone())
+        } else {
+            None
+        };
+        // No model call: no party reached a model.
+        let parties = if d.calls == 0 {
+            Some(0)
+        } else {
+            d.parties_room
+        };
         tx.execute(
-            "UPDATE message SET understood_at = ?2, retry_at = NULL WHERE id = ?1",
-            params![message, now_ms],
+            "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3,
+                    context = ?4
+             WHERE id = ?1",
+            params![
+                message,
+                now_ms,
+                fixed_rules(&d),
+                if d.hostile {
+                    // Hostile mail makes no item, and a new run of it calls
+                    // no model: the `phishing` answer of a model stays until
+                    // a rebuild (spec 1, section 6.7). So no context can
+                    // change its result.
+                    Some("-".to_string())
+                } else {
+                    context_key(tx, message, held.as_deref(), parties, false)?
+                }
+            ],
         )?;
+        // Issue 1049: this message can be context of the later messages of
+        // the thread now.
+        check_after(tx, message)?;
+        if skip {
+            tx.execute(
+                "INSERT INTO model_declined(message_id) VALUES (?1)",
+                [message],
+            )?;
+        }
         // Steps 4 and 7: the conversation counts this message unless it is
         // hostile mail, also after a phishing answer.
         iris_talk::update(tx, row.thread, Some(message), now_ms)?;
@@ -514,6 +935,10 @@ pub struct Seen {
     date: Option<i64>,
     from_name: Option<String>,
     from_addr: Option<String>,
+    /// The gate of the sender (decision D29): its decline, and the row ID
+    /// and `gate_rev` of its row (migration 58). Each decline or reopen
+    /// during the call is a changed input (#934).
+    gate: (bool, Option<(i64, i64)>),
 }
 
 impl Seen {
@@ -525,6 +950,7 @@ impl Seen {
         };
         Ok(state(c, self.message, true)? == self.state
             && kind_now == self.kind
+            && gate(c, self.from_addr.as_deref())? == self.gate
             && inputs(
                 c,
                 self.message,
@@ -564,6 +990,7 @@ fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result
               SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
               WHERE ml.message_id = m.id ORDER BY l.provider_id)), '') ||
            CASE WHEN ?2 THEN '|' || coalesce(m.hostile, '') || '|' ||
+                coalesce(m.released, '') || '|' ||
                 coalesce(m.understood_at, '') || '|' || m.tries || '|' ||
                 coalesce(m.retry_at, '') ELSE '' END
          FROM message m WHERE m.id = ?1",
@@ -606,7 +1033,7 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
                 "SELECT m.account_id, m.thread_id, m.content_sha256, m.internal_date,
                         m.gone_at IS NOT NULL, a.address, m.tries, m.retry_at,
                         EXISTS (SELECT 1 FROM json_each(coalesce(m.hostile, '[]')) WHERE value = 'phishing'),
-                        a.provider
+                        a.provider, m.released
                  FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
                 [message],
                 |r| {
@@ -622,6 +1049,10 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
                         tries: r.get(6)?,
                         retry_at: r.get(7)?,
                         phishing: r.get(8)?,
+                        released: r
+                            .get::<_, Option<String>>(10)?
+                            .and_then(|j| serde_json::from_str(&j).ok())
+                            .unwrap_or_default(),
                     })
                 },
             )
@@ -655,6 +1086,40 @@ fn pinned(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Vec<Value>
         .iter()
         .filter_map(|d| serde_json::from_str(d).ok())
         .collect())
+}
+
+/// True when `from` is a stranger that the person declined at the gate:
+/// `declined_at` is set and the kind is `stranger` or not set yet (the rule
+/// of `kind_sql` in `iris-api`).
+/// The gate state of `from` for [`Seen`]: [`declined_now`], and the row ID
+/// and `gate_rev` of the sender row.
+fn gate(
+    c: &rusqlite::Connection,
+    from: Option<&str>,
+) -> rusqlite::Result<(bool, Option<(i64, i64)>)> {
+    let row = match from {
+        Some(f) => c
+            .query_row(
+                "SELECT id, gate_rev FROM sender WHERE address = ?1",
+                [f],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
+        None => None,
+    };
+    Ok((declined_now(c, from)?, row))
+}
+
+fn declined_now(c: &rusqlite::Connection, from: Option<&str>) -> rusqlite::Result<bool> {
+    let Some(from) = from else {
+        return Ok(false);
+    };
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sender WHERE address = ?1 AND declined_at IS NOT NULL
+                          AND coalesce(kind, 'stranger') = 'stranger')",
+        [from],
+        |r| r.get(0),
+    )
 }
 
 fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind> {
@@ -697,7 +1162,7 @@ fn inputs(
             .unwrap_or_default(),
         same: same_sender(c, message, thread, date, from_addr)?,
         context: thread_context(c, message, thread, date)?,
-        parties: known_parties(c, thread)?,
+        parties: known_parties(c, thread, message, date)?,
         pinned: pinned(c, message)?,
     })
 }
@@ -711,8 +1176,19 @@ fn inputs(
 macro_rules! earlier_ok {
     () => {
         concat!(
-            "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
-         AND m.internal_date < ?3 AND NOT ",
+            "m.thread_id = ?1 AND m.id <> ?2 AND m.internal_date < ?3 AND ",
+            context_ok!()
+        )
+    };
+}
+
+/// The part of [`earlier_ok!`] that depends only on message `m`: it is
+/// not gone, not hostile mail, has no SPAM label, is not a draft or a copy,
+/// and its sender is not hostile.
+macro_rules! context_ok {
+    () => {
+        concat!(
+            "m.gone_at IS NULL AND NOT ",
             iris_store::may_be_hostile!(),
             " AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
@@ -725,14 +1201,412 @@ macro_rules! earlier_ok {
     };
 }
 
+/// The rows of [`same_sender`], after `SELECT`: one text for the run and
+/// for [`context_key`]. Parameters: ?1 thread, ?2 message, ?3 date, ?4
+/// the sender address, ?5 the limit.
+macro_rules! same_sender_from {
+    () => {
+        concat!(
+            "FROM message m JOIN body b ON b.message_id = m.id
+             JOIN header h ON h.message_id = m.id WHERE h.from_addr = ?4 AND ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?5"
+        )
+    };
+}
+
+/// The rows of [`thread_context`], after `SELECT`: one text for the run and
+/// for [`context_key`]. Parameters: ?1 thread, ?2 message, ?3 date, ?4 the
+/// limit. The model gets only a message that a run understood, so the
+/// model step judged it for phishing too.
+macro_rules! thread_context_from {
+    () => {
+        concat!(
+            "FROM message m JOIN body b ON b.message_id = m.id
+             WHERE m.understood_at IS NOT NULL AND ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
+        )
+    };
+    // The same rows, with each message that waits for a run (?5 is
+    // `MAX_TRIES`) counted as understood: the context after these runs, if
+    // they keep the message as context.
+    (waiting) => {
+        concat!(
+            "FROM message m JOIN body b ON b.message_id = m.id
+             WHERE (m.understood_at IS NOT NULL OR m.tries < ?5) AND ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
+        )
+    };
+}
+
+/// The FNV-1a 64 hash of `parts` (a stable hash: a new build gives the
+/// same key).
+fn fnv(parts: &[&str]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for p in parts {
+        for b in p.bytes().chain([0xff]) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// The entry of the thread context that a run gives the model for one
+/// earlier message: one text for the run and for [`context_key`].
+fn render_context(sender: &str, subject: &str, text: &str) -> String {
+    format!(
+        "From: {sender}\nSubject: {subject}\n{}",
+        crate::cut(text, THREAD_CHARS)
+    )
+}
+
+/// The context of a run of `message` now (store migration 69, issue
+/// 1049), as text ("t:7:<hash>,4:<hash>;s:4:<hash>"), so that a change of
+/// what a run reads changes it:
+///
+/// - `t`: the newest [`THREAD_MESSAGES`] earlier messages of the thread,
+///   newest first, each with the hash of its entry of the thread context
+///   ([`render_context`], escaped as the data escapes it).
+/// - With `held`, the data of the model call held only the first
+///   `held.len()` of them, and of each only `held[i]` bytes (the budget
+///   cut it, or no model call ran: empty). The key is then "t!:7:<hash>:<bytes>",
+///   and each hash is of the bytes that the data held.
+/// - `s`: the earlier messages of the same sender, each with the hash of
+///   its clean text, which shapes the clean text of the run.
+///
+/// It reads the sender address from the store, so a check and the run
+/// agree. `waiting`: count each message that waits for a run as
+/// understood. `None` for a message with no thread.
+fn context_key(
+    c: &rusqlite::Connection,
+    message: i64,
+    held: Option<&[usize]>,
+    parties_room: Option<usize>,
+    waiting: bool,
+) -> rusqlite::Result<Option<String>> {
+    let row: Option<(Option<i64>, Option<i64>, Option<String>)> = c
+        .query_row(
+            "SELECT m.thread_id, m.internal_date,
+                    (SELECT h.from_addr FROM header h WHERE h.message_id = m.id)
+             FROM message m WHERE m.id = ?1",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((Some(thread), date, from)) = row else {
+        return Ok(None);
+    };
+    let (mut t, mut s) = (Vec::new(), Vec::new());
+    if let Some(date) = date {
+        let limit = held.map_or(THREAD_MESSAGES, |h| (h.len() as i64).min(THREAD_MESSAGES));
+        let row = |r: &rusqlite::Row| -> rusqlite::Result<(i64, String)> {
+            let (id, sender, subject, text): (i64, String, String, String) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            Ok((
+                id,
+                crate::prompt::escape(&render_context(&sender, &subject, &text)),
+            ))
+        };
+        let rows: Vec<(i64, String)> = if waiting {
+            c.prepare_cached(concat!(
+                "SELECT m.id, b.sender, b.subject, b.text ",
+                thread_context_from!(waiting)
+            ))?
+            .query_map(params![thread, message, date, limit, MAX_TRIES], row)?
+            .collect::<rusqlite::Result<_>>()?
+        } else {
+            c.prepare_cached(concat!(
+                "SELECT m.id, b.sender, b.subject, b.text ",
+                thread_context_from!()
+            ))?
+            .query_map(params![thread, message, date, limit], row)?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        for (i, (id, text)) in rows.iter().enumerate() {
+            t.push(match held {
+                None => format!("{id}:{:016x}", fnv(&[text])),
+                Some(h) => {
+                    // The bytes that the data held, or fewer if the text is
+                    // shorter now: the count is part of the entry. "+" marks
+                    // a cut text, so a text that shrinks to the held bytes
+                    // (the data then has no cut mark) changes the entry.
+                    let mut n = h.get(i).copied().unwrap_or(0).min(text.len());
+                    while !text.is_char_boundary(n) {
+                        n -= 1;
+                    }
+                    let more = if n < text.len() { "+" } else { "" };
+                    format!("{id}:{:016x}:{n}{more}", fnv(&[&text[..n]]))
+                }
+            });
+        }
+        if let Some(from) = &from {
+            s = c
+                .prepare_cached(concat!("SELECT m.id, b.text ", same_sender_from!()))?
+                .query_map(
+                    params![thread, message, date, from, SAME_SENDER_MESSAGES],
+                    |r| {
+                        let (id, text): (i64, String) = (r.get(0)?, r.get(1)?);
+                        Ok(format!("{id}:{:016x}", fnv(&[&text])))
+                    },
+                )?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+    }
+    // The known parties of the data: all of them, or with a room of the
+    // budget, the first ones that fit in it now, and "+" if the list has
+    // more. So a party that starts to fit changes the record.
+    // The record hashes the text of each party that the data holds (cut and
+    // escaped), not the full party: a change after the cut is not data.
+    let parties = known_parties(c, thread, message, date)?;
+    let texts: Vec<String> = parties
+        .iter()
+        .map(|p| crate::prompt::party_text(p))
+        .collect();
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let parties: Vec<&str> = parties.iter().map(String::as_str).collect();
+    let p = match parties_room {
+        None => format!("p:{:016x}", fnv(&texts)),
+        Some(room) => {
+            let n = crate::prompt::parties_in(&parties, room);
+            let more = if n < parties.len() { "+" } else { "" };
+            format!("p!:{room}:{:016x}{more}", fnv(&texts[..n]))
+        }
+    };
+    let cut = if held.is_some() { "!" } else { "" };
+    // The thread and the date of the message itself: an item of a run
+    // names its thread, so a move runs the message again.
+    let at = date.map_or_else(|| "-".to_string(), |d| d.to_string());
+    Ok(Some(format!(
+        "t{cut}:{};s:{};{p};@{thread}:{at}",
+        t.join(","),
+        s.join(",")
+    )))
+}
+
+/// The `held` of a recorded context: `None` for the full window, or the
+/// bytes of each thread message that the data held.
+fn held_of(recorded: &str) -> Option<Vec<usize>> {
+    let t = recorded.strip_prefix("t!:")?;
+    Some(
+        t.split(';')
+            .next()
+            .unwrap_or("")
+            .split(',')
+            .filter(|x| !x.is_empty())
+            .map(|e| {
+                e.rsplit(':')
+                    .next()
+                    .and_then(|n| n.trim_end_matches('+').parse().ok())
+                    .unwrap_or(0)
+            })
+            .collect(),
+    )
+}
+
+/// The room of the budget for the known parties of a recorded context:
+/// `None` when the data held all of them ("p:"), or n of "p!:n:".
+fn parties_of(recorded: &str) -> Option<usize> {
+    let p = recorded.split(';').find_map(|x| x.strip_prefix("p!:"))?;
+    p.split(':').next().and_then(|n| n.parse().ok())
+}
+
+/// Checks one understood message `id` with the recorded context
+/// `recorded` (issue 1049). A message with no recorded context (from
+/// before migration 69) gets its context now. A message whose context now
+/// is not its recorded one runs again, unless the difference is only a
+/// message that waits for a run: that run checks again when it ends, so a
+/// message does not run twice for one change. Gives true for a reset.
+fn check_one(
+    tx: &rusqlite::Connection,
+    id: i64,
+    recorded: Option<String>,
+) -> rusqlite::Result<bool> {
+    let Some(recorded) = recorded else {
+        // A message from before the migration: the context of its run is
+        // not known. Record the newest ones that can be in it.
+        let now = context_key(tx, id, None, None, false)?;
+        tx.execute(
+            "UPDATE message SET context = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        return Ok(false);
+    };
+    if recorded == "-" {
+        // Hostile mail: no context shaped its run.
+        return Ok(false);
+    }
+    // "?": a message from before migration 69 whose context the queue step
+    // did not record before a change (see [`record_unknown`]). Run it again.
+    let held = held_of(&recorded);
+    let parties = parties_of(&recorded);
+    if recorded != "?"
+        && (context_key(tx, id, held.as_deref(), parties, false)?.as_deref()
+            == Some(recorded.as_str())
+            || context_key(tx, id, held.as_deref(), parties, true)?.as_deref()
+                == Some(recorded.as_str()))
+    {
+        return Ok(false);
+    }
+    // `understand_reset` (migration 65) clears `tries` and `retry_at` and
+    // puts the thread in `talk_due`.
+    tx.execute(
+        "UPDATE message SET understood_at = NULL, context = NULL WHERE id = ?1",
+        [id],
+    )?;
+    Ok(true)
+}
+
+/// Issue 1049: checks each understood message of `thread` (a change put
+/// the thread in `talk_due`: for example an earlier message went away, a
+/// link check started or ended, or a sender kind changed). It reads the
+/// thread in pages of [`CHECK_PAGE`] rows by row ID, so a long thread does
+/// not grow the memory. Gives the count of messages that run again.
+pub(crate) fn check_context(tx: &rusqlite::Connection, thread: i64) -> rusqlite::Result<usize> {
+    let mut reset = 0;
+    let mut after = 0;
+    loop {
+        let page: Vec<(i64, Option<String>)> = tx
+            .prepare_cached(
+                "SELECT id, context FROM message
+                 WHERE thread_id = ?1 AND id > ?2 AND understood_at IS NOT NULL
+                   AND gone_at IS NULL
+                 ORDER BY id LIMIT ?3",
+            )?
+            .query_map(params![thread, after, CHECK_PAGE], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let Some(&(last, _)) = page.last() else {
+            return Ok(reset);
+        };
+        after = last;
+        for (id, recorded) in page {
+            reset += usize::from(check_one(tx, id, recorded)?);
+        }
+    }
+}
+
+/// The most messages of one page of [`check_context`].
+const CHECK_PAGE: i64 = 200;
+
+/// Issue 1049: checks the later messages of the thread of `message` after
+/// a run of `message` ended (it is context now, or it is not any more).
+/// Only a later message with fewer than [`THREAD_MESSAGES`] context
+/// messages between it and `message` can have `message` in its thread
+/// context, and only a later message of the same sender with fewer than
+/// [`SAME_SENDER_MESSAGES`] such messages of that sender between can have
+/// it in its sender context. So two short walks find each message to
+/// check, and a run in a long thread reads only a few rows. Each walk
+/// reads at most [`WALK_ROWS`] rows: rows that do not count (for example
+/// SPAM) can make a walk longer, and then the thread goes to `talk_due`.
+/// Gives the
+/// count of messages that run again, and the count of rows that the walks
+/// read.
+fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usize, usize)> {
+    let row: Option<(Option<i64>, Option<i64>, Option<String>)> = tx
+        .query_row(
+            "SELECT m.thread_id, m.internal_date,
+                    (SELECT h.from_addr FROM header h WHERE h.message_id = m.id)
+             FROM message m WHERE m.id = ?1",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((Some(thread), Some(date), from)) = row else {
+        return Ok((0, 0));
+    };
+    // ?4: NULL for each later message, or one sender address.
+    let mut st = tx.prepare_cached(concat!(
+        "SELECT m.id, m.context, m.understood_at IS NOT NULL,
+                EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id) AND ",
+        context_ok!(),
+        " FROM message m WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.internal_date > ?3
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM header h
+                                      WHERE h.message_id = m.id AND h.from_addr = ?4))
+           -- Only a row to check or to count: an understood message that is
+           -- not hostile mail (its record is not '-'), or for the sender
+           -- walk a message with a text. Mail that waits for its first run
+           -- is neither, so a new thread costs no long walk.
+           AND ((m.understood_at IS NOT NULL AND m.context IS NOT '-')
+                OR (?4 IS NOT NULL AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)))
+         ORDER BY m.internal_date, m.id LIMIT ?5"
+    ))?;
+    let mut due = std::collections::BTreeMap::new();
+    let mut read = 0;
+    // The thread walk counts the context of the run (understood messages),
+    // the sender walk the texts of the sender (any message with a text).
+    let walks = [
+        (None, THREAD_MESSAGES, true),
+        (from, SAME_SENDER_MESSAGES, false),
+    ];
+    for (sender, max, understood_only) in walks {
+        if !understood_only && sender.is_none() {
+            continue;
+        }
+        let mut rows = st.query(params![thread, message, date, sender, WALK_ROWS])?;
+        let (mut between, mut walked) = (0, 0);
+        while let Some(r) = rows.next()? {
+            if between >= max {
+                break;
+            }
+            read += 1;
+            walked += 1;
+            let (id, recorded, understood, ok): (i64, Option<String>, bool, bool) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            if understood {
+                due.insert(id, recorded);
+            }
+            if ok && (understood || !understood_only) {
+                between += 1;
+            }
+        }
+        if between < max && walked == WALK_ROWS {
+            // Many later rows that do not count (for example SPAM): the walk
+            // can go on. The queue checks the whole thread in pages.
+            tx.execute(
+                "INSERT INTO talk_due(thread_id) SELECT ?1
+                 WHERE NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = ?1)",
+                [thread],
+            )?;
+        }
+    }
+    let mut reset = 0;
+    for (id, recorded) in due {
+        reset += usize::from(check_one(tx, id, recorded)?);
+    }
+    Ok((reset, read))
+}
+
+/// The most rows of one walk of [`check_after`]. A longer walk puts the
+/// thread in `talk_due`.
+const WALK_ROWS: i64 = 64;
+
+/// Runs the check of the later messages after `message` (issue 1049), as
+/// the end of a run does. Gives the count of rows that it read. For tests.
+#[doc(hidden)]
+pub fn check_later(store: &Store, message: i64) -> iris_store::Result<usize> {
+    store.write(|tx| Ok(check_after(tx, message)?.1))
+}
+
 /// The most known parties that the model gets.
 const KNOWN_PARTIES: i64 = crate::prompt::MAX_KNOWN as i64;
 
 /// The known persons in the headers (From, To, Cc) of the messages of the
 /// thread, also the current one, as `Name <address>`, for the model
 /// (section 7.4).
-fn known_parties(c: &rusqlite::Connection, thread: i64) -> rusqlite::Result<Vec<String>> {
+fn known_parties(
+    c: &rusqlite::Connection,
+    thread: i64,
+    message: i64,
+    date: Option<i64>,
+) -> rusqlite::Result<Vec<String>> {
     {
+        // Only the messages up to the current one in the order of the runs
+        // (date, then row ID; issue 1049): later mail does not change the
+        // data of an earlier run.
         let mut st = c.prepare_cached(
             "SELECT DISTINCT s.name, s.address FROM message m
              JOIN header h ON h.message_id = m.id
@@ -740,10 +1614,14 @@ fn known_parties(c: &rusqlite::Connection, thread: i64) -> rusqlite::Result<Vec<
                OR instr(',' || coalesce(h.to_addrs, '') || ',', ',' || s.address || ',') > 0
                OR instr(',' || coalesce(h.cc_addrs, '') || ',', ',' || s.address || ',') > 0)
              WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+               -- The order of the runs: mail with no date first.
+               AND ((m.internal_date IS NULL AND (?3 IS NOT NULL OR m.id <= ?4))
+                    OR m.internal_date < ?3
+                    OR (m.internal_date = ?3 AND m.id <= ?4))
              ORDER BY s.address LIMIT ?2",
         )?;
         let v = st
-            .query_map(params![thread, KNOWN_PARTIES], |r| {
+            .query_map(params![thread, KNOWN_PARTIES, date, message], |r| {
                 let (name, addr): (Option<String>, String) = (r.get(0)?, r.get(1)?);
                 Ok(match name.filter(|n| !n.is_empty()) {
                     Some(n) => format!("{n} <{addr}>"),
@@ -782,12 +1660,7 @@ fn same_sender(
         return Ok(Vec::new());
     };
     {
-        let mut st = c.prepare_cached(concat!(
-            "SELECT b.text FROM message m JOIN body b ON b.message_id = m.id
-             JOIN header h ON h.message_id = m.id WHERE h.from_addr = ?4 AND ",
-            earlier_ok!(),
-            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?5"
-        ))?;
+        let mut st = c.prepare_cached(concat!("SELECT b.text ", same_sender_from!()))?;
         let v = st
             .query_map(
                 params![thread, message, date, from, SAME_SENDER_MESSAGES],
@@ -818,21 +1691,14 @@ fn thread_context(
     };
     let mut v: Vec<String> = {
         let mut st = c.prepare_cached(concat!(
-            // The model gets only a message that a run understood, so the
-            // model step judged it for phishing too.
-            "SELECT b.sender, b.subject, b.text FROM message m JOIN body b ON b.message_id = m.id
-             WHERE m.understood_at IS NOT NULL AND ",
-            earlier_ok!(),
-            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
+            "SELECT b.sender, b.subject, b.text ",
+            thread_context_from!()
         ))?;
         let v = st
             .query_map(params![thread, message, date, THREAD_MESSAGES], |r| {
                 let (from, subject, text): (String, String, String) =
                     (r.get(0)?, r.get(1)?, r.get(2)?);
-                Ok(format!(
-                    "From: {from}\nSubject: {subject}\n{}",
-                    crate::cut(&text, THREAD_CHARS)
-                ))
+                Ok(render_context(&from, &subject, &text))
             })?
             .collect::<rusqlite::Result<_>>()?;
         v
@@ -855,13 +1721,15 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
     let subject = Some(a.text.subject.clone()).filter(|s| !s.is_empty());
     tx.prepare_cached(
         "INSERT INTO header(message_id, date, from_addr, from_name, to_addrs, cc_addrs, subject,
-           message_id_hdr, in_reply_to, list_id, auth)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+           message_id_hdr, in_reply_to, list_id, auth, reply_to, content_sha256)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                 (SELECT content_sha256 FROM message WHERE id = ?1))
          ON CONFLICT(message_id) DO UPDATE SET
            date = excluded.date, from_addr = excluded.from_addr, from_name = excluded.from_name,
            to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs, subject = excluded.subject,
            message_id_hdr = excluded.message_id_hdr, in_reply_to = excluded.in_reply_to,
-           list_id = excluded.list_id, auth = excluded.auth",
+           list_id = excluded.list_id, auth = excluded.auth, reply_to = excluded.reply_to,
+           content_sha256 = excluded.content_sha256",
     )?
     .execute(params![
         message,
@@ -875,6 +1743,7 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
         h.in_reply_to,
         h.list_id,
         h.auth.as_ref().map(|a| a.json()),
+        list(&h.reply_to),
     ])?;
     Ok(())
 }
@@ -892,6 +1761,133 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
 /// conversation of each thread again, so no conversation shows reset mail.
 /// Call it in the transaction that changed the kinds.
 ///
+/// The hostile marks that the person can release: the marks of the fixed
+/// checks. `spam` (a label of the provider), `phishing` (the answer of the
+/// model) and a `hostile` sender (it has the trust of the gate) stay.
+pub const RELEASABLE: [&str; 3] = ["dmarc", "spoof", "link"];
+
+/// The result of [`release`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Release {
+    /// The marks that the person released now, and the marks that stay.
+    Done {
+        released: Vec<String>,
+        kept: Vec<String>,
+    },
+    /// No message has the row ID, or it is gone.
+    NoMessage,
+    /// The message has no mark that the person can release, or (for
+    /// [`unrelease`]) no release.
+    Nothing,
+    /// Iris did not understand the current content yet, so its marks are
+    /// not known. A release names only marks of the current content.
+    Reading,
+}
+
+/// The marks, the released marks and `understood_at IS NOT NULL` of a
+/// message. `understood` is false while the marks can be from old content.
+type ReleaseRow = (Vec<String>, Vec<String>, bool);
+
+/// The [`ReleaseRow`] of message `message`, when it is not gone.
+fn release_row(tx: &Transaction, message: i64) -> iris_store::Result<Option<ReleaseRow>> {
+    let row: Option<(String, Option<String>, bool)> = tx
+        .query_row(
+            "SELECT coalesce(hostile, '[]'), released, understood_at IS NOT NULL
+               FROM message WHERE id = ?1 AND gone_at IS NULL",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(marks, released, understood)| {
+        let list = |j: &str| serde_json::from_str::<Vec<String>>(j).unwrap_or_default();
+        (
+            list(&marks),
+            released.as_deref().map(list).unwrap_or_default(),
+            understood,
+        )
+    }))
+}
+
+/// The person releases received message `message` from quarantine (issues
+/// 369, 373 and 374): each mark of [`RELEASABLE`] that it has now goes to
+/// `message.released`, with the marks that the person released before. The
+/// write clears `understood_at`, so the next run understands the message
+/// again without these marks: with the model, as new mail, if no other mark
+/// stays. New content of the message ends the release.
+pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
+    let Some((marks, mut all, understood)) = release_row(tx, message)? else {
+        return Ok(Release::NoMessage);
+    };
+    // The sync clears `understood_at` when the content changes and keeps
+    // the old marks until the next understanding: never release those.
+    if !understood {
+        return Ok(Release::Reading);
+    }
+    let now: Vec<String> = marks
+        .iter()
+        .filter(|m| RELEASABLE.contains(&m.as_str()) && !all.contains(m))
+        .cloned()
+        .collect();
+    if now.is_empty() {
+        return Ok(Release::Nothing);
+    }
+    all.extend(now.iter().cloned());
+    all.sort();
+    tx.execute(
+        // A release is a new decision of the person: the model gets new
+        // tries, as after a rerun (`rerun_senders`). A message that used
+        // its tries before a mark held it can then get its items.
+        // The release also clears `understood_at`: the next run
+        // understands the message again on the one path, without the
+        // released marks, whatever other check runs first.
+        "UPDATE message SET released = ?2, understood_at = NULL,
+           tries = 0, retry_at = NULL, waits_model = 0
+         WHERE id = ?1",
+        params![
+            message,
+            serde_json::to_string(&all).expect("strings serialize")
+        ],
+    )?;
+    let kept = marks.into_iter().filter(|m| !now.contains(m)).collect();
+    Ok(Release::Done {
+        released: now,
+        kept,
+    })
+}
+
+/// The person ends the release of message `message`. The released marks go
+/// back into `message.hostile` in the same write, so each gate that reads
+/// the marks holds the message at once. The write also clears
+/// `understood_at`, so the next run understands the message again on the
+/// one path of hostile mail: it drops the items and updates the
+/// conversation (section 7.3), with no model call. A gone message keeps its
+/// row as it is.
+pub fn unrelease(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
+    let Some((mut hostile, released, _)) = release_row(tx, message)? else {
+        return Ok(Release::NoMessage);
+    };
+    if released.is_empty() {
+        return Ok(Release::Nothing);
+    }
+    for m in released {
+        if !hostile.contains(&m) {
+            hostile.push(m);
+        }
+    }
+    hostile.sort();
+    tx.execute(
+        "UPDATE message SET released = NULL, hostile = ?2, understood_at = NULL WHERE id = ?1",
+        params![
+            message,
+            serde_json::to_string(&hostile).expect("strings serialize")
+        ],
+    )?;
+    Ok(Release::Done {
+        released: Vec::new(),
+        kept: hostile,
+    })
+}
+
 /// Set-based writes and thread pages of [`RERUN_PAGE`], so the work is
 /// linear in the mail of the sender and the memory is bounded. Gives the
 /// count of reset messages.
@@ -945,14 +1941,116 @@ pub const RERUN_PAGE: i64 = 500;
 /// runner calls it after its sender refresh, and the engine at each turn of
 /// its attention thread, so a kind change of the stranger gate counts too.
 pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize> {
+    record_unknown_contexts(store)?;
     let mut done = 0;
     loop {
-        let n = store.write(|tx| Ok(iris_talk::update_due(tx, now_ms, RERUN_PAGE)?))?;
+        let n = store.write(|tx| {
+            // Issue 1049: a change that put the thread here can change the
+            // context of a later message. The resets add no thread, because
+            // each one is in the queue already, so `update_due` takes the
+            // same page.
+            let threads: Vec<i64> = tx
+                .prepare_cached("SELECT thread_id FROM talk_due ORDER BY thread_id LIMIT ?1")?
+                .query_map([RERUN_PAGE], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for t in threads {
+                check_context(tx, t)?;
+            }
+            Ok(iris_talk::update_due(tx, now_ms, RERUN_PAGE)?)
+        })?;
         if n == 0 {
             return Ok(done);
         }
         done += n;
     }
+}
+
+/// Issue 1049: records the context now of each understood message from
+/// before migration 69 whose thread is not in `talk_due`, in pages. The
+/// batch run does it first, before step 1 can change a context.
+pub fn record_unknown_contexts(store: &Store) -> iris_store::Result<()> {
+    while store.write(|tx| Ok(record_unknown(tx)?))? > 0 {}
+    Ok(())
+}
+
+/// The most addresses of `party_due` that one pass of
+/// [`queue_party_threads`] holds in memory.
+const PARTY_PAGE: i64 = 10_000;
+
+/// Issue 1135: puts in `talk_due` each thread with an address of
+/// `party_due` (store migration 71: a known person that was added, changed
+/// or removed) in `To` or `Cc` of a message, and clears those addresses.
+/// The triggers of migrations 40 and 69 queue the `From` threads. One read
+/// of the headers serves all addresses of a page, so a sender refresh that
+/// changes many senders costs one scan, not one scan for each sender.
+/// Gives the count of addresses.
+pub fn queue_party_threads(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    let mut done = 0;
+    loop {
+        let due: std::collections::HashSet<String> = tx
+            .prepare_cached("SELECT address FROM party_due ORDER BY address LIMIT ?1")?
+            .query_map([PARTY_PAGE], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if due.is_empty() {
+            return Ok(done);
+        }
+        let mut threads = std::collections::BTreeSet::new();
+        {
+            let mut st = tx.prepare_cached(
+                "SELECT m.thread_id, coalesce(h.to_addrs, ''), coalesce(h.cc_addrs, '')
+                 FROM header h JOIN message m ON m.id = h.message_id
+                 WHERE m.thread_id IS NOT NULL
+                   AND (h.to_addrs IS NOT NULL OR h.cc_addrs IS NOT NULL)",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let (to, cc): (String, String) = (r.get(1)?, r.get(2)?);
+                // The lists hold bare lowercase addresses, comma-separated.
+                if to.split(',').chain(cc.split(',')).any(|a| due.contains(a)) {
+                    threads.insert(r.get::<_, i64>(0)?);
+                }
+            }
+        }
+        for t in threads {
+            tx.prepare_cached("INSERT OR IGNORE INTO talk_due(thread_id) VALUES (?1)")?
+                .execute([t])?;
+        }
+        let mut del = tx.prepare_cached("DELETE FROM party_due WHERE address = ?1")?;
+        for a in &due {
+            del.execute([a])?;
+        }
+        done += due.len();
+    }
+}
+
+/// Issue 1049: records the context now of a page of understood messages
+/// from before migration 69 (context "?") whose thread is not in
+/// `talk_due`. No change since the migration reached such a thread, so the
+/// context now is the context of its last run, as far as Iris can know
+/// (limit #1119). A message whose thread is in `talk_due` keeps "?", and
+/// the check of the thread runs it again. Gives the count of rows.
+#[doc(hidden)]
+pub fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    // A known party in `To` or `Cc` only puts its threads in `talk_due`
+    // first, in the same write, so no change of a sender between the two
+    // can become the record of the last run (issue 1135).
+    queue_party_threads(tx)?;
+    let page: Vec<i64> = tx
+        .prepare_cached(
+            "SELECT m.id FROM message m WHERE m.context = '?'
+               AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id)
+             ORDER BY m.id LIMIT ?1",
+        )?
+        .query_map([CHECK_PAGE], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for &id in &page {
+        let now = context_key(tx, id, None, None, false)?;
+        tx.execute(
+            "UPDATE message SET context = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+    }
+    Ok(page.len())
 }
 
 /// Deletes the items of `message` that a new run replaces: the rows of the

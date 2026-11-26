@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use iris_provider::{
     Change, Draft, DraftRaw, Error, History, HistoryMessage, HistoryPage, Label, MessagePage,
-    MessageRef, Metadata, Minimal, Profile, Provider, RawMessage, Result, Sent,
+    MessageRef, Metadata, Minimal, Move, Profile, Provider, RawMessage, Result, Sent,
 };
 
 use crate::{Auth, Entry, Folder, Search, Session, Special};
@@ -176,14 +176,104 @@ fn permanent(e: &crate::Examined, flags: &[&str]) -> bool {
     })
 }
 
+/// Gmail over IMAP keeps archived mail only in `[Gmail]/All Mail`, a `\All`
+/// folder, so the mirror would miss it. A Gmail account uses the Gmail sign-in.
+fn gmail_check<S: Read + Write>(s: &Session<S>) -> Result<()> {
+    if s.has("X-GM-EXT-1") {
+        return Err(api(
+            "gmailImap",
+            "use the Gmail sign-in for a Gmail account",
+        ));
+    }
+    Ok(())
+}
+
+/// The place of a folder for a move (moves spec, section 1). The role is
+/// the one that the reads give the folder, so the plan and the labels agree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Inbox,
+    Archive,
+    Trash,
+    Other,
+}
+
+fn place(f: &Folder) -> Place {
+    if f.name.eq_ignore_ascii_case("INBOX") {
+        return Place::Inbox;
+    }
+    match f.special {
+        Some(Special::Archive) => Place::Archive,
+        Some(Special::Trash) => Place::Trash,
+        _ => Place::Other,
+    }
+}
+
+/// Moves spec, section 1: `Some(true)` moves, `Some(false)` is done
+/// already, `None` refuses.
+fn moves(mv: Move, from: Place) -> Option<bool> {
+    use Place::*;
+    match (mv, from) {
+        (Move::Archive, Inbox) | (Move::Inbox, Archive) => Some(true),
+        (Move::Trash, Inbox | Archive) | (Move::Untrash, Trash) => Some(true),
+        (Move::Archive, Archive | Trash) | (Move::Inbox, Inbox) => Some(false),
+        (Move::Trash, Trash) | (Move::Untrash, Inbox | Archive) => Some(false),
+        _ => None,
+    }
+}
+
+/// The one target folder of `mv`, or a definite refusal.
+fn target(folders: &[Folder], mv: Move) -> Result<&Folder> {
+    let (want, none, two) = match mv {
+        Move::Inbox | Move::Untrash => (Place::Inbox, "noInbox", "ambiguousInbox"),
+        Move::Archive => (Place::Archive, "noArchive", "ambiguousArchive"),
+        Move::Trash => (Place::Trash, "noTrash", "ambiguousTrash"),
+    };
+    let mut it = folders.iter().filter(|f| place(f) == want);
+    match (it.next(), it.next()) {
+        (Some(f), None) => Ok(f),
+        (None, _) => Err(api(none, "the IMAP account has no folder for this move")),
+        (Some(_), Some(_)) => Err(api(two, "the IMAP account has two folders for this move")),
+    }
+}
+
+/// The plan of a move: true for each ID that moves, false for one that is
+/// done already, and the target folder if one moves. Reads only `LIST`.
+fn plan<'a, S: Read + Write>(
+    s: &Session<S>,
+    ids: &[&str],
+    mv: Move,
+    folders: &'a [Folder],
+) -> Result<(Vec<bool>, Option<&'a Folder>)> {
+    if !(s.has("MOVE") && s.has("UIDPLUS")) {
+        return Err(not_supported());
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let (_, _, folder) = parse_id(id).ok_or(Error::NotFound)?;
+        let f = folders
+            .iter()
+            .find(|f| f.name == folder)
+            .ok_or(Error::NotFound)?;
+        out.push(moves(mv, place(f)).ok_or_else(not_supported)?);
+    }
+    let to = if out.contains(&true) {
+        Some(target(folders, mv)?)
+    } else {
+        None
+    };
+    Ok((out, to))
+}
+
 /// The folders that hold mail: selectable, and not a view of other
 /// folders. In the page order of spec section 2.
 fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
+    gmail_check(s)?;
     let mut v: Vec<Folder> = s
         .folders()
         .map_err(read_error)?
         .into_iter()
-        // shortcut: mail only in `\All` (Gmail over IMAP) does not sync, issue #633.
+        // A `\All` folder is a view of the mail of the other folders.
         .filter(|f| f.selectable && !matches!(f.special, Some(Special::All | Special::Flagged)))
         .collect();
     // shortcut: a longer folder name refuses the account, issue #650.
@@ -195,21 +285,104 @@ fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
     Ok(v)
 }
 
-/// The common names of the four special folders (spec section 4), ASCII
-/// and compared with no case. shortcut: English names only, issue #648.
-const NAMES: [(Special, &[&str]); 4] = [
+/// The common names of the four special folders (spec section 4), in
+/// lowercase, compared with the lowercase text of the last name part. English,
+/// German, French, Spanish, Italian, Dutch, Portuguese and the Scandinavian
+/// names of the common mail clients and servers.
+const NAMES: [(Special, &[&str]); 5] = [
+    (
+        Special::Archive,
+        &[
+            "archive", "archives", "archiv", "archivio", "archivo", "arquivo", "archief", "arkiv",
+        ],
+    ),
     (
         Special::Sent,
-        &["sent", "sent items", "sent messages", "sent mail"],
+        &[
+            "sent",
+            "sent items",
+            "sent messages",
+            "sent mail",
+            "gesendet",
+            "gesendete objekte",
+            "gesendete elemente",
+            "envoyés",
+            "éléments envoyés",
+            "messages envoyés",
+            "enviados",
+            "elementos enviados",
+            "inviati",
+            "posta inviata",
+            "elementi inviati",
+            "verzonden",
+            "verzonden items",
+            "itens enviados",
+            "skickat",
+            "skickade objekt",
+            "sendt",
+            "sendte elementer",
+        ],
     ),
-    (Special::Drafts, &["drafts", "draft"]),
+    (
+        Special::Drafts,
+        &[
+            "drafts",
+            "draft",
+            "entwürfe",
+            "brouillons",
+            "borradores",
+            "bozze",
+            "concepten",
+            "rascunhos",
+            "utkast",
+            "kladder",
+        ],
+    ),
     (
         Special::Junk,
-        &["junk", "spam", "junk e-mail", "junk email", "bulk mail"],
+        &[
+            "junk",
+            "spam",
+            "junk e-mail",
+            "junk email",
+            "bulk mail",
+            "junk-e-mail",
+            "courrier indésirable",
+            "indésirables",
+            "correo no deseado",
+            "posta indesiderata",
+            "ongewenste e-mail",
+            "lixo eletrônico",
+            "skräppost",
+            "uønsket post",
+        ],
     ),
     (
         Special::Trash,
-        &["trash", "deleted items", "deleted messages", "bin"],
+        &[
+            "trash",
+            "deleted items",
+            "deleted messages",
+            "bin",
+            "papierkorb",
+            "gelöschte elemente",
+            "gelöschte objekte",
+            "corbeille",
+            "éléments supprimés",
+            "papelera",
+            "elementos eliminados",
+            "cestino",
+            "posta eliminata",
+            "elementi eliminati",
+            "prullenbak",
+            "verwijderde items",
+            "lixeira",
+            "itens excluídos",
+            "papperskorgen",
+            "borttagna objekt",
+            "papirkurv",
+            "slettede elementer",
+        ],
     ),
 ];
 
@@ -226,11 +399,47 @@ fn by_name(folders: &mut [Folder]) {
                 Some(d) if !d.is_empty() => f.name.rsplit(d).next().unwrap_or(&f.name),
                 _ => f.name.as_str(),
             };
-            if names.iter().any(|n| last.eq_ignore_ascii_case(n)) {
+            if names.contains(&folder_text(last).to_lowercase().as_str()) {
                 f.special = Some(special);
             }
         }
     }
+}
+
+/// The text of a folder name in modified UTF-7 (RFC 3501 section 5.1.3),
+/// for display and for the name match. A name that is not valid modified
+/// UTF-7 stays as the server sent it.
+fn folder_text(name: &str) -> String {
+    utf7(name).unwrap_or_else(|| name.to_owned())
+}
+
+fn utf7(name: &str) -> Option<String> {
+    use base64::Engine;
+    let mut out = String::new();
+    let mut rest = name;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let end = after.find('-')?;
+        if end == 0 {
+            out.push('&');
+        } else {
+            let b = base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(after[..end].replace(',', "/"))
+                .ok()?;
+            if b.len() % 2 != 0 {
+                return None;
+            }
+            let units: Vec<u16> = b
+                .chunks(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            out.push_str(&String::from_utf16(&units).ok()?);
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// The page order of a folder (spec section 2): `INBOX` first, then by name.
@@ -260,7 +469,7 @@ fn folder_label(f: &Folder) -> (String, String, &'static str) {
         Some(Special::Trash) => fixed("TRASH"),
         // `\Sent` and `\Drafts` too: no IMAP message gets SENT or DRAFT. Each
         // folder is system: the provider cannot change a folder (spec section 4).
-        _ => (format!("folder:{}", f.name), f.name.clone(), "system"),
+        _ => (format!("folder:{}", f.name), folder_text(&f.name), "system"),
     }
 }
 
@@ -299,10 +508,11 @@ const FIXED: [&str; 9] = [
 /// (fixed labels, then folder labels, then keyword labels), a name that a
 /// fixed name or an earlier label has gets " (folder)" or " (keyword)",
 /// then " (folder 2)", " (folder 3)" and so on. A lookup by name finds one
-/// label. The fixed names are taken first, so no label takes one.
+/// label. The fixed names are taken first, so no label takes one. Folder
+/// names decode to Unicode, so the compare folds Unicode case, not only ASCII.
 fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
     labels.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut taken: BTreeSet<String> = FIXED.iter().map(|x| x.to_ascii_lowercase()).collect();
+    let mut taken: BTreeSet<String> = FIXED.iter().map(|x| x.to_lowercase()).collect();
     for l in labels.iter_mut() {
         let tag = if l.id.starts_with("folder:") {
             "folder"
@@ -313,7 +523,7 @@ fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
         };
         let base = l.name.clone();
         let mut n = 1;
-        while taken.contains(&l.name.to_ascii_lowercase()) {
+        while taken.contains(&l.name.to_lowercase()) {
             l.name = if n == 1 {
                 format!("{base} ({tag})")
             } else {
@@ -321,7 +531,7 @@ fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
             };
             n += 1;
         }
-        taken.insert(l.name.to_ascii_lowercase());
+        taken.insert(l.name.to_lowercase());
     }
     labels
 }
@@ -540,6 +750,8 @@ fn removals<S: Read + Write>(
 impl<S: Read + Write + Send> Provider for Imap<S> {
     fn profile(&self, token: &str) -> Result<Profile> {
         self.with(token, |s| {
+            // Each other check of the server comes after this one (issue #981).
+            gmail_check(s)?;
             if !s.condstore() {
                 return Err(api("noCondstore", "the IMAP server has no CONDSTORE"));
             }
@@ -951,6 +1163,91 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
         })
     }
 
+    fn location_ids(&self) -> bool {
+        true
+    }
+
+    fn move_plan(&self, token: &str, ids: &[&str], mv: Move) -> Result<Vec<bool>> {
+        self.with(token, |s| {
+            let folders = mail_folders(s)?;
+            Ok(plan(s, ids, mv, &folders)?.0)
+        })
+    }
+
+    fn relocate(&self, token: &str, ids: &[&str], mv: Move) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(token, |s| {
+            let folders = mail_folders(s)?;
+            let (each, to) = plan(s, ids, mv, &folders)?;
+            // Each ID must move: a skip here means that the caller did not plan.
+            let (Some(to), true) = (to, each.iter().all(|x| *x)) else {
+                return Err(not_supported());
+            };
+            // The UIDs of each source folder, with its UIDVALIDITY.
+            let mut by_folder: BTreeMap<&str, (u32, Vec<u32>)> = BTreeMap::new();
+            for id in ids {
+                let (validity, uid, folder) = parse_id(id).ok_or(Error::NotFound)?;
+                let t = by_folder.entry(folder).or_insert((validity, Vec::new()));
+                if t.0 != validity || t.1.contains(&uid) {
+                    return Err(Error::NotFound);
+                }
+                t.1.push(uid);
+            }
+            // The page order of the IMAP provider spec, section 2: INBOX first.
+            let mut sources: Vec<_> = by_folder.into_iter().collect();
+            sources.sort_by(|a, b| order(a.0).cmp(&order(b.0)));
+            let mut new: BTreeMap<(&str, u32), String> = BTreeMap::new();
+            let mut sent = false;
+            // The target UIDVALIDITY of the first COPYUID: each new ID uses it.
+            let mut to_validity: Option<u32> = None;
+            let unknown = |e: Error| Error::Transport(format!("unknown result: {e}"));
+            for (folder, (validity, uids)) in &sources {
+                let e = s.select(folder).map_err(|e| {
+                    let e = read_error(e);
+                    if sent {
+                        unknown(e)
+                    } else {
+                        e
+                    }
+                })?;
+                if e.uidvalidity != *validity {
+                    return Err(if sent {
+                        unknown(Error::NotFound)
+                    } else {
+                        Error::NotFound
+                    });
+                }
+                sent = true;
+                // A NO or BAD can follow a part of the move (RFC 6851): unknown.
+                let copy = s
+                    .move_uids(uids, &to.name)
+                    .map_err(|e| unknown(read_error(e)))?
+                    .ok_or_else(|| Error::Transport("unknown result: no COPYUID".into()))?;
+                // A new target UIDVALIDITY makes the earlier new IDs stale (#1024).
+                if *to_validity.get_or_insert(copy.validity) != copy.validity {
+                    return Err(Error::Transport(
+                        "unknown result: the target UIDVALIDITY changed".into(),
+                    ));
+                }
+                for uid in uids {
+                    let (_, n) = copy.pairs.iter().find(|(f, _)| f == uid).ok_or_else(|| {
+                        Error::Transport("unknown result: a UID is not in COPYUID".into())
+                    })?;
+                    new.insert((folder, *uid), message_id(copy.validity, *n, &to.name));
+                }
+            }
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    let (_, uid, folder) = parse_id(id).expect("parsed above");
+                    new[&(folder, uid)].clone()
+                })
+                .collect())
+        })
+    }
+
     fn trash(&self, _: &str, _: &str) -> Result<Minimal> {
         Err(not_supported())
     }
@@ -1004,6 +1301,74 @@ impl Write for SinkGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Modified UTF-7 of `s` (RFC 3501 section 5.1.3), the encoder of the test.
+    fn encode(s: &str) -> String {
+        use base64::Engine;
+        let mut out = String::new();
+        let mut wide: Vec<u16> = Vec::new();
+        let flush = |out: &mut String, wide: &mut Vec<u16>| {
+            if !wide.is_empty() {
+                let b: Vec<u8> = wide.iter().flat_map(|u| u.to_be_bytes()).collect();
+                let t = base64::engine::general_purpose::STANDARD_NO_PAD.encode(b);
+                out.push_str(&format!("&{}-", t.replace('/', ",")));
+                wide.clear();
+            }
+        };
+        for c in s.chars() {
+            if (' '..='~').contains(&c) {
+                flush(&mut out, &mut wide);
+                if c == '&' {
+                    out.push_str("&-");
+                } else {
+                    out.push(c);
+                }
+            } else {
+                wide.extend(c.encode_utf16(&mut [0; 2]).iter());
+            }
+        }
+        flush(&mut out, &mut wide);
+        out
+    }
+
+    #[test]
+    fn folder_text_examples() {
+        assert_eq!(folder_text("Entw&APw-rfe"), "Entwürfe");
+        assert_eq!(folder_text("A&-B"), "A&B");
+        assert_eq!(
+            folder_text("~peter/mail/&U,BTFw-/&ZeVnLIqe-"),
+            "~peter/mail/台北/日本語"
+        );
+        // Not valid: the name stays as the server sent it.
+        for bad in ["a&b", "&AP-", "&2D0-", "&AP,-"] {
+            assert_eq!(folder_text(bad), bad);
+        }
+    }
+
+    /// Property: each text round-trips through modified UTF-7, and no input
+    /// of random bytes from the alphabet panics.
+    #[test]
+    fn folder_text_round_trip_and_no_panic() {
+        let chars = [
+            'a', 'Z', ' ', '&', '-', ',', '/', '+', 'ü', 'é', '台', '😀', 'A',
+        ];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..5000 {
+            let n = (next() % 12) as usize;
+            let s: String = (0..n)
+                .map(|_| chars[(next() % chars.len() as u64) as usize])
+                .collect();
+            assert_eq!(folder_text(&encode(&s)), s, "{s:?}");
+            // Raw input that a server can send: no panic.
+            let _ = folder_text(&s);
+        }
+    }
 
     #[test]
     fn thread_rules() {
@@ -1079,6 +1444,13 @@ mod tests {
                 "work (keyword)",
             ]
         );
+        // Decoded names that differ only in Unicode case get one name each.
+        let out = unique_names(vec![
+            l("folder:&ANw-ber", "Über"),
+            l("folder:&APw-ber", "über"),
+        ]);
+        let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Über", "über (folder)"]);
     }
 
     #[test]

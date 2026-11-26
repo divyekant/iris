@@ -12,7 +12,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         rejection::{JsonRejection, QueryRejection},
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::{header, StatusCode},
     middleware,
@@ -45,7 +45,9 @@ pub use auth::{Auth, CODE_LIFE, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
-pub use ledger::{ledger, undo_entry, LedgerEntry, LedgerPage};
+pub use ledger::{
+    dismiss_unconfirmed, ledger, undo_entry, unknown_messages, LedgerEntry, LedgerPage, Unconfirmed,
+};
 pub use matters::{
     confirm_matter, create_matter, decline_matter, delete_matter, edit_matter, matter, matters,
 };
@@ -144,6 +146,11 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/handled", get(get_handled))
         .route("/api/ledger", get(get_ledger))
         .route("/api/ledger/{id}/undo", post(post_undo))
+        .route("/api/ledger/{id}/unknown", get(get_unknown))
+        .route(
+            "/api/ledger/unconfirmed/dismiss",
+            post(post_dismiss_unconfirmed),
+        )
         .route("/api/gate", get(get_gate))
         .route("/api/gate/declined", get(get_declined))
         .route("/api/senders/{id}/{answer}", post(post_answer))
@@ -151,6 +158,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/items/{id}/job", get(get_start))
+        .route("/api/items/{id}/summary", get(get_summary))
         .route("/api/items/{id}/joinable", get(get_joinable))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
@@ -168,6 +176,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
+        .route("/api/messages/{id}/release", post(post_release))
+        .route("/api/messages/{id}/unrelease", post(post_unrelease))
         .route("/api/measures", get(get_measures))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/confirm", post(post_confirm))
@@ -179,6 +189,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/answer", post(post_job_answer))
         .route("/api/jobs/{id}/finish", post(post_job_finish))
+        .route("/api/jobs/{id}/wake", post(post_job_wake))
         .route("/api/jobs/{id}/edit", post(post_job_edit))
         .route("/api/jobs/{id}/scope", post(post_scope_add))
         .route("/api/jobs/{id}/scope/remove", post(post_scope_remove))
@@ -193,10 +204,16 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/stop", get(get_stop).post(post_stop))
         .route("/api/resume", post(post_resume))
         .route("/api/model/try", post(post_model_try))
+        .route("/api/zone", post(post_zone))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
+        .route(
+            "/api/attachments",
+            post(post_attachment).layer(DefaultBodyLimit::max(ATTACHMENT_LIMIT)),
+        )
         .route("/api/write/{id}", get(get_write))
+        .route("/api/drafts/{id}", get(get_draft_content))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
         .route("/api/matters", get(get_matters).post(post_matter_create))
@@ -223,16 +240,82 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
+/// The most API requests that run at the same time. The others wait on the
+/// runtime thread, with no blocking thread.
+pub const MAX_REQUESTS: usize = 64;
+
+/// The blocking threads that the API can hold: one for each request in
+/// progress, and one for the writer of each streamed answer ([`stream`]).
+/// The runtime of the API needs at least this many blocking threads, or a
+/// streamed answer can wait for a thread that never comes (#814).
+pub const BLOCKING_THREADS: usize = 2 * MAX_REQUESTS;
+
+/// The slots of [`MAX_REQUESTS`]: one for `POST /api/stop` alone, so that
+/// the Stop control of the web client answers when the other requests hold
+/// each other slot (`docs/specs/2026-11-17-stop.md`), and the rest for all
+/// other requests. One static for each process.
+static SLOTS: std::sync::OnceLock<[Arc<tokio::sync::Semaphore>; 2]> = std::sync::OnceLock::new();
+
 /// Runs the rest of the request (the measure count and the handler) on a
 /// blocking thread. `iris serve` has one runtime thread, which also answers
 /// the command socket: a handler that waits for a store connection there
 /// stops each other request (#700). The runtime thread keeps the drivers of
-/// I/O and time, so the handler can still await them.
+/// I/O and time, so the handler can still await them. The request holds one
+/// of the [`MAX_REQUESTS`] slots until its handler ends and its body ends,
+/// so the requests and their stream writers never hold more than
+/// [`BLOCKING_THREADS`]. A client that goes away does not free the slot
+/// while the handler still runs.
 async fn off_runtime(req: axum::extract::Request, next: middleware::Next) -> Response {
+    let [stop, other] = SLOTS.get_or_init(|| {
+        [
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS - 1)),
+        ]
+    });
+    let slots = if req.method() == axum::http::Method::POST && req.uri().path() == "/api/stop" {
+        stop
+    } else {
+        other
+    };
+    let Ok(slot) = slots.clone().acquire_owned().await else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed");
+    };
     let rt = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || rt.block_on(next.run(req)))
-        .await
+    // The slot goes into the blocking task: it stays held until the handler
+    // ends, also when the client goes away and this future drops.
+    let task = tokio::task::spawn_blocking(move || {
+        let res = rt.block_on(next.run(req));
+        res.map(|body| Body::new(Held { body, _slot: slot }))
+    });
+    task.await
         .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed"))
+}
+
+/// A body that holds the slot of its request until the body ends or drops.
+struct Held {
+    body: Body,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl http_body::Body for Held {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>>
+    {
+        std::pin::Pin::new(&mut self.body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
 }
 
 async fn get_status(State(s): State<Arc<Store>>) -> Result<Response> {
@@ -268,6 +351,20 @@ async fn get_ledger(
     Ok(Json(ledger(&s, q.limit.unwrap_or(50), q.after.as_deref())?).into_response())
 }
 
+/// The messages of a ledger entry that the recovery cannot confirm
+/// (specification 2, section 7.3), a page at a time.
+async fn get_unknown(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    Ok(
+        unknown_messages(&s, &id, q.limit.unwrap_or(50), q.after.as_deref())?
+            .map_or_else(not_found, |v| Json(v).into_response()),
+    )
+}
+
 /// The person undoes a ledger entry (specification 2, section 7.4).
 async fn post_undo(
     State(s): State<Arc<Store>>,
@@ -275,6 +372,22 @@ async fn post_undo(
     _: NoBody,
 ) -> Result<Response> {
     Ok(undo_entry(&s, &id, now_ms())?.map_or_else(not_found, |e| Json(e).into_response()))
+}
+
+#[derive(Deserialize)]
+struct UnconfirmedBody {
+    entries: Vec<String>,
+}
+
+/// The person dismisses the line of the brief for the entries that it
+/// showed (specification 2, section 7.3).
+async fn post_dismiss_unconfirmed(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<UnconfirmedBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let n = dismiss_unconfirmed(&s, &b.entries, now_ms())?;
+    Ok(Json(serde_json::json!({ "dismissed": n })).into_response())
 }
 
 async fn get_changesets(State(s): State<Arc<Store>>) -> Response {
@@ -299,7 +412,7 @@ async fn get_drafts(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resu
     let Some(row) = changeset_row(&s, &id)? else {
         return Ok(not_found());
     };
-    Ok(stream(move |w| drafts::write_drafts(&s, row, w)).await)
+    Ok(stream(move |w| drafts::write_drafts(&s, row, now_ms(), w)).await)
 }
 
 /// The reason of each submitted revision (issue 189).
@@ -402,8 +515,8 @@ struct AskBody {
     question: String,
 }
 
-/// One question of the person. The model call runs on a blocking thread,
-/// so the other requests go on.
+/// One question of the person. The model call runs on the blocking thread
+/// of the request (see [`off_runtime`]), so the other requests go on.
 async fn post_ask(
     State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
     b: std::result::Result<Json<AskBody>, JsonRejection>,
@@ -411,9 +524,7 @@ async fn post_ask(
     let b = body(b)?;
     let connect =
         connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
-    let a = tokio::task::spawn_blocking(move || answer(&s, &connect, &b.question, now_ms()))
-        .await
-        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    let a = answer(&s, &connect, &b.question, now_ms())?;
     Ok(Json(a).into_response())
 }
 
@@ -434,8 +545,8 @@ struct DraftBody {
 }
 
 /// A draft of the reply in the voice of the person (R3-04 intent path,
-/// R3-05). The model call runs on a blocking thread, so the other requests
-/// go on. The draft is saved in the store; nothing goes to Gmail.
+/// R3-05). The model call runs on the blocking thread of the request, so
+/// the other requests go on. The draft is saved in the store; nothing goes to Gmail.
 async fn post_draft(
     State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
     Path(id): Path<String>,
@@ -444,11 +555,7 @@ async fn post_draft(
     let b = body(b)?;
     let connect =
         connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
-    let d = tokio::task::spawn_blocking(move || {
-        write::draft(&s, &connect, &id, &b.parent, &b.intent, &b.to, now_ms)
-    })
-    .await
-    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    let d = write::draft(&s, &connect, &id, &b.parent, &b.intent, &b.to, now_ms)?;
     Ok(d.map_or_else(not_found, |v| Json(v).into_response()))
 }
 
@@ -588,6 +695,13 @@ async fn get_item(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result
     Ok(item(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
+/// The ready summary of the thread of the item (issue 478): text, the
+/// newest message that it reads, the time and the model. 404 when the item
+/// does not need the person, or its thread has no summary that is ready.
+async fn get_summary(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(read::summary(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
 /// A state verb of the person on one item: `close`, `decline`, `defer`,
 /// `skip`, `mute` or `dismiss` (specification 2, section 4). The answer is the item after the change.
 async fn post_verb(
@@ -649,6 +763,22 @@ async fn post_answer(
         .map_or_else(not_found, |d| Json(d).into_response()))
 }
 
+async fn post_release(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(gate::release(&s, &id, true)?.map_or_else(not_found, |m| Json(m).into_response()))
+}
+
+async fn post_unrelease(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(gate::release(&s, &id, false)?.map_or_else(not_found, |m| Json(m).into_response()))
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
@@ -697,11 +827,7 @@ async fn get_raw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
 }
 
 async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
-    let rss = tokio::task::spawn_blocking(measures::rss_kib)
-        .await
-        .ok()
-        .flatten();
-    Ok(Json(measures::measures(&s, rss)?).into_response())
+    Ok(Json(measures::measures(&s, measures::rss_kib())?).into_response())
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
@@ -747,13 +873,13 @@ struct ConfirmBody {
     sha256: String,
 }
 
-/// Runs `f` on a blocking thread. Each policy writer waits for the backup
-/// lock (a backup can hold it for minutes), and the server has one runtime
-/// thread: a wait there stops each other request (issue 143).
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
+/// Runs `f` in place. Each policy writer waits for the backup lock (a
+/// backup can hold it for minutes), and the server has one runtime thread:
+/// a wait there stops each other request (issue 143). [`off_runtime`] runs
+/// each handler on a blocking thread already, so `f` needs no second thread
+/// (#814, #817).
+async fn blocking<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    f()
 }
 
 /// [`policy::change`] on a blocking thread, see [`blocking`].
@@ -808,6 +934,30 @@ async fn post_mode(
     let b = body(b)?;
     let change = iris_policy::Change::Mode(policy::mode(&b.mode)?);
     Ok(Json(change_blocking(s, b.version, change).await?).into_response())
+}
+
+/// The time zone of the owner (issue 891): an IANA name, or null for the
+/// time zone of the computer.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ZoneBody {
+    #[serde(deserialize_with = "present_text")]
+    zone: Option<String>,
+}
+
+/// The person sets the time zone of the owner, as `iris zone` does
+/// (decision D1). A name that the computer does not know is a 400, and
+/// nothing is written.
+async fn post_zone(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<ZoneBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    s.set_time_zone(b.zone.as_deref()).map_err(|e| match e {
+        iris_store::Error::TimeZone(name) => Error::Query(format!("not a time zone: {name:?}")),
+        e => e.into(),
+    })?;
+    Ok(Json(read::zone(&s)?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1055,6 +1205,30 @@ async fn post_job_finish(
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 
+#[derive(Deserialize)]
+struct JobWakeBody {
+    /// The number of events of the job document that the person saw. Events
+    /// are never removed, so the count names one state of the job, also when
+    /// two events have the same time. A wake of another wait, or of a job
+    /// that does not wait, gets 409.
+    events: u64,
+}
+
+/// The person ends the wait of a job early (issue #959). The answer is the
+/// job document.
+async fn post_job_wake(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<JobWakeBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    wake_job(&s, row, b.events, now_ms())?;
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
 /// `id` is the ID of an open proposal (spec 2, section 6.6).
 #[derive(Deserialize)]
 struct ProposalBody {
@@ -1213,31 +1387,23 @@ async fn post_account_remove(
             "The address is not the address of this account.".into(),
         ));
     }
-    let task = s.clone();
-    tokio::task::spawn_blocking(move || {
-        let id = task
-            .remove_account_id(row, &b.address, now_ms())
-            .map_err(|e| match e {
-                iris_store::Error::Account(why) => Error::Conflict(why.into()),
-                e => e.into(),
-            })?;
-        Ok::<_, Error>(delete_removed(&task, Some(id))?)
-    })
-    .await
-    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    let id = s
+        .remove_account_id(row, &b.address, now_ms())
+        .map_err(|e| match e {
+            iris_store::Error::Account(why) => Error::Conflict(why.into()),
+            e => e.into(),
+        })?;
+    delete_removed(&s, Some(id))?;
     Ok(Json(read::status(&s)?).into_response())
 }
 
 /// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
 /// sessions that this stop ended), `live` (the sessions that are not reaped
 /// yet) and `busy` (a Gmail call still ran). The stop is complete only when
-/// `live` is 0 and `busy` is false. The wait of up to 20 seconds runs on a
-/// blocking thread, so the other routes still answer.
+/// `live` is 0 and `busy` is false. The wait of up to 20 seconds runs on the
+/// blocking thread of the request, so the other routes still answer.
 async fn post_stop(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
-    let done = tokio::task::spawn_blocking(move || iris_apply::stop(&s))
-        .await
-        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
-        .map_err(apply_error)?;
+    let done = iris_apply::stop(&s).map_err(apply_error)?;
     Ok(Json(serde_json::json!({
         "stopped": true,
         "since": rfc3339(done.since),
@@ -1296,6 +1462,26 @@ async fn post_outbox_cancel(
     })
 }
 
+/// The most bytes of a request to `POST /api/attachments`: the limit of
+/// the largest message (send content spec, section 5). A larger body gets
+/// 413.
+pub const ATTACHMENT_LIMIT: usize = iris_compose::MAX_MESSAGE as usize;
+
+/// One file for a draft (send content spec, section 2): the request body
+/// is the file. 201 with `{"sha256", "size"}`. The client puts the entry,
+/// with the name and the type, into the draft.
+async fn post_attachment(State(s): State<Arc<Store>>, body: Bytes) -> Result<Response> {
+    if body.is_empty() {
+        return Err(Error::Query("a file has 1 or more bytes".into()));
+    }
+    let sha = s.put_attachment(&body)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "sha256": sha, "size": body.len() })),
+    )
+        .into_response())
+}
+
 /// The press of Send in the write view (docs/specs/2026-11-17-write.md,
 /// section 2): 201 for a new write, 200 for an earlier try of the same
 /// press, 409 with `flags` for warnings that the person did not see.
@@ -1331,9 +1517,21 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
     })
 }
 
+/// The content of a draft (`d-N`) for the form of a change (draft change
+/// spec, section 5). 404 when Iris cannot give it.
+async fn get_draft_content(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    Ok(match write::draft_content(&s, &id, now_ms())? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
 /// The draft of a thread (`t-N`) that the person can use now: a reply in
 /// the voice of the owner (R3-05) or a nudge (R3-07), with the address of
-/// the person that owes (`to`) and its commitment (`item`). 404 when there is none, or when it is
+/// the person that owes (`to`) and its late commitments (`items`). 404 when there is none, or when it is
 /// stale ([`iris_voice::ready_sql`]): a newer mail, or for a nudge, a
 /// change of its commitment or its person. Nothing is sent.
 async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
@@ -1341,7 +1539,7 @@ async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
         return Ok(not_found());
     };
     let draft = s
-        .read(|c| Ok(iris_voice::ready(c, thread)?))
+        .read(|c| Ok(iris_voice::ready(c, thread, now_ms())?))
         .map_err(Error::from)?;
     Ok(match draft {
         Some(d) => Json(serde_json::json!({
@@ -1349,7 +1547,9 @@ async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
             "based_on": iris_store::format_id(iris_store::Kind::Message, d.based_on),
             "nudge": d.to.is_some(),
             "to": d.to,
-            "item": d.item.map(|i| iris_store::format_id(iris_store::Kind::Commitment, i)),
+            "items": d.items.iter()
+                .map(|&i| iris_store::format_id(iris_store::Kind::Commitment, i))
+                .collect::<Vec<_>>(),
             "body": d.body,
         }))
         .into_response(),

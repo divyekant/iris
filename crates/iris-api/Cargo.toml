@@ -11,6 +11,7 @@ publish.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
+http-body = "1"
 iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
 iris-compose = { version = "0.0.0", path = "../iris-compose" }
@@ -21,6 +22,7 @@ iris-senders = { version = "0.0.0", path = "../iris-senders" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-triage = { version = "0.0.0", path = "../iris-triage" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
+iris-summary = { version = "0.0.0", path = "../iris-summary" }
 iris-voice = { version = "0.0.0", path = "../iris-voice" }
 iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
 rusqlite = "=0.43.0"

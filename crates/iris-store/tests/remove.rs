@@ -266,6 +266,110 @@ fn a_removed_account_gets_no_new_mail() {
     assert_eq!(rows(&store, a), 0);
 }
 
+/// Issue 910: a sync that kept the account ID writes no sync row and no
+/// account column to a tombstone, in state `removing` and `removed`. Only
+/// the end of the delete and the new address of a removed tombstone change it.
+#[test]
+fn a_tombstone_takes_no_sync_write() {
+    let dir = TempDir::new("tombstone");
+    let store = Store::open(&dir.0).unwrap();
+    let (a, _) = two(&store);
+    // The rows of a sync that runs at the time of the removal.
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'sync', 1)",
+                [a],
+            )?;
+            tx.execute(
+                "INSERT INTO sync_seen(account_id, message_id, labels) VALUES (?1, 'old', '')",
+                [a],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store.remove_account("a@example.org", NOW).unwrap();
+    let removing = [
+        "UPDATE sync_log SET ended_at = 2, result = 'x' WHERE account_id = ?1",
+        "UPDATE sync_seen SET labels = 'INBOX' WHERE account_id = ?1",
+        "UPDATE account SET address = 'other@example.org' WHERE id = ?1",
+    ];
+    for sql in removing {
+        let r = store.write(|tx| Ok(tx.execute(sql, [a])?));
+        assert!(r.is_err(), "a removing tombstone took: {sql}");
+    }
+    let writes = [
+        "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'sync', 1)",
+        "INSERT INTO sync_seen(account_id, message_id, labels) VALUES (?1, 'x', '')",
+        "UPDATE account SET sync_kind = 'full', sync_start = 'h', sync_step = 1 WHERE id = ?1",
+        "UPDATE account SET sync_step = 2 WHERE id = ?1",
+        "UPDATE account SET history_id = '9' WHERE id = ?1",
+        "UPDATE account SET token = x'00' WHERE id = ?1",
+        "UPDATE account SET state = 'needs_sign_in' WHERE id = ?1",
+        "UPDATE account SET state = NULL WHERE id = ?1",
+        "UPDATE account SET categories_off_at = 1 WHERE id = ?1",
+    ];
+    let refused = |store: &Store| {
+        for sql in writes {
+            let r = store.write(|tx| Ok(tx.execute(sql, [a])?));
+            assert!(r.is_err(), "a tombstone took: {sql}");
+        }
+    };
+    refused(&store);
+    store
+        .delete_removed(None, &mut none, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
+    refused(&store);
+    assert_eq!(
+        n(
+            &store,
+            "SELECT count(*) FROM sync_log WHERE account_id = ?1",
+            a
+        ),
+        0
+    );
+    // The same address again renames the tombstone.
+    store
+        .save_account_secret("gmail", "a@example.org", None, b"sealed", "ok")
+        .unwrap();
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
+}
+
+/// The update trigger of migration 56 names each account column that the
+/// removal sets to NULL. A new column must join the trigger.
+#[test]
+fn the_tombstone_trigger_names_each_account_column() {
+    let dir = TempDir::new("tombstone-columns");
+    drop(Store::open(&dir.0).unwrap());
+    let c = Connection::open(dir.0.join("iris.db")).unwrap();
+    let sql: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'removed_account_update'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut q = c
+        .prepare(
+            "SELECT name FROM pragma_table_info('account')
+             WHERE name NOT IN ('id', 'provider', 'address', 'state')",
+        )
+        .unwrap();
+    let cols: Vec<String> = q
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!cols.is_empty());
+    for col in cols {
+        assert!(
+            sql.contains(&format!("NEW.{col} IS NOT NULL")),
+            "account column {col} is not in the trigger removed_account_update"
+        );
+    }
+}
+
 #[test]
 fn the_removal_refuses_an_unknown_or_removed_account() {
     let dir = TempDir::new("refuse");
@@ -573,6 +677,9 @@ fn each_table_with_mail_of_an_account_is_in_the_delete_or_the_record() {
         "item_source",
         "label",
         "link_check",
+        "link_recheck",
+        "model_declined",
+        "fixed_due",
         "matter_add",
         "matter_item",
         "message",
@@ -585,6 +692,8 @@ fn each_table_with_mail_of_an_account_is_in_the_delete_or_the_record() {
         "sync_seen",
         "talk_due",
         "thread",
+        "thread_summary",
+        "thread_summary_try",
         "use_open",
         "removed_workspace",
         "removed_sender",
@@ -817,4 +926,86 @@ fn no_page_of_the_database_keeps_the_text_of_a_removed_item() {
         .unwrap()
         .unwrap();
     assert!(!has(&dir.0), "a page keeps the text of a removed item");
+}
+
+/// A thread that a draft refers to stays as a bare row, but its summary and
+/// the keys of its tries (mail data) go (issue 478).
+#[test]
+fn the_delete_removes_the_summary_and_the_tries_of_a_thread_that_stays() {
+    let dir = TempDir::new("summary");
+    let store = Store::open(&dir.0).unwrap();
+    let (a, _) = two(&store);
+    store
+        .write(|tx| {
+            let thread: i64 = tx.query_row(
+                "SELECT thread_id FROM message WHERE account_id = ?1 ORDER BY id LIMIT 1",
+                [a],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (last_insert_rowid(), 1, 1, 'draft', '{}', '{}')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content,
+                                   hash, raw, action_id, created_at, updated_at)
+                 VALUES (?1, ?2, 'r1', 'iris.1@example.com', '{}', 'h', x'00',
+                         last_insert_rowid(), 0, 0)",
+                rusqlite::params![a, thread],
+            )?;
+            let newest: i64 = tx.query_row(
+                "SELECT max(id) FROM message WHERE thread_id = ?1",
+                [thread],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt,
+                                            created_at)
+                 VALUES (?1, ?2, 'b', 'Ana asked for the slides.', 'fake', 'summary/0.1', 0)",
+                rusqlite::params![thread, newest],
+            )?;
+            tx.execute(
+                "INSERT INTO thread_summary_try(thread_id, based_on, basis, model_version, invalid,
+                                                at)
+                 VALUES (?1, ?2, 'b', 1, 0, 0)",
+                rusqlite::params![thread, newest],
+            )?;
+            tx.execute(
+                "INSERT INTO nudge_try(thread_id, key, newest, version, blocked, tried_at)
+                 VALUES (?1, '{\"to\": \"ana@example.org\"}', ?2, 1, 0, 0)",
+                rusqlite::params![thread, newest],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.remove_account("a@example.org", NOW).unwrap(), a);
+    store
+        .delete_removed(None, &mut none, &mut |_| Ok(()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        n(
+            &store,
+            "SELECT count(*) FROM thread WHERE account_id = ?1",
+            a
+        ),
+        1,
+        "the thread of the draft stays"
+    );
+    for table in ["thread_summary", "thread_summary_try", "nudge_try"] {
+        assert_eq!(
+            n(
+                &store,
+                &format!("SELECT count(*) FROM {table} WHERE ?1 > 0"),
+                a
+            ),
+            0,
+            "{table}"
+        );
+    }
 }

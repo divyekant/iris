@@ -572,8 +572,8 @@ fn a_provider_with_a_store_source_sees_a_send_of_another_process() {
         ..Config::default()
     };
     let (account, second) = (b.account, Store::open(&b.dir).unwrap());
-    let other = Outlook::new(Graph::new(config.clone())).with_sent_source(move || {
-        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    let other = Outlook::new(Graph::new(config.clone())).with_sent_source(move |id| {
+        iris_apply::is_sent_by_iris(&second, account, id).map_err(|e| e.to_string())
     });
     let start = Outlook::new(Graph::new(config))
         .with_sent(iris_apply::sent_by_iris(&b.store, account).unwrap());
@@ -599,7 +599,7 @@ fn a_failed_store_source_gives_an_error() {
         base_url: b.fake.base_url(),
         ..Config::default()
     }))
-    .with_sent_source(|| Err("disk I/O error".into()));
+    .with_sent_source(|_| Err("disk I/O error".into()));
     let id = b.fake.messages().into_keys().next().unwrap();
     assert!(failing.minimal(TOKEN, &id).is_err());
 }
@@ -660,14 +660,14 @@ fn the_completion_adds_sent_to_a_mirrored_copy() {
     assert_eq!(b.release(s), Outcome::Pending);
     b.fake.deliver_copies();
     iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
-    let blind = stale(&b).with_sent_source(|| Ok(Vec::new()));
+    let blind = stale(&b).with_sent_source(|_| Ok(false));
     iris_apply::recover(&b.store, &blind, &mut tok(), b.account).unwrap();
     let copy = b.row().1.expect("the send is complete");
     assert!(b.labels(&copy).contains(&"SENT".to_string()));
     // The engine value reads the copies from the store.
     let (account, second) = (b.account, Store::open(&b.dir).unwrap());
-    let engine = stale(&b).with_sent_source(move || {
-        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    let engine = stale(&b).with_sent_source(move |id| {
+        iris_apply::is_sent_by_iris(&second, account, id).map_err(|e| e.to_string())
     });
     iris_sync::sync(&b.store, &engine, b.account, TOKEN).unwrap();
     assert!(b.labels(&copy).contains(&"SENT".to_string()));
@@ -687,9 +687,9 @@ fn migration_41_adds_sent_to_the_confirmed_copies() {
     b.store
         .write(|tx| {
             tx.execute_batch(
-                "DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
+                "DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; ALTER TABLE header DROP COLUMN content_sha256; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;
                  DELETE FROM message_label WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'SENT');
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 40;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 40;",
             )?;
             Ok(())
         })
@@ -707,4 +707,66 @@ fn migration_41_adds_sent_to_the_confirmed_copies() {
         })
         .unwrap();
     assert!(has_sent);
+}
+
+/// Issue #804: the lookup of one ID agrees with the full list for each
+/// mirror message, a confirmed copy and an unknown ID, and the provider asks
+/// the source only for the message that it labels, not for the full list.
+#[test]
+fn the_sent_lookup_of_one_id_agrees_with_the_list() {
+    let b = setup("sent-lookup");
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    let copy = b.row().1.expect("the send is complete");
+    let list = iris_apply::sent_by_iris(&b.store, b.account).unwrap();
+    assert_eq!(list, vec![copy.clone()]);
+    let mut ids: Vec<String> = b.fake.messages().into_keys().collect();
+    ids.extend([copy.clone(), "no-such-id".into(), String::new()]);
+    for id in &ids {
+        assert_eq!(
+            iris_apply::is_sent_by_iris(&b.store, b.account, id).unwrap(),
+            list.contains(id),
+            "{id}"
+        );
+        assert!(!iris_apply::is_sent_by_iris(&b.store, b.account + 1, id).unwrap());
+    }
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (seen, account, second) = (asked.clone(), b.account, Store::open(&b.dir).unwrap());
+    let engine = stale(&b).with_sent_source(move |id| {
+        seen.lock().unwrap().push(id.to_string());
+        iris_apply::is_sent_by_iris(&second, account, id).map_err(|e| e.to_string())
+    });
+    let m = engine.minimal(TOKEN, &copy).unwrap();
+    assert!(m.label_ids.contains(&"SENT".to_string()));
+    assert_eq!(*asked.lock().unwrap(), vec![copy.clone()]);
+}
+
+/// The `From` of an Outlook draft has the display name of the mailbox at
+/// Graph (#864). A name that the compose refuses gives the address only.
+#[test]
+fn an_outlook_draft_has_the_display_name_of_the_mailbox() {
+    let b = setup("name");
+    let from = |draft: &str| {
+        let raw: Vec<u8> = b
+            .store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT raw FROM draft WHERE provider_id = ?1",
+                    [draft],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+        raw.lines()
+            .find(|l| l.starts_with("From: "))
+            .unwrap()
+            .to_string()
+    };
+    b.fake.set_display_name(Some("Dana Owner"));
+    let (_, d) = b.new_mail(AGED);
+    assert_eq!(from(&d), format!("From: \"Dana Owner\" <{OWNER}>"));
+    b.fake.set_display_name(Some("Dana\r\nBcc: spy@x.org"));
+    let (_, d) = b.new_mail(AGED);
+    assert_eq!(from(&d), format!("From: <{OWNER}>"));
 }

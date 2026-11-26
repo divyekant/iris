@@ -39,8 +39,8 @@ export type Item = {
   new?: number;
   your_turn?: boolean;
   summary?: string;
-  /** What Iris prepared for the item (card R3-09): "draft" is a reply draft that is not stale. Only in the brief lists. */
-  ready?: "draft"[];
+  /** What Iris prepared for the item (card R3-09): "draft" is a reply draft that is not stale, "summary" a summary of its long thread for an item that needs the person (issue 478). Only in the lists of items: the brief sections and pages, the gate and /api/items. */
+  ready?: ("draft" | "summary")[];
   type?: string;
   issuer?: Party;
   fields?: Record<string, unknown>;
@@ -94,6 +94,8 @@ export type Brief = {
   strangers: Section;
   hostile: number;
   not_understood: number;
+  /** The changes that Iris could not confirm (spec 2 section 7.3): the count of their messages, and their entries, until you dismiss the line. */
+  unconfirmed?: { messages: number; entries: string[]; more?: number; waiting?: number };
   /** While the first sync runs: the brief covers the mail from this date (spec 1 section 4.2). */
   oldest_fetched?: string | null;
   /** The stored triage proposal: the messages of the triage actions that wait for your review, for each verb. */
@@ -115,7 +117,8 @@ export type Brief = {
 export type Bundle = Section & { rule: number; name: string };
 
 /** One sender at the stranger gate (spec 1 section 6.7): its count of items, and the newest 3. */
-export type GateSender = { id: string; address: string; name: string | null; count: number; items: Item[] };
+/** A sender at the gate. `known_as`: the address of a person you know with the same name (issue #370). */
+export type GateSender = { id: string; address: string; name: string | null; known_as?: string | null; count: number; items: Item[] };
 export type GatePage = { count: number; senders: GateSender[]; next: string | null };
 /** The sender row after an answer at the gate. */
 export type GateAnswer = { id: string; address: string; name: string | null; kind: string; decided_by: string | null; declined: boolean };
@@ -142,6 +145,10 @@ export type Status = {
   waits_model?: number;
   /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
   time_zone?: string | null;
+  /** True when the owner set the time zone (`iris zone` or the Accounts page), false when it is the zone of the machine that runs Iris. */
+  time_zone_set?: boolean;
+  /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
+  model_retry_at?: string;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */
@@ -194,7 +201,8 @@ export type Summary = {
 };
 
 /** POST /api/ask (card R5-09). `answer` has a mark `[n]` after each fact: the source with that `n`. */
-export type AskSource = { n: number; quote: string | null; message: Summary };
+/** `stranger`: the sender is a stranger, so the text can try to mislead the answer (issue 255). */
+export type AskSource = { n: number; quote: string | null; message: Summary; stranger: boolean };
 export type AskAnswer = { answer: string | null; sources: AskSource[]; read: number; cost_micro_usd: number | null };
 
 export type Message = Summary & {
@@ -207,6 +215,13 @@ export type Message = Summary & {
   hostile: string[];
   /** The kind of the From sender (spec 1 section 6.7). */
   sender_kind?: "person" | "service" | "stranger" | "hostile";
+  /** The sender when only its look-alike domain makes it hostile: you can trust it (issue #49). */
+  /** The trust offer: a sender that only the near-copy rule makes hostile (issue 49). */
+  near_copy?: { sender: string; of: string } | null;
+  /** The Undo of a trust: the sender row of this address that the person trusted (issue 1043). */
+  trusted_sender?: string | null;
+  /** The hostile marks that the person released (issues 369, 373, 374): Undo ends the release. */
+  released?: string[];
   items: string[];
 };
 
@@ -237,14 +252,31 @@ export type Action = {
 export type Part = { text: string; flags?: string[]; source?: string };
 /** A recipient of a draft, with the flag `new_recipient` if the owner never wrote to the address. */
 export type Recipient = { address: string; flags?: string[] };
+/** A file of a draft, as the review and the outbox show it. */
+export type FileView = { name: string; type: string; size: number };
+/** A file in the attachment folder of the engine (POST /api/attachments), with its name and type for a draft. */
+export type Attachment = FileView & { sha256: string };
 /**
  * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
  * action that waits, as the review shows it. Each part of the text carries
  * the flags of the action that its words gave. An action whose text Iris
- * cannot read has `readable: false` and no text.
+ * cannot read has `readable: false` and no text. A readable `send` of a
+ * draft has `change`: how the write view changes the draft after the person
+ * denies this send only, and `newer_mail` when a newer mail stops that
+ * change (issue 1104). Absent from an older engine.
  */
 export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
-  | { readable: true; to: Recipient[]; cc: Recipient[]; subject: Part[]; body: Part[] }
+  | {
+      readable: true;
+      to: Recipient[];
+      cc: Recipient[];
+      bcc?: Recipient[];
+      attachments?: FileView[];
+      subject: Part[];
+      body: Part[];
+      change?: "update" | "new" | null;
+      newer_mail?: boolean;
+    }
   | { readable: false }
 );
 
@@ -252,6 +284,8 @@ export type Changeset = {
   id: string;
   revision: number;
   author: { kind: "person" | "agent" | "triage" | "local"; name?: string; session?: string; job?: string };
+  /** Since open model 1.2: who withdrew the changeset (decision D16). Absent when it is not known. */
+  withdrawn_by?: "author" | "person";
   why: string | null;
   created: string;
   submitted: string | null;
@@ -295,6 +329,8 @@ export type LedgerEntry = {
   /** The messages of the entry, and the messages that Gmail confirmed. */
   messages: number;
   changed: number;
+  /** The messages whose change Iris could not confirm after an unknown answer of the mail provider. */
+  unknown?: number;
   /** The items of a state verb, and the title of the first item. */
   items: number;
   title: string | null;
@@ -315,6 +351,10 @@ export type LedgerEntry = {
   tried: number;
   /** For an undo: true when the change that it undoes can be undone now. */
   retry: boolean;
+  /** A send or a draft: the subject, the first `to` address and the count of all recipients. Null when Iris cannot read it. */
+  mail?: { subject: string; to: string | null; recipients: number } | null;
+  /** A draft: true when it changed a draft that exists (with `undo_of`: the undo of a change). An older engine leaves it out. */
+  change?: boolean;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
@@ -333,12 +373,79 @@ export type OutboxSend = {
   readable: boolean;
   to?: string[];
   cc?: string[];
+  bcc?: string[];
+  attachments?: FileView[];
   subject?: string;
+  /** The provider ("gmail" or "outlook") whose Bcc check keeps the send held, or null. An older engine leaves it out. */
+  bcc_check?: string | null;
 };
 /** GET /api/outbox: the send switch and each send that waits. Only `iris sending on|off` changes the switch. */
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
 
 /** The whole outbox: each page of GET /api/outbox, so no send that can leave is hidden. */
+/** The words of a reply draft whose thread has a newer mail (draft change spec, section 5). */
+export const NEWER_MAIL = "A new mail came into this thread. Write a new reply.";
+
+/**
+ * The start of #/write/d-N (issue 941): the form of a draft that can change,
+ * under its thread for a reply. A draft that cannot change opens no form
+ * (`closed`): the view says why and links to a new mail or a new reply.
+ */
+export type ChangeStart =
+  | ({ change: DraftContent } & ({ thread: string; reply: ReplyStart } | { accounts: Status["accounts"] }))
+  | { closed: DraftContent };
+
+/** The session storage place of a form of the write view: a draft link (`d-N`), a reply (`t-N`) or `new`. */
+export const writePlace = (of: string) => `iris.write.${of}`;
+
+/** True while the write view keeps a write that the engine took from the place `place`: the write can still leave. */
+export function keepsWrite(place: string): boolean {
+  try {
+    const v = JSON.parse(globalThis.sessionStorage?.getItem(`${place}.taken`) ?? "null");
+    return !!v && typeof v.write === "string";
+  } catch {
+    return false;
+  }
+}
+
+export async function loadChange(id: string): Promise<ChangeStart> {
+  // A write of this draft link that can still leave shows its state (issue 1098). It
+  // needs only its own record: a missing draft or reply start does not hide it. Such a
+  // start has no conversation and no change, so no form follows the write.
+  const kept = keepsWrite(writePlace(id));
+  const only = (d: DraftContent): ChangeStart => ({ accounts: [], change: { ...d, change: null } });
+  // Only a definite answer ends a read for a kept write: 404 (no such draft now) or
+  // 409 (no mail to reply to). Another error shows, and the next open reads again.
+  const gone = (e: unknown, status: number) => kept && (e as { status?: number }).status === status;
+  let change: DraftContent;
+  try {
+    change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
+  } catch (e) {
+    if (!gone(e, 404)) throw e;
+    // The draft of a "new" change can lose its form (Iris does not write it) while the new draft waits.
+    return only({ draft: id, account: "", thread: null, to: [], cc: [], bcc: [], subject: "", body: "", attachments: [], change: null });
+  }
+  if (!change.change && !kept) return { closed: change };
+  if (change.thread) {
+    try {
+      return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
+    } catch (e) {
+      // With no mail to reply to (its parent can be in Trash now), the engine
+      // offers no change of the reply.
+      if (!gone(e, 409)) throw e;
+      return only(change);
+    }
+  }
+  try {
+    return { accounts: (await get<Status>("status")).accounts, change };
+  } catch (e) {
+    // The accounts serve only the form after the write (issue 1112): a kept write shows
+    // with no form after it, and the next open reads the accounts again.
+    if (!kept) throw e;
+    return only(change);
+  }
+}
+
 export async function loadOutbox(): Promise<Outbox> {
   const first = await get<Outbox>("outbox");
   const sends = [...first.sends];
@@ -351,8 +458,11 @@ export async function loadOutbox(): Promise<Outbox> {
   return { ...first, sends, next: null };
 }
 
-/** GET /api/threads/{t}/draft: the ready draft of a thread (R3-09). `nudge` is true for a reminder to a late person (R3-07), with `to` and its commitment `item`. */
-export type ThreadDraft = { thread: string; based_on: string; nudge: boolean; to: string | null; item: string | null; body: string };
+/** GET /api/threads/{t}/draft: the ready draft of a thread (R3-09). `nudge` is true for a reminder to a late person (R3-07), with `to` and each late commitment that it names in `items`. */
+export type ThreadDraft = { thread: string; based_on: string; nudge: boolean; to: string | null; items: string[]; body: string };
+
+/** GET /api/items/{id}/summary: the summary of the long thread of an item that needs you (issue 478). `created` is the time that Iris wrote it. 404 when there is none, or when it is stale. */
+export type ItemSummary = { text: string; based_on: string; created: string; model: string };
 
 /** GET /api/threads/{t}/reply: the start values of a reply (write spec, section 5). */
 export type ReplyStart = {
@@ -360,6 +470,8 @@ export type ReplyStart = {
   parent: { id: string; from: Address; date: string | null; text: string | null };
   to: string[];
   cc: string[];
+  /** The other people of the parent for reply all (issue #455): not in `to`, never the account. An older engine sends none. */
+  all?: string[];
   subject: string;
   /** The subject of the parent as it is. The view shows it with no leading "Re:" as its title. */
   topic: string;
@@ -381,10 +493,30 @@ export type ReplyStart = {
 /** GET /api/write/{cs}: the state of one press of Send (write spec, section 4). */
 export type WriteState =
   | { state: "saving" }
-  | { state: "waiting"; draft: string; sending: boolean; leaves_at: string | null }
+  | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
-  | { state: "stopped"; reason: string; draft: string | null };
+  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null; newer_mail?: boolean };
+
+/**
+ * GET /api/drafts/{id}: the content of a draft, for the form of "Change and
+ * send" (draft change spec, section 5).
+ */
+export type DraftContent = {
+  draft: string;
+  account: string;
+  thread: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  attachments: Attachment[];
+  /** How the next press of Send writes the draft, as `change` of a stopped write (issue 941). */
+  change: "update" | "new" | null;
+  /** Present (true) only when a newer mail in the thread of a reply stops the change. */
+  newer_mail?: boolean;
+};
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
@@ -413,7 +545,11 @@ export type Job = {
   question?: string;
   end?: "complete" | "cancel";
 };
-export type JobPage = { jobs: Job[]; next: string | null };
+/**
+ * `sessions`: the newest session of each working job of the page, by job ID, or null for a job with no session
+ * (issue 791). An engine from before the field leaves it out: then the list does not know the session.
+ */
+export type JobPage = { jobs: Job[]; next: string | null; sessions?: Record<string, JobSession | null> };
 /** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
 export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
@@ -426,7 +562,9 @@ export type JobSession = {
   exit: number | null;
   ended: string | null;
 };
-export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; session?: JobSession | null };
+/** One thread or item in the scope of a job (decision D25): the mail that the agent reads. `id` is null for a row that the page cannot name. */
+export type ScopeRef = { id: string | null; kind: "thread" | "item"; label: string | null; messages: number };
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; scope?: ScopeRef[]; session?: JobSession | null };
 
 export const SIGN_IN = "Sign in: run iris open in Terminal.";
 export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";
@@ -567,13 +705,17 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   if (active()) headers["x-iris-day"] = localDay();
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
-  const json = body === undefined ? undefined : JSON.stringify(body);
+  // A file (a Blob of any window) goes as its own bytes (POST /api/attachments).
+  const file = typeof (body as Blob | undefined)?.arrayBuffer === "function" ? (body as Blob) : undefined;
+  const json = body === undefined || file ? undefined : JSON.stringify(body);
   const init: RequestInit =
-    json === undefined
-      ? { headers }
-      : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
-        // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
-        { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
+    file
+      ? { method: "POST", headers: { ...headers, "content-type": "application/octet-stream" }, body: file }
+      : json === undefined
+        ? { headers }
+        : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
+          // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
+          { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
@@ -591,19 +733,79 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
 
 /** Get one JSON resource from the local API. Throws an Error with the API's error text. */
 export async function get<T>(path: string): Promise<T> {
+  if (path === "status") return (await statusRead())[0] as T;
+  return getJson<T>(path);
+}
+
+async function getJson<T>(path: string): Promise<T> {
   const response = await call(path, "application/json");
   const body = await response.json().catch(() => null);
   // The status goes with the error, so that a caller can tell a 404 from other failures.
   if (!response.ok) throw Object.assign(new Error(body?.error ?? `The engine answered ${response.status}.`), { status: response.status });
-  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
-  if (path === "status") {
-    const accounts = (body as Status).accounts ?? [];
-    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
-    access.none = accounts.length === 0;
-    access.accounts = accountNames(accounts);
-    access.zone = (body as Status).time_zone ?? null;
-  }
   return body as T;
+}
+
+// The order of the status answers. Each request that answers with the status (a read, or a change
+// such as a removal or a try now) takes a number at its start. An answer is the newest only if no
+// answer of a request that started after it came first: requests in flight can answer out of order.
+let statusStarted = 0;
+let statusTaken = 0;
+
+/** Take `s`, the answer of request `n`, if it is the newest. Gives true if it is. */
+function takeStatus(n: number, s: Status): boolean {
+  if (n <= statusTaken) return false;
+  statusTaken = n;
+  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
+  const accounts = s.accounts ?? [];
+  access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
+  access.none = accounts.length === 0;
+  access.accounts = accountNames(accounts);
+  access.zone = s.time_zone ?? null;
+  return true;
+}
+
+/** The answer of `POST /api/zone`: the time zone fields of the status. */
+export type Zone = Pick<Status, "time_zone" | "time_zone_set">;
+
+/**
+ * Set the time zone of the owner (issue 891): an IANA name, or null for the zone of the machine that
+ * runs Iris. The answer is the newest status of the zone: it takes a status number when it arrives,
+ * so a status read that started before it cannot put the old zone back in `access.zone`.
+ */
+export async function postZone(zone: string | null): Promise<Zone> {
+  const z = await post<Zone>("zone", { zone });
+  statusTaken = ++statusStarted;
+  access.zone = z.time_zone ?? null;
+  return z;
+}
+
+async function statusRead(): Promise<[Status, boolean]> {
+  const n = ++statusStarted;
+  const s = await getJson<Status>("status");
+  return [s, takeStatus(n, s)];
+}
+
+/** Read the status. Gives null if a newer status answered first: a view keeps the newer one. */
+export async function readStatus(): Promise<Status | null> {
+  const [s, newest] = await statusRead();
+  return newest ? s : null;
+}
+
+/**
+ * Send a change whose answer is the status (POST). Gives the status, or null if a newer status
+ * answered first. A read that started during the change can show the state from before its commit,
+ * so after a change, a view reads the status again.
+ */
+export async function postStatus(path: string, body: unknown): Promise<Status | null> {
+  const n = ++statusStarted;
+  const s = await post<Status>(path, body);
+  return takeStatus(n, s) ? s : null;
+}
+
+/** Put one file into the attachment folder of the engine. The entry of a draft adds the name and the type. */
+export async function upload(file: File): Promise<Attachment> {
+  const v = await post<{ sha256: string; size: number }>("attachments", file);
+  return { name: file.name, type: file.type.split(";")[0].trim() || "application/octet-stream", size: v.size, sha256: v.sha256 };
 }
 
 /** Send a policy change (POST with a JSON body). Throws an Error with the API's error text. */
@@ -653,7 +855,18 @@ export async function loadBrief(): Promise<Brief> {
   return { ...brief, signals: { ...brief.signals, count: Math.max(brief.signals.count, items.length), items } };
 }
 
-/** Your answer to a sender at the stranger gate: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo). */
-export function answerSender(id: string, answer: "accept" | "decline" | "reopen"): Promise<GateAnswer> {
+/**
+ * Your answer to a sender: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo) at
+ * the stranger gate, or `trust` for a sender that only its look-alike domain makes hostile.
+ */
+/** The hostile marks that the person can release: the checks of Iris. `spam`, `phishing` and a hostile sender stay. */
+export const RELEASABLE = ["dmarc", "spoof", "link"];
+
+/** Release a mail from quarantine, or end the release (`unrelease`). The answer is the mail. */
+export function releaseMessage(id: string, verb: "release" | "unrelease"): Promise<Message> {
+  return post<Message>(`messages/${encodeURIComponent(id)}/${verb}`, {});
+}
+
+export function answerSender(id: string, answer: "accept" | "decline" | "reopen" | "trust"): Promise<GateAnswer> {
   return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }

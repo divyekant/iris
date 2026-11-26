@@ -18,13 +18,14 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, own, post, type Account, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
+  import { get, NEWER_MAIL, own, post, upload, writePlace, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
-  import { initials, when } from "../format";
+  import { bytes, initials, PROVIDER, when } from "../format";
   import { FLAGS } from "../review";
   import { href } from "../route";
 
-  type Start = { accounts: Account[] } | { thread: string; reply: ReplyStart };
+  // `change`: the draft of #/write/d-N (issue 941), from GET /api/drafts/{d-N}.
+  type Start = ({ accounts: Account[] } | { thread: string; reply: ReplyStart }) & { change?: DraftContent };
   // `every`: the ms between two reads of the write state (a prop for the tests).
   let { start, every = 2000 }: { start: Start; every?: number } = $props();
 
@@ -34,12 +35,19 @@
   const thread = "thread" in start ? start.thread : null;
   // svelte-ignore state_referenced_locally
   const accounts = "accounts" in start ? start.accounts : [];
-  const place = `iris.write.${thread ?? "new"}`;
+  // svelte-ignore state_referenced_locally
+  const opened = start.change;
+  // A draft link (#/write/d-N) keeps its form in its own place, so it never
+  // replaces the unfinished form of a new mail or of a reply.
+  const place = writePlace(opened?.draft ?? thread ?? "new");
 
+  type Changing = { draft: string; account: string };
   type Saved = {
     account: string;
     to: string[];
     cc: string[];
+    bcc?: string[];
+    files?: Attachment[];
     subject: string;
     body: string;
     key: string;
@@ -47,7 +55,10 @@
     flags: string[];
     toText?: string;
     ccText?: string;
+    bccText?: string;
     intent?: string;
+    /** The draft that the next press changes in place, with its account. */
+    draft?: Changing | null;
   };
   function storage(): Storage | undefined {
     try {
@@ -95,16 +106,35 @@
     }
   }
 
-  const saved = restore();
+  // #/write/d-N (issue 941): the form opens with the content of the draft, as
+  // after "Change and send" in this view. For `update`, the next press changes
+  // the same draft. A reload keeps the form of this place.
+  const fromDraft = (d: DraftContent): Saved => ({
+    account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
+    key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
+  });
+  let changeNote = $state(opened ? "This is the draft that you cancelled. Change it, then press Send." : "");
+  // A draft link (only for a draft that can change now) opens its own saved
+  // form after a reload, else the draft. The next press changes the draft
+  // only as the engine allows now.
+  const saved = opened ? { ...(restore() ?? fromDraft(opened)), draft: fromDraft(opened).draft } : restore();
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
   let to = $state<string[]>(unique(saved?.to ?? reply?.to ?? []));
   const startCc = unique(saved?.cc ?? reply?.cc ?? []);
   let cc = $state<string[]>(startCc);
   let subject = $state(saved?.subject ?? "");
   let body = $state(saved?.body ?? "");
+  const startBcc = unique(saved?.bcc ?? []);
+  let bcc = $state<string[]>(startBcc);
+  // The files of the mail: each one is in the attachment folder of the engine.
+  let files = $state<Attachment[]>(saved?.files ?? []);
+  let adding = $state(0);
+  let fileNote = $state("");
   let copy = $state(startCc.length > 0);
+  let blind = $state(startBcc.length > 0);
   let toText = $state(saved?.toText ?? "");
   let ccText = $state(saved?.ccText ?? "");
+  let bccText = $state(saved?.bccText ?? "");
   // The key of the press and the content that it belongs to. A new content gets a new key.
   let key = $state(saved?.key ?? "");
   let sig = $state(saved?.sig ?? "");
@@ -113,9 +143,13 @@
   let problem = $state("");
   let unknown = $state(false);
   let busy = $state(false);
+  // The Gmail draft that the next press changes in place, after "Change and send".
+  // It holds only for its own account: a press from another account makes a new draft.
+  let changing = $state<Changing | null>(saved?.draft && typeof saved.draft === "object" ? saved.draft : null);
+  const target_ = () => (changing && (thread || account === changing.account) ? changing.draft : null);
 
   // The parent is part of the content: a reply to a new parent is a new mail.
-  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, thread ? "" : subject, body]));
+  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, bcc, files.map((f) => [f.sha256, f.name, f.type]), thread ? "" : subject, body, target_()]));
   // One key for one content: a new content gets a new key. Send calls it too,
   // after it ends the open address text, so each press sends the key of its own content.
   function rekey() {
@@ -134,7 +168,7 @@
   // Save each part of the form that a reload must keep: the text of an address
   // not yet a chip, and the warnings that the next press sends, too.
   $effect(() => {
-    const form: Saved = { account, to, cc, subject, body, key, sig, flags, toText, ccText, intent };
+    const form: Saved = { account, to, cc, bcc, files, subject, body, key, sig, flags, toText, ccText, bccText, intent, draft: changing };
     if (write) return;
     try {
       storage()?.setItem(place, JSON.stringify(form));
@@ -146,24 +180,49 @@
   const ADDRESS = /^[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+$/;
   const valid = (a: string) => ADDRESS.test(a);
   // No mail with no text (issue 741): the engine refuses it too.
-  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && body.trim() !== "" && !busy);
+  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && body.trim() !== "" && !busy && adding === 0);
 
-  function typed(field: "to" | "cc", end = false) {
-    const [list, rest] = chips(field === "to" ? to : cc, field === "to" ? toText : ccText, end);
-    if (field === "to") [to, toText] = [list, rest];
-    else [cc, ccText] = [list, rest];
+  type Field = "to" | "cc" | "bcc";
+  const list = (f: Field) => (f === "to" ? to : f === "cc" ? cc : bcc);
+  const open_ = (f: Field) => (f === "to" ? toText : f === "cc" ? ccText : bccText);
+  function set(f: Field, l: string[], rest = open_(f)) {
+    if (f === "to") [to, toText] = [l, rest];
+    else if (f === "cc") [cc, ccText] = [l, rest];
+    else [bcc, bccText] = [l, rest];
   }
-  function keydown(field: "to" | "cc", e: KeyboardEvent) {
-    const text = field === "to" ? toText : ccText;
+  function typed(field: Field, end = false) {
+    const [l, rest] = chips(list(field), open_(field), end);
+    set(field, l, rest);
+  }
+  function keydown(field: Field, e: KeyboardEvent) {
     if (e.key === "Enter") {
       e.preventDefault();
       typed(field, true);
-    } else if (e.key === "Backspace" && text === "") {
-      if (field === "to") to = to.slice(0, -1);
-      else cc = cc.slice(0, -1);
+    } else if (e.key === "Backspace" && open_(field) === "") {
+      set(field, list(field).slice(0, -1));
     }
   }
-  const remove = (field: "to" | "cc", a: string) => (field === "to" ? (to = to.filter((x: string) => x !== a)) : (cc = cc.filter((x: string) => x !== a)));
+  const remove = (field: Field, a: string) => set(field, list(field).filter((x: string) => x !== a));
+
+  // Each chosen file goes into the attachment folder of the engine first. The
+  // mail holds its entry: the name, the type, the size and the SHA-256.
+  async function attach(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const chosen = [...(input.files ?? [])];
+    input.value = "";
+    fileNote = "";
+    for (const f of chosen) {
+      adding++;
+      try {
+        const a = await upload(f);
+        if (alive && !files.some((x) => x.sha256 === a.sha256 && x.name === a.name)) files = [...files, a];
+      } catch (err) {
+        fileNote = `${f.name}: ${own(err)}`;
+      }
+      adding--;
+    }
+  }
+  const unattach = (a: Attachment) => (files = files.filter((x) => x !== a));
 
   // The intent path (spec section 8): the engine writes the text in the voice of
   // the person from what they want to say. The person reads and edits it before Send.
@@ -193,16 +252,27 @@
   // A saved form that still holds the start values of the reply (no text, no intent,
   // the same recipients) is a form that the person did not start. After a press of
   // "Write it for me", only that answer fills the form. The form must still be
-  // untouched when the read answers.
-  const same = (a: string[], b: string[]) => a.length === b.length && unique(a).every((x) => b.includes(x));
-  const untouched = (f: Pick<Saved, "to" | "cc" | "body" | "intent" | "toText" | "ccText"> | null) =>
-    !f || (!f.body.trim() && !f.intent?.trim() && !f.toText?.trim() && !f.ccText?.trim() && same(f.to, reply?.to ?? []) && same(f.cc, reply?.cc ?? []));
+  // untouched when the read answers. The order counts: the draft greets the
+  // first recipient (issue 831).
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  const untouched = (f: Pick<Saved, "to" | "cc" | "bcc" | "files" | "body" | "intent" | "toText" | "ccText" | "bccText"> | null) =>
+    !f ||
+    (!f.body.trim() &&
+      !f.intent?.trim() &&
+      !f.toText?.trim() &&
+      !f.ccText?.trim() &&
+      !f.bccText?.trim() &&
+      !f.bcc?.length &&
+      !f.files?.length &&
+      same(f.to, reply?.to ?? []) &&
+      same(f.cc, reply?.cc ?? []));
   let filled = $state(false);
   let asked = false;
-  if (thread && reply && untouched(saved) && !taken()) {
+  // A draft link fills the form only from its own draft (draft change spec, section 5).
+  if (!opened && thread && reply && untouched(saved) && !taken()) {
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
-        if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && untouched({ to, cc, body, intent, toText, ccText })) {
+        if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && untouched({ to, cc, bcc, files, body, intent, toText, ccText, bccText })) {
           body = d.body;
           filled = true;
         }
@@ -220,13 +290,20 @@
   async function send() {
     typed("to", true);
     typed("cc", true);
+    typed("bcc", true);
     rekey();
     if (!ready) return;
     busy = true;
     problem = "";
     const target = thread ? { thread, parent: reply?.parent.id } : { account, subject };
     const sent = key;
-    const mail = { ...target, to: [...to], cc: [...cc], body, key, flags: [...flags] };
+    // Bcc and files go only when the mail has them, as an older engine takes no such field.
+    const extra = {
+      ...(bcc.length ? { bcc: [...bcc] } : {}),
+      ...(files.length ? { attachments: files.map((f) => ({ ...f })) } : {}),
+      ...(target_() ? { draft: target_() } : {}),
+    };
+    const mail = { ...target, to: [...to], cc: [...cc], ...extra, body, key, flags: [...flags] };
     try {
       const v = await post<{ write: string }>("write", mail);
       // A view that the person left keeps the record only while the saved form is still the form of this
@@ -237,6 +314,8 @@
       sentTo = mail.to;
       sent_ = { subject: thread ? "" : subject, body: mail.body };
       unknown = false;
+      changing = null;
+      changeNote = "";
       write = v.write;
       follow();
     } catch (e) {
@@ -273,7 +352,14 @@
       if (mine <= applied || id !== write) return;
       applied = mine;
       ws = v;
-      if (v.state === "sent" || v.state === "stopped") keep(null, id);
+      if (v.state === "sent" || v.state === "stopped") {
+        keep(null, id);
+        // A draft link that resumed an earlier write of its place: that write
+        // ended, so the form of the draft shows again (issue 941), only for a
+        // draft that could change when the link opened. Else the view keeps
+        // the end of the write (issue 1098).
+        if (id === resumed && opened?.change) [write, resumed, ws] = ["", "", { state: "saving" }];
+      }
     } catch {
       // The engine can restart. The next read tries again.
     }
@@ -318,13 +404,56 @@
     busy = false;
   }
 
+  // "Change and send" (draft change spec, section 5): the form opens with the
+  // content of the draft. For `update`, the next press changes the same draft.
+  async function changeIt() {
+    if (ws.state !== "stopped" || !ws.draft || !ws.change) return;
+    const draft = ws.draft;
+    // A draft link shows only its own draft: the form of another draft (a new
+    // draft of a `new` change) opens at the link of that draft (issue 1102).
+    if (opened && draft !== opened.draft) {
+      keep(null, write);
+      location.hash = href.change(draft);
+      return;
+    }
+    const update = ws.change === "update";
+    const id = write;
+    busy = true;
+    note = "";
+    try {
+      const d = await get<DraftContent>(`drafts/${encodeURIComponent(draft)}`);
+      // A late answer after Write another or a closed view does not fill the form.
+      if (!alive || write !== id) return;
+      keep(null, write);
+      clearTimeout(timer);
+      [to, cc, bcc, files, body, toText, ccText, bccText] = [unique(d.to), unique(d.cc), unique(d.bcc), d.attachments, d.body, "", "", ""];
+      if (!thread) [account, subject] = [d.account, d.subject];
+      copy = cc.length > 0;
+      blind = bcc.length > 0;
+      changing = update ? { draft, account: d.account } : null;
+      // A new write: a new key, also when the content is the same as the stopped one.
+      sig = "";
+      rekey();
+      write = "";
+      ws = { state: "saving" };
+    } catch (e) {
+      note = own(e);
+    }
+    busy = false;
+  }
+
   function again() {
-    keep(null, write);
-    if (thread) return void (location.hash = "#/write");
+    // A write of a draft link that can still leave keeps its record: the next
+    // open of the link shows that write, not a form of the same draft (issue 1101).
+    if (!opened || ws.state === "sent" || ws.state === "stopped") keep(null, write);
+    changing = null;
+    changeNote = "";
+    if (thread || opened) return void (location.hash = "#/write");
     clearTimeout(timer);
-    [write, to, cc, subject, body, note, toText, ccText] = ["", [], [], "", "", "", "", ""];
+    [write, to, cc, bcc, files, subject, body, note, toText, ccText, bccText] = ["", [], [], [], [], "", "", "", "", "", ""];
     ws = { state: "saving" };
     copy = false;
+    blind = false;
   }
 
   // The recipient of the mail that the engine took, not of the form now.
@@ -341,10 +470,22 @@
     return m?.from.name || a;
   };
   const named = $derived(to.map(name).join(", "));
+  // Reply all is a choice (issue 455): the others of the parent that the form does not have yet.
+  const others = $derived.by(() => {
+    const have = new Set([...to, ...cc, ...bcc].map((a) => a.toLowerCase()));
+    return (reply?.all ?? []).filter((a) => !have.has(a.toLowerCase()));
+  });
+  function replyAll() {
+    cc = unique([...cc, ...others]);
+    copy = true;
+  }
   const last = $derived(reply ? reply.conversation.length - 1 : -1);
 
   // After a reload: show the write that the engine took, and follow its state.
   const kept = taken();
+  // A draft link resumes a write of its place until that write ends: the form
+  // never hides a write that may still leave.
+  let resumed = opened && kept ? kept.write : "";
   if (kept) {
     write = kept.write;
     sentTo = kept.to;
@@ -403,7 +544,9 @@
       <h2>On its way to {who}</h2>
       {#if ws.sending}
         <p class="muted">It waits 60 seconds in the Outbox before it leaves, so you can still change your mind.</p>
-        {#if ws.leaves_at}
+        {#if ws.bcc_check}
+          <p class="small">Waits for the Bcc check of {PROVIDER[ws.bcc_check] ?? ws.bcc_check}. Run <code>iris sending bcc-test</code> at the terminal.</p>
+        {:else if ws.leaves_at}
           <span class="bar" aria-hidden="true"><span style:width="{gone(ws.leaves_at) * 100}%"></span></span>
           <p class="small">{left(ws.leaves_at) ? `Leaves in ${left(ws.leaves_at)}` : "Leaves now"}</p>
         {/if}
@@ -424,7 +567,12 @@
     {:else}
       <h2 class="stop">This mail did not leave</h2>
       <p class="muted">{ws.reason}</p>
-      <div class="row"><button type="button" class="quiet" onclick={again}>Write another</button></div>
+      {#if ws.newer_mail}<p class="muted">{NEWER_MAIL}</p>{/if}
+      <div class="row">
+        {#if ws.change && ws.draft}<button type="button" class="pill" onclick={changeIt} disabled={busy}>Change and send</button>{/if}
+        <!-- While the draft loads, Write another waits: the draft fills only its own form. -->
+        <button type="button" class="quiet" onclick={again} disabled={busy}>Write another</button>
+      </div>
     {/if}
     {#if note}<p role="alert">{note}</p>{/if}
   </section>
@@ -432,6 +580,7 @@
   <form class="dock" onsubmit={(e) => (e.preventDefault(), send())}>
     <!-- While the press runs, the form does not change: the engine takes the mail as it was. -->
     <fieldset disabled={busy || drafting}>
+    {#if changeNote}<p class="saved opened" role="status">{changeNote}</p>{/if}
     {#if accounts.length > 1}
       <label class="line">
         <span class="k">From</span>
@@ -439,24 +588,30 @@
       </label>
     {/if}
     <!-- Each address that Send can send shows in the form: open address text opens the fields. -->
-    {#if reply && !editing && to.some(valid) && !toText && !ccText}
-      <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
+    {#if reply && !editing && to.some(valid) && !toText && !ccText && !bccText}
+      <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}{#if bcc.length}<span class="faint">, Bcc {bcc.join(", ")}</span>{/if}{#if others.length}<button type="button" class="end" title={`Copy to ${others.join(", ")}`} onclick={replyAll}>Reply to all</button>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
     {:else}
-      {#each [["to", "To"], ["cc", "Copy"]] as const as [field, label] (field)}
-        {#if field === "to" || copy || cc.length > 0 || ccText !== ""}
+      {#each [["to", "To"], ["cc", "Copy"], ["bcc", "Bcc"]] as const as [field, label] (field)}
+        {#if field === "to" || (field === "cc" ? copy || cc.length > 0 || ccText !== "" : blind || bcc.length > 0 || bccText !== "")}
           <div class="line">
             <label class="k" for="write-{field}">{label}</label>
-            {#each field === "to" ? to : cc as a (a)}
+            {#each list(field) as a (a)}
               <span class="chip" class:bad={!valid(a)} title={valid(a) ? undefined : "This address does not look valid"}>
                 {a}<button type="button" aria-label="Remove {a}" onclick={() => remove(field, a)}>×</button>
               </span>
             {/each}
             {#if field === "to"}
               <input id="write-to" type="text" autocomplete="off" bind:value={toText} oninput={() => typed("to")} onkeydown={(e) => keydown("to", e)} onblur={() => typed("to", true)} />
-            {:else}
+            {:else if field === "cc"}
               <input id="write-cc" type="text" autocomplete="off" bind:value={ccText} oninput={() => typed("cc")} onkeydown={(e) => keydown("cc", e)} onblur={() => typed("cc", true)} />
+            {:else}
+              <input id="write-bcc" type="text" autocomplete="off" bind:value={bccText} oninput={() => typed("bcc")} onkeydown={(e) => keydown("bcc", e)} onblur={() => typed("bcc", true)} />
             {/if}
-            {#if field === "to" && !copy && cc.length === 0 && ccText === ""}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
+            {#if field === "to"}
+              {#if others.length}<button type="button" class="end" title={`Copy to ${others.join(", ")}`} onclick={replyAll}>Reply to all</button>{/if}
+              {#if !copy && cc.length === 0 && ccText === ""}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
+              {#if !blind && bcc.length === 0 && bccText === ""}<button type="button" class="end" onclick={() => (blind = true)}>Add Bcc</button>{/if}
+            {/if}
           </div>
         {/if}
       {/each}
@@ -472,6 +627,15 @@
       {#if filled && !draftNote}<p class="saved">Iris wrote this draft for you before. Read it and change it before you send.</p>{/if}
     {/if}
     <textarea class="body" aria-label={reply ? "Reply text" : "Mail text"} placeholder={reply ? "Write your reply" : "Write your mail"} bind:value={body}></textarea>
+    {#if files.length > 0 || adding > 0}
+      <ul class="files" aria-label="Files">
+        {#each files as f (f.sha256 + f.name)}
+          <li class="chip">{f.name}<span class="faint">{bytes(f.size)}</span><button type="button" aria-label="Remove {f.name}" onclick={() => unattach(f)}>×</button></li>
+        {/each}
+        {#if adding > 0}<li class="chip faint">Adding {adding === 1 ? "a file" : `${adding} files`}</li>{/if}
+      </ul>
+    {/if}
+    {#if fileNote}<p class="note" role="alert">{fileNote}</p>{/if}
 
     {#if flags.length > 0}
       <ul class="flags">{#each flags as f (f)}<li>{FLAGS[f] ?? f}</li>{/each}</ul>
@@ -484,6 +648,7 @@
     <div class="foot">
       <button type="submit" class="primary" disabled={!ready}>{busy ? "Sending" : "Send"}</button>
       <p class="hint">It waits 60 seconds in the Outbox, so you can still cancel it.</p>
+      <label class="quiet attach">Attach a file<input type="file" multiple onchange={attach} /></label>
       <button type="button" class="quiet" onclick={discard}>Discard</button>
     </div>
     </fieldset>
@@ -730,6 +895,36 @@
     margin: var(--space-2) 0 0;
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
+  }
+  .opened {
+    margin: 0 0 var(--space-3);
+  }
+  .files {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
+    padding: 0;
+  }
+  .files .faint {
+    color: var(--color-text-faint);
+  }
+  /* The file input stays in the label for the keyboard and the screen reader, with no box of its own. */
+  .attach {
+    position: relative;
+    cursor: pointer;
+  }
+  .attach input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    width: 100%;
+    cursor: pointer;
+  }
+  .attach:focus-within {
+    outline: 2px solid var(--color-primary);
+    border-radius: var(--radius-sm);
   }
   .note {
     margin: var(--space-2) 0 0;

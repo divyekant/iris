@@ -13,8 +13,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::read::{
-    declined_list_sql, decode_cursor, doc_of, encode_cursor, head, row_of, section_sql, MATTER,
-    MAX_LIMIT, SHOWN,
+    declined_list_sql, decode_cursor, encode_cursor, head, ready_columns, ready_doc_of, row_of,
+    section_sql, MATTER, MAX_LIMIT, SHOWN,
 };
 use crate::{Error, Result};
 
@@ -31,6 +31,11 @@ pub struct GateSender {
     pub id: String,
     pub address: String,
     pub name: Option<String>,
+    /// The address of a known person with the same display name (no case),
+    /// or `None`. A new address under a known name can be the person on a
+    /// new service, or a fraud that uses the name (issue #370). The client
+    /// warns before an accept.
+    pub known_as: Option<String>,
     /// The count of items of the sender at the gate (or declined).
     pub count: i64,
     /// The newest [`GATE_ITEMS`] items, newest first.
@@ -122,7 +127,7 @@ pub(crate) fn read_gate(
     declined: bool,
     limit: u32,
     after: Option<&[SqlValue]>,
-) -> rusqlite::Result<GatePage> {
+) -> iris_store::Result<GatePage> {
     let with = parties(now, declined);
     let seek = if after.is_some() {
         "(at, id) < (?1, ?2)"
@@ -134,13 +139,26 @@ pub(crate) fn read_gate(
          s AS (SELECT sender.id, sender.address, sender.name, count(*) AS n, max(g.at) AS at
                  FROM party JOIN sender ON sender.id = party.sender JOIN g ON g.id = party.item
                 GROUP BY sender.id)
-         SELECT id, address, name, n, at FROM s WHERE {seek}
+         SELECT id, address, name, n, at,
+                -- An index search: sender_person_name_nocase (migration 68).
+                (SELECT k.address FROM sender k
+                  WHERE k.kind = 'person' AND k.id != s.id AND trim(s.name) != ''
+                    AND k.name = s.name COLLATE NOCASE ORDER BY k.id LIMIT 1)
+           FROM s WHERE {seek}
          ORDER BY at DESC, id DESC LIMIT {}",
         limit + 1
     ))?;
-    let mut rows: Vec<(i64, String, Option<String>, i64, i64)> = st
+    type Row = (i64, String, Option<String>, i64, i64, Option<String>);
+    let mut rows: Vec<Row> = st
         .query_map(rusqlite::params_from_iter(after.unwrap_or_default()), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let more = rows.len() > limit as usize;
@@ -164,10 +182,11 @@ pub(crate) fn read_gate(
              r AS (SELECT party.sender AS sid, g.id, g.at,
                           row_number() OVER (PARTITION BY party.sender ORDER BY g.at DESC, g.id DESC) AS k
                      FROM party JOIN g ON g.id = party.item WHERE party.sender IN ({ids}))
-             SELECT item.id, item.form, item.status, item.doc, r.sid, {MATTER} FROM r JOIN item ON item.id = r.id
-              WHERE r.k <= {GATE_ITEMS} ORDER BY r.sid, r.at DESC, r.id DESC"
+             SELECT item.id, item.form, item.status, item.doc, r.sid, {MATTER}, {} FROM r JOIN item ON item.id = r.id
+              WHERE r.k <= {GATE_ITEMS} ORDER BY r.sid, r.at DESC, r.id DESC",
+            ready_columns(c)?
         ))?;
-        for row in st.query_map([], |r| Ok((r.get::<_, i64>(4)?, doc_of(r)?)))? {
+        for row in st.query_map([], |r| Ok((r.get::<_, i64>(4)?, ready_doc_of(r)?)))? {
             let (sid, doc) = row?;
             items.entry(sid).or_default().push(doc);
         }
@@ -176,10 +195,11 @@ pub(crate) fn read_gate(
         count: count_gate(c, now, declined)?,
         senders: rows
             .into_iter()
-            .map(|(id, address, name, count, _)| GateSender {
+            .map(|(id, address, name, count, _, known_as)| GateSender {
                 id: format_id(Kind::Sender, id),
                 address,
                 name,
+                known_as,
                 count,
                 items: items.remove(&id).unwrap_or_default(),
             })
@@ -203,11 +223,12 @@ pub fn gate_page(
     }
     let name = if declined { "declined" } else { "gate" };
     let after = after.map(|t| decode_cursor(t, name, 2)).transpose()?;
-    Ok(store.read(|c| Ok(read_gate(c, now, declined, limit, after.as_deref())?))?)
+    Ok(store.read(|c| read_gate(c, now, declined, limit, after.as_deref()))?)
 }
 
-/// The answer `answer` (`accept`, `decline` or `reopen`) of the person to the
-/// sender `id`. Gives the sender row after the answer, or `None` when no
+/// The answer `answer` (`accept`, `decline`, `reopen` or `trust`) of the
+/// person to the sender `id`. `trust` takes a sender out of quarantine that
+/// only the near-copy rule marks hostile (issue #49); `reopen` undoes it. Gives the sender row after the answer, or `None` when no
 /// sender has the ID or the answer is not known. An accept or a decline of a
 /// sender that is not at the gate now (its kind is not `stranger`, or a rule
 /// took its items out) is [`Error::Conflict`].
@@ -216,7 +237,7 @@ pub fn gate_page(
 /// sender whose hostile state changed, are one transaction (specification 1,
 /// section 6.7). The understanding worker runs the model later.
 pub fn answer(store: &Store, id: &str, answer: &str, now_ms: i64) -> Result<Option<Value>> {
-    if !matches!(answer, "accept" | "decline" | "reopen") {
+    if !matches!(answer, "accept" | "decline" | "reopen" | "trust") {
         return Ok(None);
     }
     let row = row_of(id, Kind::Sender)?;
@@ -227,6 +248,7 @@ pub fn answer(store: &Store, id: &str, answer: &str, now_ms: i64) -> Result<Opti
         let done = match answer {
             "accept" => gate::accept(tx, row, now_ms, at(false)? || at(true)?)?,
             "decline" => gate::decline(tx, row, now_ms, at(false)?)?,
+            "trust" => gate::trust(tx, row, now_ms)?,
             _ => gate::reopen(tx, row, now_ms)?,
         };
         Ok(match done {
@@ -238,9 +260,52 @@ pub fn answer(store: &Store, id: &str, answer: &str, now_ms: i64) -> Result<Opti
             Answer::NotStranger(Some(iris_senders::Kind::Hostile)) => {
                 Err("Iris marks this sender as hostile. Its mail stays in quarantine.")
             }
+            Answer::NotHostile(_) => {
+                Err("Iris does not hold this sender as a near copy now. Look at the mail again.")
+            }
             Answer::NotStranger(_) | Answer::NotAtGate => {
                 Err("This sender is not at the gate now. Look at the brief again.")
             }
+        })
+    })?;
+    result.map_err(|e| Error::Conflict(e.into()))
+}
+
+/// The person releases the message `id` from quarantine (`on`), or ends
+/// the release (issues 369, 373 and 374). A release covers the marks
+/// `dmarc`, `spoof` and `link` of the current content
+/// (`iris_understand::store::release`); the understanding worker reads the
+/// message again. Gives the message after the change, or `None` when no
+/// message has the ID. [`Error::Conflict`] when the message is gone, has no
+/// mark that the person can release, or has no release to end.
+pub fn release(store: &Store, id: &str, on: bool) -> Result<Option<crate::read::Message>> {
+    use iris_understand::store::{release, unrelease, Release};
+    let row = row_of(id, Kind::Message)?;
+    let result = store.write(|tx| {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM message WHERE id = ?1)",
+            [row],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(Ok(None));
+        }
+        let done = match if on {
+            release(tx, row)?
+        } else {
+            unrelease(tx, row)?
+        } {
+            Release::Done { .. } => Ok(()),
+            Release::NoMessage => Err("This mail is gone."),
+            Release::Reading => Err("Iris reads this mail again now. Try again in a moment."),
+            Release::Nothing if on => {
+                Err("Iris holds this mail for a reason that you cannot release here.")
+            }
+            Release::Nothing => Err("You did not release this mail."),
+        };
+        Ok(match done {
+            Ok(()) => Ok(crate::read::message_in(tx, row)?),
+            Err(e) => Err(e),
         })
     })?;
     result.map_err(|e| Error::Conflict(e.into()))

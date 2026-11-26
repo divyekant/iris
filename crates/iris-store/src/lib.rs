@@ -19,6 +19,31 @@ macro_rules! may_be_hostile {
     };
 }
 
+/// The SQL condition "the model can read message `m` at the time `$now`
+/// (an SQL term, milliseconds)": the model health signal (issue #1045). It
+/// reads the same state as the pending rule of the runner
+/// (`iris_understand::batch`), with its times:
+/// - a model is set, and its wait after model errors
+///   (`model_setting.retry_at`) is not running at `$now` ("Try now" ends
+///   it);
+/// - the budget or the model row did not refuse the mail (`waits_model` is
+///   1); the mark 2 of the error wait ends with that wait;
+/// - the mail has a try left (`tries` below 3,
+///   `iris_understand::store::MAX_TRIES`) and its retry time
+///   (`retry_at`) is not after `$now`.
+#[macro_export]
+macro_rules! model_can_read {
+    ($now:literal) => {
+        concat!(
+            "(EXISTS (SELECT 1 FROM model_setting ms WHERE ms.retry_at IS NULL OR ms.retry_at <= ",
+            $now,
+            ") AND m.waits_model <> 1 AND m.tries < 3 AND (m.retry_at IS NULL OR m.retry_at <= ",
+            $now,
+            "))"
+        )
+    };
+}
+
 /// The SQL condition "message `m` is hostile mail": a hostile mark, the
 /// label `SPAM`, or a `hostile` sender (specification 1, section 6.7).
 /// Understanding deletes the unpinned items of such a message. Each read
@@ -87,6 +112,26 @@ macro_rules! removed_account {
     };
 }
 
+/// SQL: the message `m` is not mail that you got, for a watch (card R5-07):
+/// hostile mail, mail that may be hostile, your own sent mail (`SENT`), or
+/// a draft or a copy. The first arrival, the read gate of a stored match
+/// and the content cleanup read this one rule, so a match that changes
+/// later stops in each place (issue #931).
+macro_rules! not_received {
+    () => {
+        concat!(
+            "(",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            " OR EXISTS (SELECT 1 FROM message_label sml JOIN label sl ON sl.id = sml.label_id
+               WHERE sml.message_id = m.id AND sl.provider_id = 'SENT') OR ",
+            crate::draft_or_copy!("m"),
+            ")"
+        )
+    };
+}
+
 /// The labels of [`draft_or_copy!`], for a check in Rust.
 pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
 
@@ -97,6 +142,8 @@ mod id;
 mod remove;
 mod search;
 mod secret;
+mod tokens;
+pub mod verify_log;
 mod watch;
 
 use std::borrow::Cow;
@@ -108,7 +155,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
-pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
+pub use backup::{
+    Backup, BackupLock, Cleaned, PolicyExpect, PolicyWrite, ATTACH_BATCH, GONE_KEEP_MS,
+};
 pub use content::ContentWriter;
 pub use file_lock::{FileLock, Probe};
 pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
@@ -118,6 +167,7 @@ pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
 pub const SYNC_STOPPED: &str = "stopped: the process ended before the sync ended";
 pub use id::{format_id, parse_id, Kind};
 pub use search::{day_ms, Query};
+pub use tokens::{index_tokens, Token};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
@@ -174,6 +224,27 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_49.sql"),
     include_str!("schema_50.sql"),
     include_str!("schema_51.sql"),
+    include_str!("schema_52.sql"),
+    include_str!("schema_53.sql"),
+    include_str!("schema_54.sql"),
+    include_str!("schema_55.sql"),
+    include_str!("schema_56.sql"),
+    include_str!("schema_57.sql"),
+    include_str!("schema_58.sql"),
+    include_str!("schema_59.sql"),
+    include_str!("schema_60.sql"),
+    include_str!("schema_61.sql"),
+    include_str!("schema_62.sql"),
+    include_str!("schema_63.sql"),
+    include_str!("schema_64.sql"),
+    include_str!("schema_65.sql"),
+    include_str!("schema_66.sql"),
+    include_str!("schema_67.sql"),
+    include_str!("schema_68.sql"),
+    include_str!("schema_69.sql"),
+    include_str!("schema_70.sql"),
+    include_str!("schema_71.sql"),
+    include_str!("schema_72.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -209,6 +280,9 @@ pub enum Error {
     Account(&'static str),
     /// The time zone name is not in the time zone database of the computer.
     TimeZone(String),
+    /// Another message row of the account has the new provider ID
+    /// ([`rebind`]).
+    Taken(String),
 }
 
 impl fmt::Display for Error {
@@ -230,6 +304,7 @@ impl fmt::Display for Error {
                 f,
                 "time zone: {name} is not a time zone of this computer (use an IANA name, for example Europe/Berlin)"
             ),
+            Error::Taken(id) => write!(f, "another message has the provider ID {id}"),
         }
     }
 }
@@ -256,7 +331,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
 /// The `model` value of each open model document that Iris writes
 /// (spec 4, rule 2.1).
-pub const MODEL: &str = "iris/1.2";
+pub const MODEL: &str = "iris/1.4";
 
 /// The `$id` of the common definitions of the open model.
 pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
@@ -553,6 +628,12 @@ impl Store {
         })
     }
 
+    /// Mark each active signal whose `expires` time is at or before `now`
+    /// as `expired` ([`expire_signals`]).
+    pub fn expire_signals(&self, now: i64) -> Result<usize> {
+        self.write(|tx| expire_signals(tx, now))
+    }
+
     /// Take the run lock of the `sync_log` row `row`, and create its file.
     /// Only the sync of the row calls it. The sync holds it from before its
     /// row is visible until after its result is written. `None`: the sync runs. A free
@@ -730,13 +811,14 @@ impl Store {
             )?;
             let mut header = tx.prepare_cached(
                 "INSERT INTO header(message_id, date, from_addr, from_name, to_addrs, cc_addrs, subject,
-                   message_id_hdr, in_reply_to, list_id, auth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                   message_id_hdr, in_reply_to, list_id, auth, reply_to, content_sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12)
                  ON CONFLICT(message_id) DO UPDATE SET
                    date = excluded.date, from_addr = excluded.from_addr, from_name = excluded.from_name,
                    to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs, subject = excluded.subject,
                    message_id_hdr = excluded.message_id_hdr, in_reply_to = excluded.in_reply_to,
-                   list_id = excluded.list_id, auth = excluded.auth",
+                   list_id = excluded.list_id, auth = excluded.auth, reply_to = NULL,
+                   content_sha256 = excluded.content_sha256",
             )?;
             let mut same_content = tx.prepare_cached(
                 "SELECT 1 FROM message WHERE account_id = ?1 AND provider_id = ?2
@@ -797,7 +879,11 @@ impl Store {
                     h.message_id_hdr,
                     h.in_reply_to,
                     h.list_id,
-                    h.auth
+                    h.auth,
+                    // A parsed header comes from this content; an empty one
+                    // waits for understanding (migration 70). `Header` has
+                    // no `Reply-To`, so the row has none.
+                    (!h.is_empty()).then_some(m.content_sha256.as_deref()).flatten()
                 ])?; }
                 if let Some(b) = &m.body {
                     put_body(tx, id, b)?;
@@ -841,6 +927,33 @@ impl Store {
         content::path(&self.dir.join("content"), sha256)
     }
 
+    /// Write one attachment file to the attachment folder and give its
+    /// SHA-256 (send content spec `docs/specs/2026-11-24-send-content.md`,
+    /// section 2). The content cleanup never reads this folder.
+    /// [`Store::clean_attachments`] deletes an old file that nothing names.
+    pub fn put_attachment(&self, bytes: &[u8]) -> Result<String> {
+        let root = self.dir.join(ATTACHMENTS);
+        make_private_dir(&root)?;
+        let mut w = ContentWriter::with_ext(&root, "")?;
+        io::Write::write_all(&mut w, bytes)?;
+        // The rename runs under the write lock of this store and the SQLite
+        // write lock (an IMMEDIATE transaction), which each Store of the
+        // data folder shares, also in another process. clean_attachments
+        // holds both locks in the same order, so the rename does not
+        // overlap a cleanup run: the file is new, or made again.
+        let mut conn = lock(&self.writer);
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let sha = w.finish()?;
+        tx.commit()?;
+        Ok(sha)
+    }
+
+    /// The path of the attachment file with this SHA-256, or `None` if the
+    /// value is not a SHA-256 in lowercase hexadecimal.
+    pub fn attachment_path(&self, sha256: &str) -> Option<PathBuf> {
+        content::file_path(&self.dir.join(ATTACHMENTS), sha256, "")
+    }
+
     /// Encrypt a secret (specification 1, section 5.4) for a BLOB column.
     pub fn seal(&self, plain: &[u8]) -> Result<Vec<u8>> {
         secret::seal(&self.key, plain)
@@ -851,6 +964,9 @@ impl Store {
         secret::unseal(&self.key, sealed)
     }
 }
+
+/// The attachment folder of the data folder.
+pub(crate) const ATTACHMENTS: &str = "attachments";
 
 /// `text` with at most `limit` characters before the cut mark. A text that
 /// ends with the mark already and is in the limit stays as it is.
@@ -897,6 +1013,39 @@ pub(crate) fn settings(conn: &Connection) -> Result<()> {
         }
     }
     conn.execute_batch(PRAGMAS)?;
+    // `iris_same_name(a, b)`: the two names are equal with Unicode case
+    // folding, as the label rules of submit and apply (`unicase`). SQLite
+    // `COLLATE NOCASE` folds only ASCII (issue #965).
+    conn.create_scalar_function(
+        "iris_same_name",
+        2,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let (a, b) = (ctx.get::<Option<String>>(0)?, ctx.get::<Option<String>>(1)?);
+            Ok(match (a, b) {
+                (Some(a), Some(b)) => unicase::UniCase::new(a) == unicase::UniCase::new(b),
+                _ => false,
+            })
+        },
+    )?;
+    // `iris_sha256(text)`: the SHA-256 of the UTF-8 text, as lower-case hex,
+    // or NULL for NULL. The basis of a thread summary reads it (issue 478).
+    conn.create_scalar_function(
+        "iris_sha256",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            use sha2::Digest;
+            Ok(ctx.get::<Option<String>>(0)?.map(|t| {
+                sha2::Sha256::digest(t.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            }))
+        },
+    )?;
     Ok(())
 }
 
@@ -992,12 +1141,26 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
 /// else the time zone of the computer. A saved name that the computer no
 /// longer knows gives the time zone of the computer too.
 pub fn time_zone(c: &Connection) -> rusqlite::Result<jiff::tz::TimeZone> {
+    Ok(time_zone_and_set(c)?.0)
+}
+
+/// [`time_zone`], and true when it is the zone that the owner set, from one
+/// read of `owner_setting`, so the two values always agree (issue 891).
+pub fn time_zone_and_set(c: &Connection) -> rusqlite::Result<(jiff::tz::TimeZone, bool)> {
+    Ok(match owner_time_zone(c)? {
+        Some(zone) => (zone, true),
+        None => (jiff::tz::TimeZone::system(), false),
+    })
+}
+
+/// The time zone that the owner set (`owner_setting`), or `None` when the
+/// owner set none, or set a name that the computer no longer knows. Then
+/// [`time_zone`] gives the time zone of the computer.
+pub fn owner_time_zone(c: &Connection) -> rusqlite::Result<Option<jiff::tz::TimeZone>> {
     let name: Option<String> = c
         .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
         .optional()?;
-    Ok(name
-        .and_then(|n| jiff::tz::TimeZone::get(&n).ok())
-        .unwrap_or_else(jiff::tz::TimeZone::system))
+    Ok(name.and_then(|n| jiff::tz::TimeZone::get(&n).ok()))
 }
 
 /// The day of the instant `now_ms` (milliseconds since the epoch) in the
@@ -1011,6 +1174,24 @@ pub fn today(c: &Connection, now_ms: i64) -> rusqlite::Result<String> {
 pub fn day_in(zone: &jiff::tz::TimeZone, now_ms: i64) -> String {
     let at = jiff::Timestamp::from_millisecond(now_ms).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
     zone.to_datetime(at).date().to_string()
+}
+
+/// Mark each active signal whose `expires` time is at or before `now_ms` as
+/// `expired`, in the status column and the document (specification 1,
+/// section 6.8). The status rule of `iris_understand` sets it only when it
+/// writes the item, so the store would keep `active` after the time (issue
+/// #927). A signal with no `expires` stays active. Gives the number of
+/// signals that expired.
+pub fn expire_signals(c: &Connection, now_ms: i64) -> Result<usize> {
+    Ok(c.execute(
+        "UPDATE item SET status = 'expired', updated_at = ?1,
+           doc = json_set(doc, '$.status', 'expired', '$.updated',
+             strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch')
+               || printf('.%03dZ', ?1 % 1000))
+         WHERE form = 'signal' AND status = 'active'
+           AND unixepoch(json_extract(doc, '$.expires'), 'subsec') * 1000 <= ?1",
+        [now_ms],
+    )?)
 }
 
 /// The schema version of an open database.
@@ -1027,6 +1208,39 @@ pub fn stopped(conn: &Connection) -> Result<Option<i64>> {
             r.get(0)
         })?,
     )
+}
+
+/// Give the message row `message` the provider ID `new`, after a move
+/// that gave the message a new location ID (IMAP moves spec, section 3).
+/// The row, its raw file, its forms and its ledger rows stay. A thread
+/// whose provider ID is the old message ID (the fallback thread ID of a
+/// message with no thread headers) gets `new` too. Refuses with
+/// [`Error::Taken`] if another row of the account has `new`. Run it in the
+/// transaction that saves the move.
+pub fn rebind(tx: &Connection, message: i64, new: &str) -> Result<()> {
+    let (account, old, thread): (i64, String, i64) = tx.query_row(
+        "SELECT account_id, provider_id, thread_id FROM message WHERE id = ?1",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM message
+                        WHERE account_id = ?1 AND provider_id = ?2 AND id != ?3)",
+        params![account, new, message],
+        |r| r.get(0),
+    )?;
+    if taken {
+        return Err(Error::Taken(new.to_string()));
+    }
+    tx.execute(
+        "UPDATE message SET provider_id = ?2 WHERE id = ?1",
+        params![message, new],
+    )?;
+    tx.execute(
+        "UPDATE thread SET provider_id = ?3 WHERE id = ?1 AND provider_id = ?2",
+        params![thread, old, new],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

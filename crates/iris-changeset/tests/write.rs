@@ -82,8 +82,12 @@ fn store(dir: &TempDir) -> Store {
         tx.execute(
             "INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content, hash,
                                raw, action_id, created_at, updated_at)
-             VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', ?1, ?2, 1, 0, 0)",
-            rusqlite::params![iris_compose::hash(&c, None), raw],
+             VALUES (1, 1, 'r1', 'iris.1@example.com', ?3, ?1, ?2, 1, 0, 0)",
+            rusqlite::params![
+                iris_compose::hash(&c, None),
+                raw,
+                serde_json::json!({"content": c, "reply": null}).to_string()
+            ],
         )?;
         Ok(())
     })
@@ -180,9 +184,9 @@ fn submit_denies_a_draft_that_is_not_valid() {
             json!({"to": ["p@x.org"], "subject": "s", "body": "x"}),
             "no subject",
         ),
-        (&["m-1"], REPLY(), "one account or one thread"),
-        // A draft change waits for its undo (spec 2, section 7.5).
-        (&["d-1"], REPLY(), "one account or one thread"),
+        (&["m-1"], REPLY(), "one account, one thread or one draft"),
+        // Only the person changes a draft (change spec, section 1).
+        (&["d-1"], REPLY(), "Only you can change a draft."),
         (&both, REPLY(), "one target"),
         // No mail with no text, from any author (issue 741).
         (
@@ -349,6 +353,91 @@ fn a_draft_has_one_send() {
     );
 }
 
+/// A send of a draft whose stored bytes are over the limit of the provider
+/// of its account is denied: a refresh from Outlook can add a file.
+#[test]
+fn a_send_over_the_limit_of_the_provider_is_denied() {
+    let dir = TempDir::new("size");
+    let s = store(&dir);
+    assert_eq!(
+        state(&one(
+            &s,
+            AuthorKind::Person,
+            Verb::Send,
+            &["d-1"],
+            json!({})
+        )),
+        "proposed"
+    );
+    s.write(|tx| {
+        tx.execute_batch(
+            "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', reason = 'no',
+               decided_at = 1 WHERE verb = 'send';
+             UPDATE account SET provider = 'outlook';",
+        )?;
+        // Over the Outlook limit, under the Gmail limit.
+        tx.execute(
+            "UPDATE draft SET raw = CAST(raw || printf('%.*c', 2900000, 'x') AS BLOB)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let a = one(&s, AuthorKind::Person, Verb::Send, &["d-1"], json!({}));
+    assert_eq!(state(&a), "denied");
+    assert!(
+        a["decision"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("too large for outlook"),
+        "{a}"
+    );
+    s.write(|tx| Ok(tx.execute("UPDATE account SET provider = 'gmail'", [])?))
+        .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', reason = 'no',
+               decided_at = 1 WHERE verb = 'send' AND state <> 'denied'",
+            [],
+        )?)
+    })
+    .unwrap();
+    let a = one(&s, AuthorKind::Person, Verb::Send, &["d-1"], json!({}));
+    assert!(
+        !a["decision"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("too large"),
+        "{a}"
+    );
+}
+
+/// Only the person attaches a file: an agent draft that names a file of the
+/// folder by its hash is denied.
+#[test]
+fn only_the_person_attaches_a_file() {
+    let dir = TempDir::new("files");
+    let s = store(&dir);
+    let sha = s.put_attachment(b"quote").unwrap();
+    let mail = || {
+        json!({"to": ["priya@example.com"], "subject": "Q", "body": "Here.",
+               "attachments": [{"name": "q.pdf", "type": "application/pdf", "sha256": sha, "size": 5}]})
+    };
+    for by in [AuthorKind::Agent, AuthorKind::Local] {
+        let a = one(&s, by, Verb::Draft, &["a-1"], mail());
+        assert_eq!(state(&a), "denied", "{a}");
+        assert!(
+            a["decision"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("only the person attaches"),
+            "{a}"
+        );
+    }
+    let a = one(&s, AuthorKind::Person, Verb::Draft, &["a-1"], mail());
+    assert_eq!(state(&a), "proposed", "{a}");
+}
+
 /// The hash of a send covers the content hash of its draft.
 #[test]
 fn the_send_hash_covers_the_draft_content() {
@@ -459,4 +548,320 @@ fn a_stranger_thread_flags_first_contact_with_gone_messages() {
     // A new mail has no thread, so no thread can make it a first contact.
     let got = one(&s, AuthorKind::Person, Verb::Draft, &["a-1"], MAIL());
     assert_eq!(flags(&got), json!(["new_recipient"]), "{got}");
+}
+
+/// The state of the action `n` of the newest changeset.
+fn last_state(s: &Store) -> (String, Option<String>) {
+    s.read(|c| {
+        Ok(c.query_row(
+            "SELECT state, reason FROM changeset_action ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    })
+    .unwrap()
+}
+
+fn set(s: &Store, sql: &str) {
+    s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+}
+
+/// A change of a draft (docs/specs/2026-11-25-draft-change.md, section 1):
+/// only the person, a Gmail draft of Iris that is not sent, not foreign and
+/// has no send or other change open. A reply change has no subject and
+/// resolves to the newest message of the thread.
+#[test]
+fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
+    let dir = TempDir::new("change");
+    let s = store(&dir);
+    let a = one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    assert_eq!(state(&a), "proposed", "{a}");
+    assert_eq!(a["resolved"]["messages"], json!(["m-2"]));
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], MAIL());
+    assert_eq!(
+        last_state(&s).1.as_deref(),
+        Some("a reply takes no subject: Iris sets it")
+    );
+    let denied = |by: AuthorKind, why: &str| {
+        one(&s, by, Verb::Draft, &["d-1"], REPLY());
+        assert_eq!(last_state(&s), ("denied".into(), Some(why.into())), "{why}");
+    };
+    denied(AuthorKind::Agent, "Only you can change a draft.");
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-9"], REPLY());
+    assert_eq!(
+        last_state(&s),
+        ("denied".into(), Some("The draft does not exist.".into()))
+    );
+    for (sql, why, undo) in [
+        (
+            "UPDATE account SET provider = 'outlook'",
+            "Iris cannot change a draft of this account.",
+            "UPDATE account SET provider = 'gmail'",
+        ),
+        (
+            "UPDATE draft SET sent_at = 1, sent_message = 'g9'",
+            "The draft is sent.",
+            "UPDATE draft SET sent_at = NULL, sent_message = NULL",
+        ),
+        (
+            "UPDATE draft SET foreign_at = 1",
+            "The draft has a form that Iris does not write. Change it in Gmail.",
+            "UPDATE draft SET foreign_at = NULL",
+        ),
+    ] {
+        set(&s, sql);
+        denied(AuthorKind::Person, why);
+        set(&s, undo);
+    }
+    // A send of the draft waits for review: no change.
+    one(&s, AuthorKind::Agent, Verb::Send, &["d-1"], json!({}));
+    denied(
+        AuthorKind::Person,
+        "The draft waits to send. Cancel it first.",
+    );
+    set(&s, "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', reason = 'no', decided_at = 1 WHERE verb = 'send' AND state = 'proposed'");
+    // A change that the person approved is open: a second change and a
+    // send wait for it.
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    set(&s, "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1 WHERE id = (SELECT max(id) FROM changeset_action)");
+    denied(AuthorKind::Person, iris_changeset::CHANGING);
+    one(&s, AuthorKind::Person, Verb::Send, &["d-1"], json!({}));
+    assert_eq!(
+        last_state(&s),
+        ("denied".into(), Some(iris_changeset::CHANGING.into()))
+    );
+}
+
+/// The send mark of another write that made the draft and has no send yet
+/// blocks a change, while the mark is open (not withdrawn, not too old).
+#[test]
+fn an_open_send_mark_of_the_draft_blocks_a_change() {
+    let dir = TempDir::new("change-mark");
+    let s = store(&dir);
+    // A write of a new mail: its approved draft action has a mark, and the
+    // apply made draft 2.
+    let press = iris_changeset::Press {
+        mail: iris_changeset::Mail::New { account: "a-1" },
+        args: &args(MAIL()),
+        key: "key-0123456789abcd",
+        flags: &["new_recipient".to_string()],
+        draft: None,
+    };
+    let iris_changeset::Written::New(cs) = iris_changeset::write_mail(&s, &press, NOW)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("a new write");
+    };
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                               action_id, created_at, updated_at)
+             SELECT 1, 'r2', 'iris.2@example.com', d.content, d.hash, d.raw, a.id, 0, 0
+               FROM draft d, changeset_action a WHERE d.id = 1 AND a.changeset_id = ?1",
+            [cs],
+        )?)
+    })
+    .unwrap();
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-2"], REPLY());
+    assert_eq!(
+        last_state(&s),
+        (
+            "denied".into(),
+            Some("The draft waits to send. Cancel it first.".into())
+        )
+    );
+    // The person stopped that write: the change can go.
+    set(
+        &s,
+        &format!(
+            "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person' WHERE id = {cs}"
+        ),
+    );
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-2"], MAIL());
+    assert_eq!(last_state(&s).0, "proposed", "{:?}", last_state(&s));
+}
+
+/// The flags of a change read the account of the draft, and a reply change
+/// reads the subject of its draft, not the subject of the thread.
+#[test]
+fn the_flags_of_a_change_read_the_changed_draft() {
+    let dir = TempDir::new("change-flags");
+    let s = store(&dir);
+    set(
+        &s,
+        "UPDATE draft SET content = json_set(content, '$.content.subject', 'Re: $500 fee');
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+           VALUES (1, 1, 2, 'draft', '{\"accounts\":[\"a-1\"]}', '{}');
+         INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                           action_id, created_at, updated_at)
+           SELECT 1, 'r2', 'iris.2@example.com', content, hash, raw, 2, 0, 0
+             FROM draft WHERE id = 1",
+    );
+    let flags = |a: &Value| a["flags"].clone();
+    // A reply change: priya wrote to the owner, the owner never to priya.
+    let got = one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    assert_eq!(state(&got), "proposed", "{got}");
+    assert_eq!(flags(&got), json!(["new_recipient", "money"]), "{got}");
+    // A new-mail change has no thread: the account comes from the draft.
+    let got = one(
+        &s,
+        AuthorKind::Person,
+        Verb::Draft,
+        &["d-2"],
+        json!({"to": ["sam@example.com"], "subject": "Hi", "body": "Hello"}),
+    );
+    assert_eq!(state(&got), "proposed", "{got}");
+    assert_eq!(flags(&got), json!(["new_recipient"]), "{got}");
+}
+
+/// A reply change needs a message to reply to, as a new reply does.
+#[test]
+fn a_reply_change_needs_a_parent() {
+    let dir = TempDir::new("change-parent");
+    let s = store(&dir);
+    set(&s, "UPDATE message SET gone_at = 1 WHERE thread_id = 1");
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    let (state, why) = last_state(&s);
+    assert_eq!(state, "denied");
+    assert!(why.is_some(), "a reason");
+}
+
+/// Issue 904: the removal of an account denies an open new-mail draft that
+/// targets the account, and a tombstone is no target after the removal.
+#[test]
+fn a_removed_account_ends_its_new_mail_drafts() {
+    let dir = TempDir::new("removed");
+    let s = store(&dir);
+    let open = one(&s, AuthorKind::Agent, Verb::Draft, &["a-1"], MAIL());
+    assert_eq!(state(&open), "proposed", "{open}");
+    let address: String = s
+        .read(|c| Ok(c.query_row("SELECT address FROM account WHERE id = 1", [], |r| r.get(0))?))
+        .unwrap();
+    s.remove_account(&address, NOW).unwrap();
+    let after: Vec<(Option<String>, Option<String>)> = s
+        .read(|c| {
+            let mut q = c.prepare("SELECT state, reason FROM changeset_action ORDER BY id")?;
+            let rows = q
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert!(
+        after.contains(&(
+            Some("denied".into()),
+            Some("the account was removed".into())
+        )),
+        "{after:?}"
+    );
+    let who = author(AuthorKind::Agent);
+    let cs = create(&s, &who, NOW).unwrap();
+    // The target resolver finds no account: the add or the submit refuses it.
+    let added = add_action(&s, cs, &who, Verb::Draft, &["a-1"], &args(MAIL()), None);
+    if added.is_ok() {
+        let _ = submit(&s, cs, &who, "Write.", NOW);
+        let last: Option<String> = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state FROM changeset_action ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_ne!(
+            last.as_deref(),
+            Some("proposed"),
+            "a new action targets the tombstone"
+        );
+        assert_ne!(
+            last.as_deref(),
+            Some("approved"),
+            "a new action targets the tombstone"
+        );
+    }
+}
+
+/// No new action targets mail of an account in state `removing`, while
+/// the removal deletes its rows (issue 1041): a reply to a thread, a
+/// mailbox verb on a thread or a message.
+#[test]
+fn no_new_action_targets_mail_of_a_removing_account() {
+    let dir = TempDir::new("removing");
+    let s = store(&dir);
+    s.write(|tx| Ok(tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?))
+        .unwrap();
+    let cases: [(Verb, &str, Value); 3] = [
+        (Verb::Draft, "t-1", REPLY()),
+        (Verb::Archive, "t-1", json!({})),
+        (Verb::Archive, "m-1", json!({})),
+    ];
+    for (verb, target, a) in cases {
+        let who = author(AuthorKind::Agent);
+        let cs = create(&s, &who, NOW).unwrap();
+        if add_action(&s, cs, &who, verb, &[target], &args(a), None).is_ok() {
+            let _ = submit(&s, cs, &who, "Do it.", NOW);
+        }
+        let open: i64 = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM changeset_action
+                     WHERE changeset_id = ?1 AND state IN ('proposed', 'approved')",
+                    [cs],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            open, 0,
+            "{verb:?} {target}: a new action targets a removing account"
+        );
+    }
+}
+
+/// No new action can name a kept draft of a removed account (issue 1014).
+#[test]
+fn a_kept_draft_of_a_removed_account_is_no_target() {
+    for gone in ["removing", "removed"] {
+        let dir = TempDir::new("kept");
+        let s = store(&dir);
+        let draft: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(draft, 1);
+        if gone == "removed" {
+            let address: String = s
+                .read(|c| {
+                    Ok(c.query_row("SELECT address FROM account WHERE id = 1", [], |r| r.get(0))?)
+                })
+                .unwrap();
+            s.remove_account(&address, NOW).unwrap();
+        } else {
+            s.write(|tx| Ok(tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?))
+                .unwrap();
+        }
+        let kept: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(kept, 1, "{gone}: the removal keeps the draft");
+        let who = author(AuthorKind::Agent);
+        let cs = create(&s, &who, NOW).unwrap();
+        let added = add_action(&s, cs, &who, Verb::Send, &["d-1"], &args(json!({})), None);
+        if added.is_ok() {
+            let _ = submit(&s, cs, &who, "Send.", NOW);
+        }
+        let open: i64 = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM changeset_action a JOIN action_draft d
+                       ON d.action_id = a.id
+                     WHERE d.draft_id = 1 AND a.state IN ('proposed', 'approved')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(open, 0, "{gone}: a new send names the kept draft");
+    }
 }

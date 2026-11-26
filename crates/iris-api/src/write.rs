@@ -23,10 +23,19 @@ pub struct WriteBody {
     pub parent: Option<String>,
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    /// Send content spec, section 6.1: can be absent.
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    #[serde(default)]
+    pub attachments: Vec<iris_compose::Attachment>,
     pub subject: Option<String>,
     pub body: String,
     pub key: String,
     pub flags: Vec<String>,
+    /// The draft (`d-N`) that the press changes (draft change spec,
+    /// section 5). Its account and thread must be `account` or `thread`.
+    #[serde(default)]
+    pub draft: Option<String>,
 }
 
 /// The answer of a press.
@@ -63,6 +72,14 @@ pub fn write(store: &Store, b: &WriteBody, now_ms: i64) -> Result<Pressed> {
     args.insert("to".into(), json!(b.to));
     args.insert("cc".into(), json!(b.cc));
     args.insert("body".into(), json!(b.body));
+    // Only a field that is not empty: the args (and the request hash) of a
+    // mail with no Bcc and no file stay as before.
+    if !b.bcc.is_empty() {
+        args.insert("bcc".into(), json!(b.bcc));
+    }
+    if !b.attachments.is_empty() {
+        args.insert("attachments".into(), json!(b.attachments));
+    }
     let mail = match (&b.account, &b.thread) {
         (Some(account), None) => {
             if b.parent.is_some() {
@@ -95,6 +112,7 @@ pub fn write(store: &Store, b: &WriteBody, now_ms: i64) -> Result<Pressed> {
         args: &args,
         key: &b.key,
         flags: &b.flags,
+        draft: b.draft.as_deref(),
     };
     let cs = iris_changeset::format_changeset_id;
     // A refusal of the store is a refusal of the input of the press (for
@@ -123,7 +141,7 @@ pub fn state(store: &Store, cs: i64, now_ms: i64) -> Result<Option<Value>> {
     Ok(store.read(|conn| {
         // One snapshot: the engine moves the write at the same time.
         let tx = conn.unchecked_transaction()?;
-        let v = state_in(&tx, cs, now_ms)?;
+        let v = state_in(store, &tx, cs, now_ms)?;
         tx.finish()?;
         Ok(v)
     })?)
@@ -140,17 +158,26 @@ type Mark = (
     i64,
 );
 
-fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Value>> {
+fn state_in(
+    store: &Store,
+    c: &Connection,
+    cs: i64,
+    now_ms: i64,
+) -> rusqlite::Result<Option<Value>> {
     let mark: Option<Mark> = c
         .query_row(
-            "SELECT a.state, coalesce(a.reason, l.error), w.send_action_id, d.id,
+            concat!(
+                "SELECT a.state, coalesce(a.reason, l.error), w.send_action_id, d.id,
                     d.foreign_at IS NOT NULL, d.sent_at IS NOT NULL, c.state, w.created_at
              FROM write_send w
              JOIN changeset_action a ON a.id = w.action_id
              JOIN changeset c ON c.id = a.changeset_id
-             LEFT JOIN draft d ON d.action_id = a.id
+             LEFT JOIN draft d ON ",
+                iris_changeset::draft_of_action!(),
+                "
              LEFT JOIN ledger l ON l.action_id = a.id
-             WHERE a.changeset_id = ?1",
+             WHERE a.changeset_id = ?1"
+            ),
             [cs],
             |r| {
                 Ok((
@@ -169,8 +196,26 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
     let Some((state, reason, send, draft, foreign, sent, changeset, pressed)) = mark else {
         return Ok(None);
     };
+    // A send with Bcc waits for the gate of its provider, also after the hold.
+    let bcc_check = match draft {
+        Some(d) => iris_apply::bcc_waits(c, d)?,
+        None => None,
+    };
+    let (change, newer_mail) = match draft {
+        Some(d) => change(store, c, d, 0, now_ms)?,
+        None => (None, false),
+    };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
-    let stopped = |why: &str| json!({"state": "stopped", "reason": why, "draft": draft});
+    // A stopped write with a draft says how the next press of Send writes
+    // it (draft change spec, section 5).
+    // `newer_mail` says why a reply has no change: a newer mail came into
+    // its thread (issue #1077).
+    let stopped = |why: &str| match &draft {
+        Some(_) if newer_mail => json!({"state": "stopped", "reason": why, "draft": draft,
+                                         "change": change, "newer_mail": true}),
+        Some(_) => json!({"state": "stopped", "reason": why, "draft": draft, "change": change}),
+        None => json!({"state": "stopped", "reason": why, "draft": draft}),
+    };
     if let Some(send) = send {
         let (s, why, decided_at): (String, Option<String>, Option<i64>) = c.query_row(
             "SELECT a.state, coalesce(a.reason, l.error), a.decided_at FROM changeset_action a
@@ -187,6 +232,7 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
                 "state": "waiting",
                 "draft": draft,
                 "sending": on.is_some(),
+                "bcc_check": bcc_check,
                 "leaves_at": on.zip(decided_at)
                     .map(|(on, at)| rfc3339(at.max(on) + iris_apply::HOLD_MS)),
             }),
@@ -215,6 +261,146 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
     }))
 }
 
+/// How the next press of Send writes the draft `draft` of a stopped write
+/// (draft change spec, section 5): `update` changes it in place, `new`
+/// makes a new draft (an account that is not Gmail), `None` offers no
+/// "Change and send". The value is the outcome that the apply of the next
+/// press gives: the checks of a change in place for Gmail (section 1, the
+/// files included), and the checks of a create for another provider.
+/// The second value is true when only a newer mail in the thread of a
+/// reply stops the change. `after_deny` is a waiting send of the draft
+/// that counts as denied, or 0 (issue 1104, see
+/// [`iris_changeset::change_blocked`]).
+pub(crate) fn change(
+    store: &Store,
+    c: &Connection,
+    draft: i64,
+    after_deny: i64,
+    now_ms: i64,
+) -> rusqlite::Result<(Option<&'static str>, bool)> {
+    let row: Option<(String, Option<i64>, String)> = c
+        .query_row(
+            "SELECT a.provider, d.thread_id, d.content FROM draft d
+             JOIN account a ON a.id = d.account_id WHERE d.id = ?1",
+            [draft],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((provider, thread, content)) = row else {
+        return Ok((None, false));
+    };
+    let db = |e| match e {
+        iris_changeset::Error::Store(iris_store::Error::Db(e)) => e,
+        e => rusqlite::Error::ToSqlConversionFailure(e.to_string().into()),
+    };
+    if iris_changeset::change_blocked(c, draft, after_deny, now_ms)
+        .map_err(db)?
+        .is_some()
+    {
+        return Ok((None, false));
+    }
+    // A reply: the newest eligible message of the thread is still the
+    // message that the draft answers.
+    if let Some(thread) = thread {
+        let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
+        if answers.is_none() {
+            return Ok((None, false));
+        }
+        let newest = iris_changeset::reply_parent(c, thread)?;
+        if answers != newest {
+            // Only a message that sorts after the parent is a new mail: a
+            // gone parent with an older message left is not. A NULL date
+            // sorts first, as in `reply_parent`.
+            let newer = c
+                .query_row(
+                    "SELECT (coalesce(n.internal_date, -9223372036854775808), n.id)
+                      > (coalesce(p.internal_date, -9223372036854775808), p.id)
+                 FROM message n, message p WHERE n.id = ?1 AND p.id = ?2",
+                    rusqlite::params![newest, answers],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            return Ok((None, newer));
+        }
+    }
+    if provider != "gmail" {
+        // The next press makes a new draft from the form: the apply of a
+        // create does not read the files of the old draft.
+        return Ok((Some("new"), false));
+    }
+    // The next press changes the draft in place: its apply denies the
+    // change when a file of the old draft is gone (section 1).
+    let files = match serde_json::from_str::<Value>(&content)
+        .ok()
+        .and_then(|v| serde_json::from_value::<iris_compose::Content>(v["content"].clone()).ok())
+    {
+        Some(content) => iris_apply::has_files(store, &content)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?,
+        None => false,
+    };
+    Ok((files.then_some("update"), false))
+}
+
+/// The content of the draft `d-N` for the form of a change (draft change
+/// spec, section 5): `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
+/// the account and the thread, and `change`: how the next press of Send
+/// writes the draft, and `newer_mail`, the same values as the state of a
+/// stopped write. The Outbox reads it after a cancel (issue 941). `None`
+/// for a draft that does not exist, of an account that Iris removes, or
+/// with content that Iris does not write.
+pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Value>> {
+    let Some((Kind::Draft, row)) = parse_id(id) else {
+        return Ok(None);
+    };
+    type Found = (i64, Option<i64>, String, (Option<&'static str>, bool));
+    let found: Option<Found> = store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        let found = tx
+            .query_row(
+                "SELECT d.account_id, d.thread_id, d.content FROM draft d
+             JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1 AND d.foreign_at IS NULL AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
+                [row],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(match found {
+            Some((account, thread, content)) => {
+                Some((account, thread, content, change(store, &tx, row, 0, now_ms)?))
+            }
+            None => None,
+        })
+    })?;
+    let Some((account, thread, content, (change, newer_mail))) = found else {
+        return Ok(None);
+    };
+    let Some(m) = serde_json::from_str::<Value>(&content)
+        .ok()
+        .and_then(|v| serde_json::from_value::<iris_compose::Content>(v["content"].clone()).ok())
+    else {
+        return Ok(None);
+    };
+    let mut v = json!({
+        "draft": format_id(Kind::Draft, row),
+        "account": format_id(Kind::Account, account),
+        "thread": thread.map(|t| format_id(Kind::Thread, t)),
+        "to": m.to,
+        "cc": m.cc,
+        "bcc": m.bcc,
+        "subject": m.subject,
+        "body": m.body,
+        "attachments": m.attachments,
+        "change": change,
+    });
+    // As in the stopped state: only when a newer mail stops the change.
+    if newer_mail {
+        v["newer_mail"] = json!(true);
+    }
+    Ok(Some(v))
+}
+
+/// A Message-ID with no angle brackets, in lower case.
 /// The most characters of the parent text in the reply form.
 pub const PARENT_TEXT: usize = 600;
 
@@ -301,14 +487,30 @@ pub fn reply(store: &Store, thread: &str) -> Result<Option<Value>> {
     store
         .read(|conn| {
             let tx = conn.unchecked_transaction()?;
-            let v = reply_in(&tx, row);
+            let v = reply_in(store, &tx, row);
             tx.finish()?;
             Ok(v)
         })
         .map_err(Error::from)?
 }
 
-fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
+/// The `Reply-To` addresses of the raw content `sha`, comma-separated, as
+/// understanding writes them, or `None` if it has no such header. An error
+/// if the file cannot be read (issue #1174).
+fn head_reply_to(store: &Store, sha: &str) -> std::io::Result<Option<String>> {
+    use std::io::Read as _;
+    let path = store
+        .content_path(sha)
+        .ok_or_else(|| std::io::Error::other("not a content hash"))?;
+    let mut raw = Vec::new();
+    std::fs::File::open(path)?
+        .take(iris_understand::head::HEAD_LIMIT as u64)
+        .read_to_end(&mut raw)?;
+    let h = iris_understand::Head::parse(&raw, None);
+    Ok((!h.reply_to.is_empty()).then(|| h.reply_to.join(",")))
+}
+
+fn reply_in(store: &Store, c: &Connection, thread: i64) -> Result<Option<Value>> {
     let exists: bool = c
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)",
@@ -327,28 +529,103 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
     };
     // `sent`: the label `SENT` is the evidence that the person wrote the
     // mail. From is not: anyone can put the address of the person there.
-    let (account, subject, to, sent): (i64, Option<String>, Option<String>, bool) = c
+    type Row = (
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        bool,
+        bool,
+        Option<String>,
+    );
+    let (account, subject, to, cc, reply_to, me, sent, current, sha): Row = c
         .query_row(
-            "SELECT m.account_id, h.subject, h.to_addrs,
+            "SELECT m.account_id, h.subject, h.to_addrs, h.cc_addrs, h.reply_to, a.address,
                     EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                            WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
-             FROM message m LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
+                            WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+                    coalesce(m.content_sha256 IS NOT NULL AND h.content_sha256 = m.content_sha256, 0),
+                    m.content_sha256
+             FROM message m JOIN account a ON a.id = m.account_id
+             LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
             [parent],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
         )
         .map_err(iris_store::Error::from)?;
+    // The recipients come from the header row. After a sync of new content
+    // and before understanding reads it, the row is empty or of the old
+    // content (migration 70). A message with no raw content has no parsed
+    // header at all.
+    if !current {
+        return Err(Error::Conflict(
+            "Iris has not read the newest mail of this thread yet. Try again in a moment.".into(),
+        ));
+    }
     let m = message_in(c, parent)
         .map_err(iris_store::Error::from)?
         .expect("reply_parent gives a message");
-    // The person wrote the newest mail: the reply goes to its recipients.
-    let to: Vec<String> = if sent {
+    let list = |v: Option<&str>| {
         let mut out = vec![];
-        iris_senders::head::each_address(to.as_deref().unwrap_or(""), |a, _| out.push(a));
-        out
-    } else {
-        vec![m.summary.from.address.clone().unwrap_or_default()]
+        iris_senders::head::each_address(v.unwrap_or(""), |a, _| out.push(a));
+        out.into_iter()
+            .filter(|a| valid_address(a))
+            .collect::<Vec<String>>()
     };
-    let to: Vec<String> = to.into_iter().filter(|a| valid_address(a)).collect();
+    let from = m.summary.from.address.clone().unwrap_or_default();
+    // `to`: the person wrote the newest mail, so the reply goes to its
+    // recipients. Else the `Reply-To` addresses of the parent, or its
+    // `From` address (issue #455). `others`: the other people of the
+    // parent, for reply all.
+    let (to, others) = if sent {
+        (list(to.as_deref()), list(cc.as_deref()))
+    } else {
+        // A header row of an older build has no `reply_to` (migration
+        // 70, issue #1131): read it from the head of the raw content.
+        // If that file cannot be read, the form does not open: the reply
+        // must not go to `From` in place of a `Reply-To` (issue #1174).
+        let reply_to = match (reply_to, sha.as_deref()) {
+            (Some(r), _) => Some(r),
+            (None, Some(h)) => head_reply_to(store, h).map_err(|_| {
+                Error::Conflict(
+                    "Iris cannot read the newest mail of this thread from the data folder, \
+                     so it cannot find who gets the reply."
+                        .into(),
+                )
+            })?,
+            (None, None) => None,
+        };
+        let wanted = list(reply_to.as_deref());
+        let to_list = if wanted.is_empty() {
+            list(Some(&from))
+        } else {
+            wanted
+        };
+        let mut others = list(Some(&from));
+        others.extend(list(to.as_deref()));
+        others.extend(list(cc.as_deref()));
+        (to_list, others)
+    };
+    // Reply all adds each other address once, and never the address of
+    // the account or an address that `to` has.
+    let mut seen: std::collections::HashSet<String> = to.iter().map(|a| a.to_lowercase()).collect();
+    seen.insert(me.to_lowercase());
+    let all: Vec<String> = others
+        .into_iter()
+        .filter(|a| seen.insert(a.to_lowercase()))
+        .collect();
     let text = m.text.as_deref().map(|t| cut(t, PARENT_TEXT));
     let (mails, earlier) = conversation(c, thread).map_err(iris_store::Error::from)?;
     Ok(Some(json!({
@@ -361,6 +638,7 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         },
         "to": to,
         "cc": [],
+        "all": all,
         "subject": iris_compose::reply_subject(subject.as_deref().unwrap_or("")),
         "topic": subject.unwrap_or_default(),
         "conversation": mails,

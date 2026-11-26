@@ -100,7 +100,9 @@ holds no sign-in and no sync state. Reasons:
    column cannot stay by mistake. With no token, `sync_accounts` drops the
    account, so no new sync or apply starts.
 4. Deny each open action (`proposed`, `approved`, `held`) that
-   targets a message, an item or a draft of the account:
+   targets the account itself (a new-mail `draft` with
+   `{"accounts": ["a-<id>"]}`), or a message, an item or a draft of the
+   account:
    `state = 'denied'`, `decided_by = 'engine'`, reason "the account was
    removed". An action in review keeps its state: only the person can
    decide it (trigger `action_state`, see "Not in scope"). An action with a
@@ -126,7 +128,14 @@ Migration 48 adds triggers that refuse an insert into `message`, `thread`,
 So no writer can add mail or a derived row after the removal:
 
 - A sync that started before the removal and holds a token in memory fails
-  at its next write.
+  at its next write. A sync that starts later finds no account to sync and
+  makes no provider call.
+- Migration 56 (issue 910) also refuses a new `sync_log` or `sync_seen` row
+  of such an account, and each update of a tombstone other than the move
+  from `removing` to `removed` and the new address of a removed tombstone.
+  So no sync column comes back on the tombstone.
+- The changeset target resolver finds no account in state `removing` or
+  `removed` (issue 904), so no new action can target a tombstone.
 - An understanding run that read a message before the removal fails at its
   write of an item or a clean text. Its transaction rolls back. The batch
   query of understanding also leaves out the messages of such an account,
@@ -195,14 +204,16 @@ for each batch:
    `item_source`, `matter_item`, `matter_add` (a pending addition of
    migration 46) and the rows that hang on them.
 2. **Messages**: for each message: `header`, `body` (the trigger deletes the
-   search text), `message_label`, `attention_due`, `link_check`,
+   search text), `message_label`, `attention_due`, `fixed_due`, `link_check`, `link_recheck`, `model_declined`,
    `sender_evidence`, `reply_draft`, `use_open`, and the `notice` rows of the
    message. Then the message row. Each raw message file that no message of
    another account uses is deleted, with the order of `clean_gone`: the file
    goes while the transaction holds the write lock.
-3. **Threads and labels**: each thread that no draft refers to, with
-   `talk_due` and `nudge_try`. Each label. A thread that a draft refers to
-   stays as a bare row (an ID and a provider ID, no mail).
+3. **Threads and labels**: each thread that no draft refers to. The rows
+   `talk_due`, `nudge_try`, `thread_summary` and `thread_summary_try` of
+   each thread of the account, also of a thread that stays (issue 478: a
+   summary and the key of a try hold mail data). Each label. A thread that
+   a draft refers to stays as a bare row (an ID and a provider ID, no mail).
 4. **Sync rows**: `sync_log` and `sync_seen` of the account.
 5. **Senders**: a sender kind comes from the evidence in the store
    (spec 1 section 6.7): the mail from the address (`header.from_addr`) and

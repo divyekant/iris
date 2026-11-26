@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use iris_store::{format_id, Kind, Store};
+use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -54,6 +54,11 @@ pub struct Press<'a> {
     pub key: &'a str,
     /// The warnings (flags) that the person saw at the press.
     pub flags: &'a [String],
+    /// The draft (`d-N`) that the press changes (change spec, section 5).
+    /// It must be a draft of the account or the thread of `mail`. A draft
+    /// of an account that is not Gmail is ignored: the press makes a new
+    /// draft.
+    pub draft: Option<&'a str>,
 }
 
 /// What [`write_mail`] did.
@@ -87,7 +92,12 @@ fn press_hash(p: &Press<'_>) -> String {
         Mail::New { account } => Value::from(account),
         Mail::Reply { thread, parent } => serde_json::json!([thread, parent]),
     };
-    let text = serde_json::json!({ "target": target, "args": p.args }).to_string();
+    // Only with a draft: the hash of each other press stays as before.
+    let text = match p.draft {
+        None => serde_json::json!({ "target": target, "args": p.args }),
+        Some(d) => serde_json::json!({ "target": target, "args": p.args, "draft": d }),
+    }
+    .to_string();
     Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -125,11 +135,16 @@ pub fn write_mail(
             };
         }
         let author = person();
-        let cs = create_in(c, &author, now_ms)?;
-        let target = match press.mail {
+        let mut target = match press.mail {
             Mail::New { account } => account,
             Mail::Reply { thread, .. } => thread,
         };
+        if let Some(d) = press.draft {
+            if change_target(c, d, &press.mail).map_err(|why| refuse(Refusal::Denied(why)))? {
+                target = d;
+            }
+        }
+        let cs = create_in(c, &author, now_ms)?;
         let n = add_action_in(c, cs, &author, Verb::Draft, &[target], press.args, None)?;
         submit_in(c, cs, &author, WRITTEN, now_ms)?;
         let (id, revision, state, reason, flags): (
@@ -196,6 +211,51 @@ pub fn write_mail(
     }
 }
 
+/// True if the press changes the draft `draft` (a Gmail draft), false if
+/// it makes a new draft (another provider). Refuses a draft that does not
+/// exist, that is of an account that Iris removes, or that is not of the
+/// account (a new mail) or the thread (a reply) of `mail`, and a reply
+/// draft that does not answer the parent of `mail`.
+fn change_target(
+    c: &Connection,
+    draft: &str,
+    mail: &Mail<'_>,
+) -> std::result::Result<bool, String> {
+    let gone = || "The draft does not exist.".to_string();
+    let Some((Kind::Draft, row)) = parse_id(draft) else {
+        return Err(gone());
+    };
+    let found: Option<(i64, Option<i64>, String)> = c
+        .query_row(
+            "SELECT d.account_id, d.thread_id, a.provider FROM draft d
+             JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1 AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
+            [row],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((account, thread, provider)) = found else {
+        return Err(gone());
+    };
+    let same = match (mail, thread) {
+        (Mail::New { account: a }, None) => *a == format_id(Kind::Account, account),
+        (Mail::Reply { thread: t, .. }, Some(th)) => *t == format_id(Kind::Thread, th),
+        _ => false,
+    };
+    if !same {
+        return Err("The draft is not of this account or thread.".into());
+    }
+    // A reply: the parent of the press is the message that the draft
+    // answers (draft change spec, section 5).
+    if let Mail::Reply { parent, .. } = mail {
+        if crate::draft_parent(c, row).map_err(|e| e.to_string())? != Some(*parent) {
+            return Err("The draft does not answer this message.".into());
+        }
+    }
+    Ok(provider == "gmail")
+}
+
 /// The newest send mark: its action row ID, or 0 if there is none. A mark
 /// and its action are made in one write transaction, and the store writes
 /// one transaction at a time, so a mark that commits later has a larger
@@ -249,28 +309,56 @@ pub fn send_written(store: &Store, account: i64, clock: &dyn Fn() -> i64) -> Res
     Ok(made)
 }
 
+/// The draft of the `draft` action `a`, as a join condition on `draft d`
+/// (change spec, section 2): the row that the action made (a create), or
+/// the row that its `drafts` target names once the action is `applied` (a
+/// change). Each query that joins a draft to a send mark uses it.
+#[macro_export]
+macro_rules! draft_of_action {
+    () => {
+        "(d.action_id = a.id OR (a.verb = 'draft' AND a.state = 'applied' AND d.id IN
+           (SELECT ad.draft_id FROM action_draft ad WHERE ad.action_id = a.id)))"
+    };
+}
+
 /// The marks that wait for their send: no send yet, a draft row that
 /// Gmail did not send or change, a changeset that the person did not
 /// withdraw, and a press after `?2` (the time [`MARK_MS`] ago). A mark
 /// that fails one of these never gets a send.
-const OPEN: &str = "FROM write_send w
-    JOIN draft d ON d.action_id = w.action_id
+const OPEN: &str = concat!(
+    "FROM write_send w
     JOIN changeset_action a ON a.id = w.action_id
+    JOIN draft d ON ",
+    draft_of_action!(),
+    "
     JOIN changeset c ON c.id = a.changeset_id
     WHERE w.send_action_id IS NULL AND c.state <> 'withdrawn'
-      AND d.foreign_at IS NULL AND d.sent_at IS NULL AND w.created_at > ?2";
+      AND d.foreign_at IS NULL AND d.sent_at IS NULL AND w.created_at > ?2"
+);
+
+/// The reason of a send mark whose draft has other content than the press
+/// (change spec, section 2): the mark makes no send of it.
+pub const DRAFT_CHANGED: &str =
+    "The draft changed after you pressed Send. Look at it, then send again.";
 
 /// One mark: read it again in the write transaction, so a second run
 /// finds the send and makes nothing.
 fn send_one(c: &Connection, mark: i64, now_ms: i64) -> Result<bool> {
-    let row: Option<(i64, String)> = c
+    // `pressed`: the content hash of the press, from the ledger entry of
+    // the action of the mark (a create or a change).
+    let row: Option<(i64, String, bool)> = c
         .query_row(
-            &format!("SELECT d.id, w.flags {OPEN} AND w.action_id = ?1"),
+            &format!(
+                "SELECT d.id, w.flags,
+                        d.hash IS (SELECT json_extract(l.ops, '$.hash') FROM ledger l
+                                   WHERE l.action_id = w.action_id AND l.state = 'applied')
+                 {OPEN} AND w.action_id = ?1"
+            ),
             [mark, now_ms - MARK_MS],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((draft, seen)) = row else {
+    let Some((draft, seen, pressed)) = row else {
         return Ok(false);
     };
     let author = person();
@@ -285,7 +373,23 @@ fn send_one(c: &Connection, mark: i64, now_ms: i64) -> Result<bool> {
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     // A denied send stays, with its reason, for the state of the write.
-    if state.as_deref() == Some("proposed") {
+    if state.as_deref() == Some("proposed") && !pressed {
+        // The draft has other content than the press: a stale mark never
+        // sends the content of another press.
+        let action = ActionId {
+            changeset: cs,
+            revision,
+            n,
+        };
+        decide_in(
+            c,
+            action,
+            State::Denied,
+            By::Engine,
+            Some(DRAFT_CHANGED),
+            now_ms,
+        )?;
+    } else if state.as_deref() == Some("proposed") {
         let action = ActionId {
             changeset: cs,
             revision,

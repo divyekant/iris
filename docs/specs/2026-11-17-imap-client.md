@@ -37,8 +37,11 @@ does not depend on it, so it is built first.
 - The storage of the password and the account rows. Part B seals the
   password with `Store::seal` (spec 1 section 5.4) and gives it to the
   client for each connection.
-- Writes to the mailbox: `STORE`, `MOVE`, `COPY`, `APPEND`, `EXPUNGE` and
-  send (SMTP). The apply of actions to IMAP is a later card.
+- Writes to the mailbox in part A: `STORE`, `MOVE`, `COPY`, `APPEND`,
+  `EXPUNGE` and send (SMTP). Later cards add `UID STORE` (`modify`, IMAP
+  provider spec section 7) and `UID MOVE` (`Session::move_uids`,
+  `docs/specs/2026-11-25-imap-moves.md`). `COPY`, `APPEND`, `EXPUNGE` and
+  send stay out of scope.
 - IMAP4rev2 (RFC 9051) and `UTF8=ACCEPT` (RFC 6855). The client speaks
   IMAP4rev1 and turns on neither, so the server sends folder names in
   modified UTF-7, which is ASCII (RFC 3501 section 5.1.3). The parser
@@ -104,12 +107,15 @@ part B pages by windows of sequence numbers, because UIDs can be sparse
 - `EXAMINE` opens a folder read-only. The message reads (`examine`,
   `changes`, `list`, `fetch_raw`) use `EXAMINE`, so no message read
   changes the mailbox. `BODY.PEEK[]` does not set `\Seen`.
-- Only two provider calls use `SELECT`, because only `SELECT` gives
-  `PERMANENTFLAGS` (the keywords that the folder can keep):
+- Only three provider calls use `SELECT`. `labels` and `modify` need it
+  because only `SELECT` gives `PERMANENTFLAGS` (the keywords that the
+  folder can keep). `relocate` needs it because `UID MOVE` changes the
+  folder:
   - `labels` opens each mail folder with `SELECT` to read its keywords.
     Each sync calls `labels` (the first sync, each later sync and each
     verify).
   - `modify` uses `SELECT` for its check pass and for its write pass.
+  - `relocate` uses `SELECT` of each source folder before its `UID MOVE`.
 
   A `SELECT` with no fetch of a body does not set `\Seen`. A `SELECT`
   can clear `\Recent`, also the `SELECT` of `labels` in a sync. Iris does

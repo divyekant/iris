@@ -25,8 +25,8 @@ The owner decided (`docs/decisions.md`, entry D12, items D4 and D5):
    the name, the type, the SHA-256 and the size of each attachment.
 2. A draft can have `bcc` recipients. The approval binds to them, and the
    review shows them.
-3. The `From` of each new Gmail draft has the display name of the owner,
-   when Iris knows it.
+3. The `From` of each new Gmail or Outlook draft has the display name of
+   the owner, when Iris knows it.
 4. Each rule of the send spec stays true: no second send, the read back,
    the hash check, the hold and the checks before the send.
 
@@ -35,19 +35,15 @@ The owner decided (`docs/decisions.md`, entry D12, items D4 and D5):
 - HTML bodies (D4).
 - Send-as aliases (D5). `From` stays the account address.
 - An attachment from an agent (the MCP tool `draft`, a job session).
-  An agent has no path to put a file into the store. A limit issue
-  records this.
-- A forward of an attachment of a received message.
-- A setting for the display name. Iris takes the name from the sent mail
-  of the owner (section 3). A limit issue records this.
-- The display name of an Outlook draft. The Outlook provider gives the
-  label `SENT` only to a copy of a mail that Iris sent, so the mirror has
-  no safe source of the name. An Outlook draft keeps the address only. A
+  Submit denies a draft with a file from an author that is not the
+  person, so an agent cannot name a file of the folder by its hash. A
   limit issue records this.
+- A forward of an attachment of a received message.
+- A setting for the display name. Iris takes the name from Graph for an
+  Outlook account, and from the sent mail of the owner for a Gmail
+  account (section 3). A limit issue records this.
 - Display names of the recipients. `To`, `Cc` and `Bcc` stay bare
   addresses.
-- A cleanup of attachment files that no draft uses. A limit issue
-  records this.
 
 ## Design
 
@@ -98,8 +94,9 @@ message uses, and the backup copies only the content files of messages.
 - The writer of the attachment folder is the writer of the content
   folder (`ContentWriter`: a temporary file, `fsync`, then a rename to
   the SHA-256), with another root.
-- Nothing deletes a file of the attachment folder. The content cleanup
-  reads only the content folder. A limit issue records the growth.
+- The content cleanup reads only the content folder. The attachment
+  cleanup (`docs/specs/2026-11-25-attachment-cleanup.md`) deletes an old
+  file that no live action, claim or draft names.
 - `iris backup` copies each file of the attachment folder, with the
   check of its SHA-256, as it copies the content files. A restore then
   has each file that a draft action names.
@@ -117,9 +114,17 @@ message uses, and the backup copies only the content files of messages.
 
 ### 3. The display name
 
-At the apply of a `draft` action of a Gmail account, Iris takes the
-display name of the owner: the `From` name of the newest message in the mirror that is from
-the account address and has the label `SENT`, from the `header` table.
+At the apply of a `draft` action, Iris takes the display name of the
+owner from one of these sources:
+
+- Outlook: `displayName` of `GET /me` at Graph (issue #864). The Outlook
+  provider gives the label `SENT` only to a copy of a mail that Iris
+  sent, so the mirror has no safe source of the name. The scope
+  `User.Read` permits the call. A failed call fails the apply as each
+  other failed read of the apply does.
+- Gmail: the `From` name of the newest message in the mirror that is
+  from the account address and has the label `SENT`, from the `header`
+  table.
 A name with a control character, or with more than 128 characters, is
 not used. With no name, `From` is the address only, as before.
 
@@ -308,8 +313,8 @@ The MCP tool `draft` names `bcc` in its text, and not `attachments`
 - A new attachment table with a migration: the content folder is already
   content addressed, and the content JSON holds the entries. No stored
   row changes.
-- A display name setting: the sent mail of the owner already has the
-  name, and a setting adds a screen and an API. A limit issue records
+- A display name setting: Graph (Outlook) and the sent mail of the owner
+  (Gmail) already have the name, and a setting adds a screen and an API. A limit issue records
   the setting for later.
 - Libraries: `mail-builder` (already in use) writes the multipart
   message and encodes the file names (RFC 2231). `mail-parser` (already

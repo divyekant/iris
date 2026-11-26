@@ -41,8 +41,8 @@ pub use flags::{
 };
 pub use outbox::{cancel, cancel_draft, hold, send_of_draft, Cancel, CANCELLED};
 pub use written::{
-    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
-    NEW_WARNINGS, WRITTEN,
+    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written,
+    DRAFT_CHANGED, MARK_MS, NEW_WARNINGS, WRITTEN,
 };
 
 /// The flag `bulk`: more than this count of messages in one action, or in
@@ -676,7 +676,7 @@ pub fn submit_in(
             denial = check_correct(c, id, &args, now_ms)?;
         }
         if denial.is_none() && WRITE_VERBS.contains(&verb.as_str()) {
-            denial = check_write(c, id, verb, &args)?;
+            denial = check_write(c, id, verb, &args, now_ms)?;
         }
         if let Some(why) = denial {
             clear(c, id)?;
@@ -958,7 +958,7 @@ pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
 }
 
 /// The marks of the flag `outside_thread` (spec R4-06): each address of
-/// `to` and `cc` of `content` that is not in the thread of `action`, and is
+/// `to`, `cc` and `bcc` of `content` that is not in the thread of `action`, and is
 /// not one of your addresses. An address is in the thread only if it is the
 /// From of a live thread message, or in To or Cc of a live thread message
 /// that you sent (decision D13, issue #435). So a stranger cannot widen
@@ -973,11 +973,8 @@ pub fn outside_marks(
     // Memory holds the recipients that no row names yet (at most the
     // recipients of the draft) and one header row, never a list of the
     // addresses of the thread or of one header.
-    let mut open: HashSet<String> = content
-        .to
-        .iter()
-        .chain(&content.cc)
-        .map(|a| a.trim().to_ascii_lowercase())
+    let mut open: HashSet<String> = flags::recipients(content)
+        .map(|(_, a)| a.trim().to_ascii_lowercase())
         .collect();
     iris_talk::each_your_address(c, |a| {
         open.remove(&a);
@@ -1005,18 +1002,7 @@ pub fn outside_marks(
             }
         }
     }
-    let to = content
-        .to
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::To(i), a));
-    let cc = content
-        .cc
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::Cc(i), a));
-    Ok(to
-        .chain(cc)
+    Ok(flags::recipients(content)
         .filter(|(_, a)| open.contains(&a.trim().to_ascii_lowercase()))
         .map(|(field, a)| Mark {
             flag: "outside_thread",
@@ -1205,7 +1191,8 @@ pub const STATE_VERBS: [&str; 7] = [
 ];
 
 /// The verbs that write mail (release 3). A `draft` takes one account, one
-/// thread or one draft; a `send` takes one draft.
+/// thread or one draft (a change, `docs/specs/2026-11-25-draft-change.md`);
+/// a `send` takes one draft.
 pub const WRITE_VERBS: [&str; 2] = ["draft", "send"];
 
 /// The SQL list `'a', 'b'` of fixed verb names (no quotes in them).
@@ -1236,6 +1223,7 @@ fn clear(c: &Connection, action: i64) -> Result<()> {
 fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Option<String>> {
     // add_action writes one group of IDs. Another writer of the table may not.
     let bad = || Ok(Some("the targets are not valid".to_string()));
+    let raw = targets;
     let Ok(targets) = serde_json::from_str::<Map<String, Value>>(targets) else {
         return bad();
     };
@@ -1246,7 +1234,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     // The undo of a ledger entry (section 7.4) names the entry. Its
     // messages come from the ledger in SQL, never as a list in memory.
     if group == "ledger" && !state {
-        return resolve_undo(c, action, ids);
+        return match resolve_undo(c, action, ids)? {
+            None => tombstone(c, action, raw),
+            refused => Ok(refused),
+        };
     }
     let linked: bool = c.query_row(
         "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
@@ -1258,9 +1249,12 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     }
     let write = WRITE_VERBS.contains(&verb.as_str());
     match (verb, group.as_str()) {
-        (Verb::Draft, "accounts" | "threads") | (Verb::Send, "drafts") => {}
-        // A change of a draft needs its undo first (spec 2, section 7.5).
-        (Verb::Draft, _) => return Ok(Some("draft takes one account or one thread".into())),
+        (Verb::Draft, "accounts" | "threads" | "drafts") | (Verb::Send, "drafts") => {}
+        (Verb::Draft, _) => {
+            return Ok(Some(
+                "draft takes one account, one thread or one draft".into(),
+            ))
+        }
         (Verb::Send, _) => return Ok(Some("send takes one draft".into())),
         _ if state && group == "items" => {}
         _ if !state && (group == "threads" || group == "messages") => {}
@@ -1327,25 +1321,35 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                         |r| r.get(0),
                     )?
             }
+            // A tombstone is no target (issue 904).
             (Kind::Account, "accounts") => c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1)",
+                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1
+                   AND (state IS NULL OR state NOT IN ('removing', 'removed')))",
                 [row],
                 |r| r.get(0),
             )?,
+            // A kept draft of a tombstone is no target (issue 1014).
             (Kind::Draft, "drafts") => {
                 let found = c.execute(
                     "INSERT INTO action_draft(action_id, draft_id)
-                     SELECT ?1, id FROM draft WHERE id = ?2",
+                     SELECT ?1, d.id FROM draft d JOIN account a ON a.id = d.account_id
+                     WHERE d.id = ?2
+                       AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
                     params![action, row],
                 )? == 1;
-                // The thread of a reply, for the hostile check and the flags.
-                c.execute(
-                    "INSERT OR IGNORE INTO action_message(action_id, message_id)
+                if verb == Verb::Draft {
+                    change_parent(c, action, row)?;
+                    found
+                } else {
+                    // The thread of a reply, for the hostile check and the flags.
+                    c.execute(
+                        "INSERT OR IGNORE INTO action_message(action_id, message_id)
                      SELECT ?1, m.id FROM draft d JOIN message m ON m.thread_id = d.thread_id
                      WHERE d.id = ?2 AND m.gone_at IS NULL",
-                    params![action, row],
-                )?;
-                found
+                        params![action, row],
+                    )?;
+                    found
+                }
             }
             (Kind::Thread | Kind::Message | Kind::Sender | Kind::Draft | Kind::Account, _) => {
                 return bad()
@@ -1379,6 +1383,9 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
             }
             _ => return bad(),
         };
+        if !found && verb == Verb::Draft && kind == Kind::Draft {
+            return Ok(Some("The draft does not exist.".into()));
+        }
         if !found {
             let id = format_id(kind, row);
             return Ok(Some(format!("{id} is not in the mirror")));
@@ -1411,7 +1418,52 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     if accounts > 1 {
         return Ok(Some("the targets are in two or more accounts".into()));
     }
-    Ok(None)
+    tombstone(c, action, raw)
+}
+
+/// Refuse an action whose resolved targets are in an account in state
+/// `removing` or `removed`: no new action targets a tombstone (issues 904,
+/// 1014, 1041). It reads each resolved row (messages, items, drafts) and
+/// each named thread, so a path of [`resolve`] cannot miss the check.
+fn tombstone(c: &Connection, action: i64, targets: &str) -> Result<Option<String>> {
+    let removed: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM account a
+           WHERE a.state IN ('removing', 'removed') AND a.id IN (
+             SELECT m.account_id FROM action_message am
+             JOIN message m ON m.id = am.message_id WHERE am.action_id = ?1
+             UNION ALL
+             SELECT i.account_id FROM action_item ai
+             JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1
+             UNION ALL
+             SELECT d.account_id FROM action_draft ad
+             JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = ?1
+             UNION ALL
+             SELECT t.account_id FROM json_each(?2, '$.threads') j
+             JOIN thread t ON 't-' || t.id = j.value))",
+        params![action, targets],
+        |r| r.get(0),
+    )?;
+    Ok(removed.then(|| "the account was removed".to_string()))
+}
+
+/// The parent of a change of the reply draft `draft`: one message, with
+/// the rule of a thread target (change spec, section 1). The apply checks
+/// that it is the message of the `In-Reply-To` of the draft. A draft of a
+/// new mail has no parent.
+fn change_parent(c: &Connection, action: i64, draft: i64) -> Result<()> {
+    let thread: Option<i64> = c
+        .query_row("SELECT thread_id FROM draft WHERE id = ?1", [draft], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    if let Some(m) = thread.map(|t| reply_parent(c, t)).transpose()?.flatten() {
+        c.execute(
+            "INSERT OR IGNORE INTO action_message(action_id, message_id) VALUES (?1, ?2)",
+            params![action, m],
+        )?;
+    }
+    Ok(())
 }
 
 /// The messages of an undo: the messages with `done` of the ledger entry
@@ -1437,6 +1489,29 @@ fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<Str
         return Ok(Some(
             "only an undo of the entry targets a ledger entry".into(),
         ));
+    }
+    // The undo of a change of a draft (change spec, section 3): the draft
+    // of the entry, with the checks of a change.
+    let draft: Option<i64> = c
+        .query_row(
+            "SELECT json_extract(ops, '$.draft') FROM ledger
+             WHERE id = ?1 AND json_extract(ops, '$.call') = 'drafts.update'",
+            [ledger],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(draft) = draft {
+        let found = c.execute(
+            "INSERT INTO action_draft(action_id, draft_id)
+             SELECT ?1, d.id FROM draft d JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?2 AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
+            params![action, draft],
+        )? == 1;
+        if !found {
+            return Ok(Some("The draft does not exist.".into()));
+        }
+        change_parent(c, action, draft)?;
+        return Ok(None);
     }
     // The undo of a state entry: the items of the entry, which pins them
     // while the undo is open. The apply sets back only the items that
@@ -1476,7 +1551,13 @@ fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<Str
 
 /// The checks of a write verb (`docs/specs/2026-11-16-send.md`, sections 4
 /// and 5), after resolve. Gives the reason of the denial, or `None`.
-fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Option<String>> {
+fn check_write(
+    c: &Connection,
+    action: i64,
+    verb: Verb,
+    args: &str,
+    now_ms: i64,
+) -> Result<Option<String>> {
     if hostile(c, action)? {
         return Ok(Some(format!(
             "the thread has hostile mail: only a person can {} in it",
@@ -1492,6 +1573,26 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         if let Some(why) = draft_busy(c, action, draft)? {
             return Ok(Some(why));
         }
+        // The mirror of the change check (change spec, section 1): a send
+        // waits while a change of its draft is open.
+        if changing(c, action, draft)? {
+            return Ok(Some(CHANGING.into()));
+        }
+        // The stored bytes have the limit of the provider of the draft
+        // account (send content spec, section 5): a refresh from the
+        // provider can make them larger than a draft that Iris wrote.
+        let (size, provider): (i64, String) = c.query_row(
+            "SELECT length(d.raw), a.provider FROM draft d JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1",
+            [draft],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let limit = iris_compose::max_message(&provider);
+        if size as u64 > limit {
+            return Ok(Some(format!(
+                "the mail is too large for {provider}: at most {limit} bytes with its files"
+            )));
+        }
         // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
         match action_content(c, action)? {
             None => {
@@ -1500,7 +1601,7 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
                     format_id(Kind::Draft, draft)
                 )))
             }
-            Some((_, content)) => return Ok(not_yet(&content)),
+            Some(_) => return Ok(None),
         }
     }
     let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
@@ -1509,14 +1610,19 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
                 .into(),
         ));
     };
-    if let Some(why) = not_yet(&content) {
-        return Ok(Some(why));
-    }
-    let reply: bool = c.query_row(
-        "SELECT json_type(targets, '$.threads') IS NOT NULL FROM changeset_action WHERE id = ?1",
+    let (reply, change): (bool, Option<i64>) = c.query_row(
+        "SELECT json_type(a.targets, '$.threads') IS NOT NULL
+                OR d.thread_id IS NOT NULL, d.id
+         FROM changeset_action a LEFT JOIN action_draft ad ON ad.action_id = a.id
+         LEFT JOIN draft d ON d.id = ad.draft_id WHERE a.id = ?1",
         [action],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    if let Some(draft) = change {
+        if let Some(why) = change_denied(c, action, draft, now_ms)? {
+            return Ok(Some(why));
+        }
+    }
     let content = if reply {
         // The field itself, also an empty one: the schema of a checked reply
         // has no subject.
@@ -1526,28 +1632,56 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
             return Ok(Some("a reply takes no subject: Iris sets it".into()));
         }
         // The apply reads the Message-ID of the parent at Gmail: the mirror
-        // can lack it before the understanding of the message.
-        match parent(c, action)? {
-            None => return Ok(Some("the thread has no message to reply to".into())),
-            Some(p) => iris_compose::Content {
-                subject: iris_compose::reply_subject(&p.subject),
-                ..content
-            },
-        }
+        // can lack it before the understanding of the message. A change
+        // keeps the subject of its draft, but also needs a parent.
+        let Some(p) = parent(c, action)? else {
+            return Ok(Some("the thread has no message to reply to".into()));
+        };
+        let subject = match change_reply_subject(c, action)? {
+            Some(subject) => subject,
+            None => iris_compose::reply_subject(&p.subject),
+        };
+        iris_compose::Content { subject, ..content }
     } else {
         content
     };
-    Ok(content.check().err())
-}
-
-/// The refusal of a content with `bcc` or attachments. They need the `Bcc`
-/// gate and the attachment folder of the send content spec
-/// (`docs/specs/2026-11-24-send-content.md`), which the next part builds.
-/// A draft at Gmail that the person gave a `Bcc` or a file reads back, so
-/// the send of it is refused too.
-fn not_yet(content: &iris_compose::Content) -> Option<String> {
-    (!content.bcc.is_empty() || !content.attachments.is_empty())
-        .then(|| "Iris cannot send Bcc or attachments yet".into())
+    let content = match content.check() {
+        Ok(c) => c,
+        Err(why) => return Ok(Some(why)),
+    };
+    // Only the person attaches a file (send content spec, scope): an agent
+    // could name a file of the folder by its hash.
+    if !content.attachments.is_empty() {
+        let person: bool = c.query_row(
+            "SELECT cs.author_kind = 'person' FROM changeset_action a
+             JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+            [action],
+            |r| r.get(0),
+        )?;
+        if !person {
+            return Ok(Some("only the person attaches a file to a draft".into()));
+        }
+    }
+    // The size of the whole message has the limit of the provider of the
+    // account (send content spec, section 5).
+    let provider: Option<String> = c
+        .query_row(
+            "SELECT a.provider FROM account a WHERE 'a-' || a.id IN
+               (SELECT value FROM json_each(
+                  (SELECT targets FROM changeset_action WHERE id = ?1), '$.accounts'))
+             UNION ALL
+             SELECT a.provider FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+               JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1
+             UNION ALL
+             SELECT a.provider FROM action_message am JOIN message m ON m.id = am.message_id
+               JOIN account a ON a.id = m.account_id WHERE am.action_id = ?1
+             LIMIT 1",
+            [action],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let limit = iris_compose::max_message(provider.as_deref().unwrap_or(""));
+    Ok(content.check_size(limit).err())
 }
 
 /// Spec 2, section 6.5: an author other than the person writes no mail
@@ -1557,9 +1691,23 @@ fn not_yet(content: &iris_compose::Content) -> Option<String> {
 /// with no header (after the content cleanup) counts as hostile, because
 /// its sender is no longer known. The apply checks it again.
 pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
+    let person: bool = c.query_row(
+        "SELECT cs.author_kind = 'person' FROM changeset_action a
+         JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+        [action],
+        |r| r.get(0),
+    )?;
+    Ok(!person && hostile_evidence(c, action)?)
+}
+
+/// True if a thread of `action` has hostile evidence now, for any author:
+/// a message that may be hostile, a message of a `hostile` sender, or a
+/// gone message with no header. The send claim keeps this result in
+/// `ledger.hostile_before` (issue #472).
+pub fn hostile_evidence(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
         &format!(
-            "SELECT cs.author_kind <> 'person' AND EXISTS (
+            "SELECT EXISTS (
            SELECT 1 FROM message m
            LEFT JOIN header h ON h.message_id = m.id
            LEFT JOIN sender p ON p.address = h.from_addr
@@ -1568,12 +1716,160 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
                   -- A gone message after the cleanup has no header, so its
                   -- sender is not known: it counts as hostile evidence.
                   OR (m.gone_at IS NOT NULL AND h.message_id IS NULL)))
-         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+         FROM changeset_action a WHERE a.id = ?1",
             may_be_hostile = iris_store::may_be_hostile!(),
         ),
         [action],
         |r| r.get(0),
     )?)
+}
+
+/// The reason of a change or a send of a draft while another change of the
+/// same draft is open (change spec, section 1).
+/// The subject of the draft that a reply change of `action` changes, or
+/// `None` when the action changes no reply draft.
+pub fn change_reply_subject(c: &Connection, action: i64) -> Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT coalesce(json_extract(d.content, '$.content.subject'), '')
+         FROM changeset_action a JOIN action_draft ad ON ad.action_id = a.id
+         JOIN draft d ON d.id = ad.draft_id
+         WHERE a.id = ?1 AND a.verb = 'draft' AND d.thread_id IS NOT NULL",
+        [action],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+pub const CHANGING: &str = "Iris changes this draft now. Try again in a minute.";
+
+/// True if a `draft` action other than `action` names the draft `draft`
+/// (a change) and is `approved` or `held`, or has a ledger row in
+/// `writing`.
+fn changing(c: &Connection, action: i64, draft: i64) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM action_draft o JOIN changeset_action b ON b.id = o.action_id
+                        LEFT JOIN ledger l ON l.action_id = b.id
+                        WHERE o.draft_id = ?2 AND b.id <> ?1 AND b.verb = 'draft'
+                          AND (b.state IN ('approved', 'held') OR l.state = 'writing'))",
+        params![action, draft],
+        |r| r.get(0),
+    )?)
+}
+
+/// The checks of a change of the draft `draft` by the action `action`
+/// at the time `now_ms` (change spec, section 1), or `None` when each
+/// passes. Submit runs them,
+/// and the apply runs them again before its read and in its claim. The
+/// apply also checks the attachment files, which need the store folder.
+/// With `action` 0, the checks of a change that the person can press now
+/// (the state of a write, change spec section 5).
+pub fn change_denied(
+    c: &Connection,
+    action: i64,
+    draft: i64,
+    now_ms: i64,
+) -> Result<Option<String>> {
+    denied(c, action, draft, now_ms, false, 0)
+}
+
+/// The checks of [`change_denied`] with no action and for each provider:
+/// the reason why the person cannot change the draft `draft` now, or
+/// `None`. The write view offers "Change and send" only with `None`.
+/// `after_deny` is a waiting send action of the draft that the checks
+/// count as denied, or 0: the review offers to deny that send and change
+/// the draft only with `None` (issue 1104).
+pub fn change_blocked(
+    c: &Connection,
+    draft: i64,
+    after_deny: i64,
+    now_ms: i64,
+) -> Result<Option<String>> {
+    denied(c, 0, draft, now_ms, true, after_deny)
+}
+
+/// The message that the reply draft `draft` answers: the parent that the
+/// action which made the draft resolved to. `None` for a new mail.
+pub fn draft_parent(c: &Connection, draft: i64) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT am.message_id FROM draft d
+         JOIN action_message am ON am.action_id = d.action_id
+         WHERE d.id = ?1 AND d.thread_id IS NOT NULL",
+        [draft],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+fn denied(
+    c: &Connection,
+    action: i64,
+    draft: i64,
+    now_ms: i64,
+    any_provider: bool,
+    after_deny: i64,
+) -> Result<Option<String>> {
+    let row: Option<(bool, String, bool, bool, bool)> = c
+        .query_row(
+            "SELECT coalesce(cs.author_kind = 'person', ?1 = 0), ac.provider,
+                    d.sent_at IS NOT NULL, d.foreign_at IS NOT NULL,
+                    coalesce(ac.state IN ('removing', 'removed'), 0)
+             FROM draft d JOIN account ac ON ac.id = d.account_id
+             LEFT JOIN changeset_action a ON a.id = ?1
+             LEFT JOIN changeset cs ON cs.id = a.changeset_id
+             WHERE d.id = ?2 AND (?1 = 0 OR a.id IS NOT NULL)",
+            params![action, draft],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    // A kept draft of a tombstone is no target (issue 1014).
+    let Some((person, provider, sent, foreign, false)) = row else {
+        return Ok(Some("The draft does not exist.".into()));
+    };
+    if !person {
+        return Ok(Some("Only you can change a draft.".into()));
+    }
+    if provider != "gmail" && !any_provider {
+        return Ok(Some("Iris cannot change a draft of this account.".into()));
+    }
+    if sent {
+        return Ok(Some("The draft is sent.".into()));
+    }
+    if foreign {
+        return Ok(Some(
+            "The draft has a form that Iris does not write. Change it in Gmail.".into(),
+        ));
+    }
+    // A send that waits: an open send action, a claimed send, or the send
+    // mark of another write that made or names this draft and has no send
+    // yet (not withdrawn, and pressed less than [`MARK_MS`] ago).
+    let waits: bool = c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM ledger_send WHERE draft_id = ?2)
+                 OR EXISTS (SELECT 1 FROM action_draft o JOIN changeset_action b ON b.id = o.action_id
+                            WHERE o.draft_id = ?2 AND b.verb = 'send' AND b.id <> ?4
+                              AND b.state IN ('proposed', 'in_review', 'approved', 'held'))
+                 OR EXISTS (SELECT 1 FROM write_send w
+                            JOIN changeset_action b ON b.id = w.action_id
+                            JOIN changeset c ON c.id = b.changeset_id
+                            WHERE w.action_id <> ?1 AND w.send_action_id IS NULL
+                              AND c.state <> 'withdrawn'
+                              AND b.state IN ('approved', 'held', 'applied')
+                              AND w.created_at > ?3 - {mark}
+                              AND (EXISTS (SELECT 1 FROM draft d WHERE d.id = ?2 AND d.action_id = b.id)
+                                   OR EXISTS (SELECT 1 FROM action_draft o
+                                              WHERE o.action_id = b.id AND o.draft_id = ?2)))",
+            mark = written::MARK_MS,
+        ),
+        params![action, draft, now_ms, after_deny],
+        |r| r.get(0),
+    )?;
+    if waits {
+        return Ok(Some("The draft waits to send. Cancel it first.".into()));
+    }
+    if changing(c, action, draft)? {
+        return Ok(Some(CHANGING.into()));
+    }
+    Ok(None)
 }
 
 /// A draft that has a send which can go out, or that went out, takes no

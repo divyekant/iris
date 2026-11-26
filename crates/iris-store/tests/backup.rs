@@ -323,7 +323,7 @@ fn a_backup_restores_to_a_new_folder_with_secrets_and_policy() {
         .put_messages(acc, &[msg(&store, "a", b"raw a", "apple")])
         .unwrap()[0];
 
-    assert_eq!(store.backup(&dest.0).unwrap(), 1);
+    assert_eq!(store.backup(&dest.0).unwrap().files, 1);
     drop(store);
     // The restore is the copy at a new path: the engine opens it as it is.
     let restored = Store::open(&dest.0).unwrap();
@@ -544,4 +544,100 @@ fn a_write_after_a_crash_never_truncates_the_policy_file() {
         let files = policy_files(&dir.0);
         assert!(files.iter().any(|(_, t)| t == b"edit"), "{files:?}");
     }
+}
+
+/// Send content spec, section 2: the backup copies each attachment file,
+/// also a file that no message names, and the cleanup never deletes one.
+#[test]
+fn the_backup_copies_each_attachment_file() {
+    let tmp = TempDir::new("attachments");
+    let store = Store::open(&tmp.0.join("data")).unwrap();
+    let sha = store.put_attachment(b"%PDF-1 the numbers").unwrap();
+    let path = store.attachment_path(&sha).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"%PDF-1 the numbers");
+    assert_eq!(store.put_attachment(b"%PDF-1 the numbers").unwrap(), sha);
+    // A temporary file of a writer is not a file of the folder.
+    fs::write(path.parent().unwrap().join(".tmp-x"), b"part").unwrap();
+    store.clean_gone(NOW).unwrap();
+    assert!(path.exists());
+    let dest = tmp.0.join("copy");
+    store.backup(&dest).unwrap();
+    let copy = Store::open(&dest).unwrap();
+    assert_eq!(
+        fs::read(copy.attachment_path(&sha).unwrap()).unwrap(),
+        b"%PDF-1 the numbers"
+    );
+    assert!(!copy
+        .attachment_path(&sha)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(".tmp-x")
+        .exists());
+    // A damaged file stops the backup: the copy would not be complete.
+    fs::write(&path, b"other").unwrap();
+    assert!(store.backup(&tmp.0.join("copy2")).is_err());
+}
+
+#[test]
+fn a_backup_keeps_the_drafts_of_each_job_and_only_safe_files() {
+    let dir = TempDir::new("drafts");
+    let dest = TempDir::new("drafts-copy");
+    let store = Store::open(&dir.0).unwrap();
+    let ws = dir.0.join("workspaces");
+    let drafts = ws.join("j-1/drafts");
+    fs::create_dir_all(&drafts).unwrap();
+    fs::write(drafts.join("reply.md"), "Dear Ann").unwrap();
+    fs::write(ws.join("j-1/mail.md"), "MAIL-TEXT").unwrap();
+    fs::write(ws.join("j-1/notes.md"), "notes").unwrap();
+    // Not copied: a link, a subfolder.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.0.join("key"), drafts.join("key.md")).unwrap();
+    fs::create_dir_all(drafts.join("sub")).unwrap();
+    fs::write(drafts.join("sub/x.md"), "x").unwrap();
+    // Copied: a draft over 1 MiB (issue #1152: no size limit).
+    let big: Vec<u8> = (0..3 * 1024 * 1024 + 7).map(|i| (i % 251) as u8).collect();
+    fs::write(drafts.join("big.md"), &big).unwrap();
+    // A job whose drafts/ is a link to the data folder.
+    fs::create_dir_all(ws.join("j-2")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&dir.0, ws.join("j-2/drafts")).unwrap();
+    // A job with many files (issue #1152: no count limit).
+    let many = ws.join("j-3/drafts");
+    fs::create_dir_all(&many).unwrap();
+    for i in 0..600 {
+        fs::write(many.join(format!("d{i:04}.md")), "d").unwrap();
+    }
+
+    store.backup(&dest.0).unwrap();
+    let copy = dest.0.join("workspaces");
+    assert_eq!(
+        fs::read_to_string(copy.join("j-1/drafts/reply.md")).unwrap(),
+        "Dear Ann"
+    );
+    let mut names: Vec<String> = fs::read_dir(copy.join("j-1/drafts"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["big.md", "reply.md"]);
+    assert_eq!(fs::read(copy.join("j-1/drafts/big.md")).unwrap(), big);
+    // The other files of a workspace come again from the store.
+    assert!(!copy.join("j-1/mail.md").exists());
+    assert!(!copy.join("j-2").exists());
+    assert_eq!(fs::read_dir(copy.join("j-3/drafts")).unwrap().count(), 600);
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&copy.join("j-1/drafts")), 0o700);
+        assert_eq!(mode(&copy.join("j-1/drafts/reply.md")), 0o600);
+    }
+}
+
+#[test]
+fn a_backup_with_no_workspaces_has_no_workspaces_folder() {
+    let dir = TempDir::new("no-ws");
+    let dest = TempDir::new("no-ws-copy");
+    let store = Store::open(&dir.0).unwrap();
+    store.backup(&dest.0).unwrap();
+    assert!(!dest.0.join("workspaces").exists());
 }

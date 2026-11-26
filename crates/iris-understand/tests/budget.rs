@@ -211,6 +211,7 @@ fn each_call_reserves_its_worst_case_and_settles_its_cost() {
         m.state(),
         State {
             refused: true,
+            sent: true,
             ..State::default()
         }
     );
@@ -314,7 +315,13 @@ fn a_local_model_needs_no_budget() {
     // No usage: the tokens are unknown, but no charge is possible.
     assert!(m.ask("i", "d").is_ok());
     assert!(m.ask("i", "d").is_ok());
-    assert_eq!(m.state(), State::default());
+    assert_eq!(
+        m.state(),
+        State {
+            sent: true,
+            ..State::default()
+        }
+    );
     let c = r.counts();
     assert_eq!(
         c,

@@ -111,6 +111,8 @@ struct Store {
     running: usize,
     most_running: usize,
     delay: Duration,
+    /// The `displayName` of `GET /me`.
+    display_name: Option<String>,
     /// The host of the links in the answers, if not the fake itself.
     link_host: Option<String>,
 }
@@ -159,6 +161,7 @@ impl Store {
             running: 0,
             most_running: 0,
             delay: Duration::ZERO,
+            display_name: None,
             link_host: None,
         }
     }
@@ -469,6 +472,11 @@ impl FakeGraph {
         s.bodies.push_back((status, body.to_string()));
     }
 
+    /// The `displayName` of the owner in `GET /me`.
+    pub fn set_display_name(&self, name: Option<&str>) {
+        self.store.lock().unwrap().display_name = name.map(String::from);
+    }
+
     /// Each request waits this long before its answer, so that a test sees
     /// the requests that run at the same time.
     pub fn set_delay(&self, delay: Duration) {
@@ -530,6 +538,16 @@ async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
         tokio::time::sleep(delay).await;
     }
     let answer = check(req.headers()).err();
+    // A server that answers before it reads the request body closes the
+    // connection, and the next request of the pooled connection fails at
+    // transport (issue #883). So each injected answer reads the body first.
+    let req = if answer.is_some() || failure.is_some() || body.is_some() {
+        let (parts, b) = req.into_parts();
+        let _ = axum::body::to_bytes(b, usize::MAX).await;
+        Request::from_parts(parts, axum::body::Body::empty())
+    } else {
+        req
+    };
     let response = match (answer, failure) {
         (Some(e), _) => e,
         (None, Some((status, after))) => {
@@ -617,8 +635,10 @@ fn page_size(h: &HeaderMap, limit: usize) -> usize {
     asked.min(limit).max(1)
 }
 
-async fn me() -> Response {
-    Json(json!({ "id": "fake-user", "mail": OWNER, "userPrincipalName": OWNER })).into_response()
+async fn me(State(s): State<Shared>) -> Response {
+    let name = s.lock().unwrap().display_name.clone();
+    Json(json!({ "id": "fake-user", "mail": OWNER, "userPrincipalName": OWNER, "displayName": name }))
+        .into_response()
 }
 
 /// The master list: each category of a message that is not deleted.

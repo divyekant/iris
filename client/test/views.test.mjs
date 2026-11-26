@@ -11,7 +11,7 @@ const NOW = new Date("2026-11-16T09:05:00Z");
 
 test("the brief opens with what needs you, in words", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
-  assert.match(t, /You owe two things\. One thing is owed to you\. One conversation waits for you\./);
+  assert.match(t, /You owe two things\. Two things are owed to you\. One conversation waits for you\./);
   const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] }, strangers: { count: 0, items: [] }, review: { changesets: 0, actions: 0 }, gate: undefined };
   assert.match(text(await render("/src/views/Brief.svelte", { brief: empty, now: NOW })), /Nothing needs you now\./);
   // Only stranger items: the opening must not say that nothing needs you.
@@ -32,7 +32,7 @@ test("the stranger gate shows each sender once, with what they ask and the answe
   const gate = html.split('id="strangers"')[1].split("</section>")[0];
   const t = text(gate);
   assert.match(t, /From senders you do not know 3/);
-  assert.match(t, /Maria Ruiz maria@brightpath\.example Intro from Sam Ortiz Review the pitch deck before Friday/);
+  assert.match(t, /Maria Ruiz maria@brightpath\.example Intro from Sam Ortiz Draft ready Review the pitch deck before Friday/);
   assert.match(t, /billing@vendorhub\.example Confirm the address for the invoice/);
   assert.equal((gate.match(/>Accept</g) ?? []).length, 3);
   assert.equal((gate.match(/>Ignore</g) ?? []).length, 3);
@@ -54,7 +54,7 @@ test("the brief lists what you owe, what is owed to you, and conversations, each
   const html = await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW });
   const t = text(html);
   assert.match(t, /You owe 1 Pay invoice/);
-  assert.match(t, /Owed to you 1 SDK examples/);
+  assert.match(t, /Owed to you 2 SDK examples/);
   assert.match(t, /Conversations 1 Dinner on Thursday\?/);
   assert.match(t, /Sam Ortiz: Are you free for dinner on Thursday\?/);
   assert.match(t, /Dana Whitfield ?, due tomorrow/);
@@ -68,7 +68,7 @@ test("the brief lists what you owe, what is owed to you, and conversations, each
 test("what you owe in 2 days or less, or late, leads the brief, and You owe lists the rest", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
   // The due section comes before the review and before You owe.
-  assert.match(t, /Due soon 1 Review contract section 4 Dana Whitfield ?, due tomorrow Draft ready Waits for your review/);
+  assert.match(t, /Due soon 1 Review contract section 4 Dana Whitfield ?, due tomorrow Draft ready Summary ready Waits for your review/);
   assert.match(t, /You owe 1 Pay invoice .* All 2 Owed to you/);
   // A late thing is due soon too; a thing due in 3 days is not.
   const at = (date) => ({ ...item("c-311"), due: { date } });
@@ -247,11 +247,44 @@ test("setup and the brief say how to set a model while mail waits for one (issue
   ]) {
     assert.match(text(html), /Iris needs a model to read the rest of your mail\./);
     assert.match(text(html), /iris model set local/);
+    // Spec 1 section 7.4 (issue 826): the note says where mail text goes.
+    assert.match(text(html), /No mail text leaves this machine\./);
+    assert.match(text(html), /Iris sends the text of your mail to Anthropic\./);
   }
+  // The copy stopped (issue 827): the note still shows the model step.
+  const stopped = { ...status, accounts: [{ ...fx.status.accounts[0], state: "needs_sign_in", mirror_ready_at: null }], messages: { ...messages, fetched: 200 } };
+  const halt = text(await render("/src/views/Setup.svelte", { status: stopped, poll: 0 }));
+  assert.match(halt, /The copy stopped/);
+  assert.match(halt, /Iris needs a model to read the rest of your mail\./);
   // A model is set, an older engine says nothing, or no live mail waits (a draft or gone mail is not read): no note.
   for (const s of [{ ...status, model: true }, { ...status, model: undefined }, { ...status, waits_model: 0 }, { ...status, waits_model: undefined }]) {
     assert.doesNotMatch(text(await render("/src/views/Setup.svelte", { status: s, poll: 0 })), /needs a model/);
     assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: s, now: NOW, poll: 0 })), /needs a model/);
+  }
+});
+
+test("each setup step says that a hosted model receives the mail text, whatever the model state (spec 1 section 7.4)", async () => {
+  const account = fx.status.accounts[0];
+  const messages = { total: 400, fetched: 200, understood: 0, gone: 0 };
+  const steps = {
+    "connect": { accounts: [] },
+    "copy": { accounts: [{ ...account, mirror_ready_at: null }] },
+    "stopped": { accounts: [{ ...account, state: "needs_sign_in", mirror_ready_at: null }] },
+    "ready": { accounts: [account], messages: { ...messages, fetched: 400 } },
+  };
+  const models = {
+    "no model, mail waits": { model: false, waits_model: 394 },
+    "no model, nothing waits": { model: false, waits_model: 0 },
+    "a model set before the copy": { model: true, waits_model: 0 },
+    "an older engine": { model: undefined, waits_model: undefined },
+  };
+  for (const [step, part] of Object.entries(steps)) {
+    for (const [name, model] of Object.entries(models)) {
+      const status = { ...fx.status, messages, ...part, ...model };
+      const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
+      assert.match(t, /Iris sends the text of your mail to (Anthropic|that model)/, `${step}, ${name}`);
+      assert.match(t, /no mail text leaves/i, `${step}, ${name}`);
+    }
   }
 });
 
@@ -499,7 +532,7 @@ test("the measures page opens with a sentence, the bars of 14 days and one line 
   assert.match(t, /Memory of the engine 31 MB With 18,402 messages/);
   assert.match(t, /Changes you approved as proposed 47 of 50 94%/);
   assert.match(t, /Changes that you undid 1 of 48 2%/);
-  assert.match(t, /Sends without review after hostile mail Not yet/);
+  assert.match(t, /Sends without review after hostile mail Not yet No send that Iris checked for hostile mail yet/);
   assert.match(t, /1\.8 a day on the 12 days that you used Iris/);
   const html = await render("/src/views/Measures.svelte", { measures: fx.measures, now });
   // 14 bars: 12 days of use and 2 dotted days with no use. Today is the primary bar.
@@ -511,8 +544,15 @@ test("the measures page opens with a sentence, the bars of 14 days and one line 
 test("each measure says when it has no data, and the sentence names a missed target", async () => {
   const { rows, lead, bars, localDay } = await load("/src/measures.ts");
   const now = new Date(2026, 10, 16, 23, 59);
-  const empty = { days: [], first_brief: null, mirror: [], memory: { rss_kib: null, messages: 0 }, approvals: { decided: 0, approved: 0 }, undo: { applied: 0, undone: 0 } };
+  const empty = { days: [], first_brief: null, mirror: [], memory: { rss_kib: null, messages: 0 }, approvals: { decided: 0, approved: 0 }, undo: { applied: 0, undone: 0 }, sends: { sent: 0, unreviewed_after_hostile: 0 } };
   assert.deepEqual(rows(empty, now).map((r) => r.tone), ["none", "none", "none", "none", "none", "none", "none"]);
+  // Issue 472: sends after hostile mail meet the target only at zero.
+  const sends = (sent, unreviewed_after_hostile) => rows({ ...empty, sends: { sent, unreviewed_after_hostile } }, now)[6];
+  assert.deepEqual(sends(4, 0), { name: "Sends without review after hostile mail", value: "0", detail: "Of 4 sends that Iris checked for hostile mail. Target: zero.", tone: "met" });
+  assert.deepEqual([sends(1, 1).value, sends(1, 1).detail, sends(1, 1).tone], ["1", "Of 1 send that Iris checked for hostile mail. Target: zero.", "missed"]);
+  // Issue 1059: a store with only sends from before migration 59 gives sent 0. The row does not say that
+  // Iris sent no mail.
+  assert.deepEqual([sends(0, 0).value, sends(0, 0).detail], ["Not yet", "No send that Iris checked for hostile mail yet. Target: zero."]);
   assert.deepEqual(lead(empty, now), { opens: 0, text: "" });
   assert.equal(localDay(now), "2026-11-16");
   assert.equal(bars(empty, now)[0].day, "2026-11-03");
@@ -1155,4 +1195,13 @@ test("the Records view counts from /api/records, so a record type that a rule hi
     globalThis.fetch = saved;
     delete globalThis.location;
   }
+});
+
+test("a mail from a near-copy sender offers Trust, with the domain it looks like", async () => {
+  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example" } };
+  const shown = text(await render("/src/views/Mail.svelte", { message }));
+  assert.match(shown, /its domain looks like northwind\.example/);
+  assert.match(shown, /Trust this sender/);
+  const plain = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: null };
+  assert.doesNotMatch(await render("/src/views/Mail.svelte", { message: plain }), /Trust this sender/);
 });

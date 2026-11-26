@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 /// The active policy and the state of the file, as `GET /api/policy` gives
 /// them. `crates/iris-api/README.md` gives the format.
 pub fn policy(store: &Store) -> Result<Value> {
-    let active = store.read(iris_policy::active)?;
-    let file = match iris_policy::file_state(store)? {
+    // One read of both, so that the rules and the file state agree (#816).
+    let (active, file) = iris_policy::state(store)?;
+    let file = match file {
         FileState::Same => json!({ "state": "same" }),
         FileState::Missing => json!({ "state": "missing" }),
         FileState::Invalid(e) => json!({ "state": "invalid", "error": error(&e) }),

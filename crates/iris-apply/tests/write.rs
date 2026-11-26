@@ -231,6 +231,7 @@ fn press(
             args,
             key,
             flags: &flags,
+            draft: None,
         },
         now(),
     )

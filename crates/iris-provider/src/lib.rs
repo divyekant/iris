@@ -101,6 +101,27 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A move of a folder provider with location IDs (docs/specs/2026-11-25-imap-moves.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Move {
+    /// `archive`: from the inbox to the archive folder.
+    Archive,
+    /// `inbox`: from the archive folder to the inbox.
+    Inbox,
+    /// `trash`: from the inbox or the archive folder to the trash.
+    Trash,
+    /// `untrash`: from the trash to the inbox.
+    Untrash,
+}
+
+fn not_supported_move() -> Error {
+    Error::Api {
+        status: 400,
+        reason: "notSupported".into(),
+        message: "this provider cannot move mail with new IDs".into(),
+    }
+}
+
 /// The mailbox of the secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
@@ -257,6 +278,33 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// True if [`Provider::update_draft`] replaces the MIME bytes of a draft
+    /// in place, so that the read back of the draft checks the change
+    /// (Gmail). Else a change of a draft makes a new draft
+    /// (`docs/specs/2026-11-25-draft-change.md`, "Not in scope").
+    fn updates_drafts(&self) -> bool {
+        false
+    }
+
+    /// Replaces the message of the draft `id` with `raw`, in the thread
+    /// `thread` for a reply. One request: no retry after an unknown result.
+    /// A provider without [`Provider::updates_drafts`] refuses the call and
+    /// sends nothing.
+    fn update_draft(
+        &self,
+        token: &str,
+        id: &str,
+        raw: &[u8],
+        thread: Option<&str>,
+    ) -> Result<Draft> {
+        let _ = (token, id, raw, thread);
+        Err(Error::Api {
+            status: 400,
+            reason: "unsupported".into(),
+            message: "this provider cannot change a draft in place".into(),
+        })
+    }
+
     /// True if a change of `INBOX` moves the message to another folder, so
     /// that its folder label changes too (Outlook). Then the apply reads
     /// the labels back after the write. A label provider (Gmail) and a
@@ -273,12 +321,44 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// True if a move gives a message a new ID: the ID names its place
+    /// (IMAP). Then the apply plans and makes each move with
+    /// [`Provider::move_plan`] and [`Provider::relocate`], and rebinds the
+    /// store row to the new ID (docs/specs/2026-11-25-imap-moves.md).
+    fn location_ids(&self) -> bool {
+        false
+    }
+
+    /// Reads only. For each message of `ids`, in order: true if `mv` moves
+    /// it, false if it is already done. A message that `mv` can neither move
+    /// nor skip, and a missing or ambiguous target folder of a message that
+    /// moves, is a definite refusal (`Api` 400).
+    fn move_plan(&self, _token: &str, _ids: &[&str], _mv: Move) -> Result<Vec<bool>> {
+        Err(not_supported_move())
+    }
+
+    /// Moves each message of `ids` and gives its new ID, in the order of
+    /// `ids`. Each message must be one that `mv` moves, else a definite
+    /// refusal before any write. After the first write, each error is
+    /// unknown ([`Error::write_result_unknown`]).
+    fn relocate(&self, _token: &str, _ids: &[&str], _mv: Move) -> Result<Vec<String>> {
+        Err(not_supported_move())
+    }
+
     /// Iris confirmed that the sent copy `id` holds the approved content
     /// (send spec, section 6). A provider that gives `SENT` only to the
     /// copies that Iris sent (Outlook) records it here. The default does
     /// nothing: Gmail gives `SENT` itself.
     fn sent_confirmed(&self, id: &str) {
         let _ = id;
+    }
+
+    /// The display name of the mailbox for `From`, from the provider (send
+    /// content spec, section 3). The default is `None`: then Iris takes the
+    /// name from the sent mail of the mirror (Gmail).
+    fn display_name(&self, token: &str) -> Result<Option<String>> {
+        let _ = token;
+        Ok(None)
     }
 
     /// The mailbox of `token` and the cursor of now.

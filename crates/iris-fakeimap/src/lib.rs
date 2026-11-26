@@ -38,6 +38,12 @@ pub struct Caps {
     pub plain: bool,
     /// `UIDNEXT` in each `EXAMINE` answer.
     pub uidnext: bool,
+    /// `X-GM-EXT-1`: the fake says that it is Gmail. Off in [`Caps::ALL`].
+    pub gmail: bool,
+    /// `MOVE` (RFC 6851): `UID MOVE`.
+    pub moves: bool,
+    /// `UIDPLUS` (RFC 4315): `COPYUID` in the answer of a `UID MOVE`.
+    pub uidplus: bool,
 }
 
 impl Caps {
@@ -47,6 +53,9 @@ impl Caps {
         qresync: true,
         plain: true,
         uidnext: true,
+        gmail: false,
+        moves: true,
+        uidplus: true,
     };
 }
 
@@ -81,8 +90,26 @@ pub enum Store {
     UidOnly,
 }
 
+/// How the fake answers a `UID MOVE` (for the failure tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moving {
+    /// Move each UID, with an untagged `OK [COPYUID ...]`.
+    Normal,
+    /// Move each UID, with `COPYUID` in the tagged `OK`.
+    Tagged,
+    /// Move each UID, and send no `COPYUID`.
+    NoCopyuid,
+    /// Move each UID, with a `COPYUID` of the first UID only.
+    PartialCopyuid,
+    /// Move the first UID only, then answer `NO`.
+    RefuseAfterOne,
+    /// Move each UID, then close the connection with no answer.
+    Close,
+}
+
 struct State {
     caps: Caps,
+    moving: Moving,
     /// The `PERMANENTFLAGS` of a `SELECT`; `None` sends none.
     permanent: Option<String>,
     store: Store,
@@ -93,6 +120,9 @@ struct State {
     /// A folder that gets a new `UIDVALIDITY` at the Nth `SELECT` from now,
     /// before the answer (for the race tests of `modify`).
     renew_at: Option<(String, usize)>,
+    /// A command name (for example `LIST`): the Nth such command from now
+    /// closes the connection with no answer (for the transport tests).
+    close_at: Option<(String, usize)>,
 }
 
 /// A running fake server. The thread lives until the process ends.
@@ -109,6 +139,7 @@ impl FakeImap {
         let addr = listener.local_addr().expect("addr");
         let state = Arc::new(Mutex::new(State {
             caps,
+            moving: Moving::Normal,
             permanent: Some("\\Seen \\Flagged \\Draft \\*".to_owned()),
             store: Store::Normal,
             folders: BTreeMap::new(),
@@ -116,6 +147,7 @@ impl FakeImap {
             validity: 1000,
             commands: Vec::new(),
             renew_at: None,
+            close_at: None,
         }));
         let fake = FakeImap { addr, state };
         fake.create("INBOX", None);
@@ -204,6 +236,20 @@ impl FakeImap {
         self.lock().permanent = flags.map(str::to_owned);
     }
 
+    /// How the next `UID MOVE` commands answer.
+    pub fn set_moving(&self, moving: Moving) {
+        self.lock().moving = moving;
+    }
+
+    /// The UIDs of a folder.
+    pub fn uids(&self, folder: &str) -> Vec<u32> {
+        self.lock().folders[folder]
+            .messages
+            .keys()
+            .copied()
+            .collect()
+    }
+
     /// How the next `UID STORE` commands answer.
     pub fn set_store(&self, store: Store) {
         self.lock().store = store;
@@ -233,6 +279,13 @@ impl FakeImap {
     /// from 1.
     pub fn renew(&self, folder: &str) {
         self.lock().renew(folder);
+    }
+
+    /// Close the connection with no answer at the `n`th command `cmd` from
+    /// now (1 is the next one), before the server runs it.
+    pub fn close_at(&self, cmd: &str, n: usize) {
+        assert!(n > 0, "n counts from 1");
+        self.lock().close_at = Some((cmd.to_ascii_uppercase(), n));
     }
 
     /// Give `folder` a new `UIDVALIDITY` at the `n`th `SELECT` from now
@@ -395,6 +448,9 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             (c.plain, " AUTH=PLAIN"),
             (c.condstore, " CONDSTORE"),
             (c.qresync, " QRESYNC"),
+            (c.gmail, " X-GM-EXT-1"),
+            (c.moves, " MOVE"),
+            (c.uidplus, " UIDPLUS"),
         ] {
             if on {
                 s.push_str(name);
@@ -429,6 +485,14 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             _ => text.to_owned(),
         };
         lock().commands.push(logged);
+        {
+            let mut s = lock();
+            match s.close_at.take() {
+                Some((c, 1)) if c == cmd => return Ok(()),
+                Some((c, n)) if c == cmd => s.close_at = Some((c, n - 1)),
+                other => s.close_at = other,
+            }
+        }
         let mut reply = String::new();
         let done = match cmd.as_str() {
             "CAPABILITY" => {
@@ -623,6 +687,76 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                         }
                     }
                     _ => "BAD no folder or bad store".to_owned(),
+                }
+            }
+            // `UID MOVE <set> <folder>` (RFC 6851), in a selected folder.
+            "UID"
+                if lock().caps.moves
+                    && w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("MOVE")) =>
+            {
+                let mut s = lock();
+                let mode = s.moving;
+                let set = w.get(3).cloned().unwrap_or_default();
+                let to = w.get(4).cloned().unwrap_or_default();
+                match conn.folder.clone() {
+                    Some(n) if s.folders.contains_key(&n) && s.folders.contains_key(&to) => {
+                        let ranges = uid_set(&set, u32::MAX);
+                        let picked: Vec<u32> = s.folders[&n]
+                            .messages
+                            .keys()
+                            .copied()
+                            .filter(|u| ranges.iter().any(|(a, b)| (*a..=*b).contains(u)))
+                            .collect();
+                        let mut pairs = Vec::new();
+                        for uid in picked {
+                            if mode == Moving::RefuseAfterOne && pairs.len() == 1 {
+                                break;
+                            }
+                            let gone = s.next_modseq();
+                            let src = s.folders.get_mut(&n).expect("folder");
+                            let mut m = src.messages.remove(&uid).expect("uid");
+                            src.gone.push((uid, gone));
+                            m.modseq = s.next_modseq();
+                            let dst = s.folders.get_mut(&to).expect("folder");
+                            let new = dst.uidnext;
+                            dst.uidnext += 1;
+                            dst.messages.insert(new, m);
+                            pairs.push((uid, new));
+                        }
+                        let shown = if mode == Moving::PartialCopyuid {
+                            1
+                        } else {
+                            pairs.len()
+                        };
+                        let uidplus = s.caps.uidplus;
+                        let list = |i: usize| {
+                            pairs[..shown]
+                                .iter()
+                                .map(|p| [p.0, p.1][i].to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
+                        let code = format!(
+                            "[COPYUID {} {} {}]",
+                            s.folders[&to].uidvalidity,
+                            list(0),
+                            list(1)
+                        );
+                        match mode {
+                            Moving::Close => return Ok(()),
+                            Moving::RefuseAfterOne => "NO move failed".to_owned(),
+                            _ if pairs.is_empty() => "OK nothing moved".to_owned(),
+                            Moving::Tagged => format!("OK {code} done"),
+                            Moving::NoCopyuid => "OK done".to_owned(),
+                            _ if !uidplus => "OK done".to_owned(),
+                            Moving::Normal | Moving::PartialCopyuid => {
+                                reply.push_str(&format!("* OK {code} moved\r\n"));
+                                "OK done".to_owned()
+                            }
+                        }
+                    }
+                    Some(_) => "NO [TRYCREATE] no such folder".to_owned(),
+                    None => "BAD no folder".to_owned(),
                 }
             }
             "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("SEARCH")) => {

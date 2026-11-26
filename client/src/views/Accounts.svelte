@@ -4,16 +4,135 @@
   accounts in one list.
 -->
 <script lang="ts">
-  import { get, type Account, type Status } from "../api";
+  import { own, postStatus, postZone, readStatus, type Account, type Status } from "../api";
   import { poll as every } from "../clock";
   import { accountNames, signIn, when } from "../format";
 
   let { status: initial, poll = 60000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
   let status = $state(initial);
-  $effect(() => (poll ? every(() => get<Status>("status"), (s) => (status = s), poll) : undefined));
+
+  // Polls, checks and removal answers can arrive out of order: only the newest status shows (api.ts).
+  const show = (s: Status | null) => s && (status = s);
+  const refresh = () => readStatus().then(show);
+  $effect(() => (poll ? every(readStatus, show, poll) : undefined));
 
   let names = $derived(accountNames(status.accounts));
+
+  // The remove of an account (decision D34): one question in place, as the remove of a rule.
+  let asking: Account | null = $state(null);
+  let busy = $state(false);
+  let error = $state("");
+  let removed = $state("");
+  // Each removal that the person asked for and whose end the page does not know yet. `sent`: the
+  // engine took it. `unsure`: the answer was lost, so the removal can still run at the engine, and
+  // only a status that shows the account in a removal or gone ends the doubt. Only a status that no
+  // longer lists the account says that it is removed: the engine can answer while its delete runs,
+  // and a newer poll can hide that answer (issue 932).
+  let removals: Record<number, { account: Account; outcome: "sent" | "unsure" }> = $state({});
+
+  // Each status: an account that the status no longer lists while the person follows it (its
+  // removal, or its open question) is removed.
+  $effect(() => {
+    const a = asking;
+    if (a && !removals[a.id] && !status.accounts.some((x) => x.id === a.id)) {
+      removed = a.address;
+      asking = null;
+    }
+    const gone = Object.values(removals).filter((r) => !status.accounts.some((x) => x.id === r.account.id));
+    if (!gone.length) return;
+    removed = gone.map((r) => r.account.address).join(", ");
+    removals = Object.fromEntries(Object.entries(removals).filter(([, r]) => !gone.includes(r)));
+  });
+
+  // In a removal: the account is gone from the status, or it is in state removing.
+  const inRemoval = (a: Account) => {
+    const now = status.accounts.find((x) => x.id === a.id);
+    return !now || now.state === "removing";
+  };
+  // The question and the Remove button show only for an account with no removal.
+  const removable = (a: Account) => a.state !== "removing" && !removals[a.id];
+
+  async function remove(a: Account) {
+    busy = true;
+    error = "";
+    try {
+      // The engine answers after the delete of the mail, with the new status.
+      const next = await postStatus(`accounts/${a.id}/remove`, { address: a.address });
+      removals = { ...removals, [a.id]: { account: a, outcome: "sent" } };
+      asking = null;
+      show(next);
+      // A read that started during the removal can show the account from before the commit.
+      await refresh().catch(() => {});
+    } catch (e) {
+      const why = (e as Error).message;
+      if ((e as { status?: number }).status === undefined) {
+        // No answer: the removal can still run at the engine.
+        removals = { ...removals, [a.id]: { account: a, outcome: "unsure" } };
+        asking = null;
+        await refresh().catch(() => {});
+      } else {
+        // A definite answer. A conflict can mean that the account is in a removal already.
+        if ((e as { status?: number }).status === 409) await refresh().catch(() => {});
+        if (inRemoval(a)) {
+          removals = { ...removals, [a.id]: { account: a, outcome: "sent" } };
+          asking = null;
+        } else error = why;
+      }
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function check() {
+    busy = true;
+    try {
+      await refresh();
+    } catch {
+      // The account keeps its note: the next poll or check tells.
+    } finally {
+      busy = false;
+    }
+  }
+
+  // The time zone of the owner (issue 891): the days of due dates and defer dates. An engine that
+  // cannot set it from the web leaves `time_zone_set` out, and the page shows no setting.
+  // The canonical names of the browser leave out UTC, which `iris zone` takes too.
+  const zones: string[] = ["UTC", ...((Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.("timeZone") ?? []).filter((z) => z !== "UTC")];
+  // "": the time zone of the machine that runs Iris.
+  let zoneNow = $derived(status.time_zone_set ? (status.time_zone ?? "") : "");
+  // The unsaved choice of the person, or null. With none, the selector follows each status,
+  // also a change from another tab or `iris zone` (issue 1016).
+  let picked = $state<string | null>(null);
+  let zone = $derived(picked ?? zoneNow);
+  // A choice that the status now shows is no longer unsaved: the selector follows the next change.
+  $effect(() => {
+    if (picked !== null && picked === zoneNow) picked = null;
+  });
+  let zoneBusy = $state(false);
+  let zoneNote = $state("");
+  let zoneError = $state("");
+
+  async function saveZone() {
+    zoneBusy = true;
+    zoneNote = zoneError = "";
+    try {
+      // postZone sets the shared zone of the other views too, also when the next status read fails.
+      const next = await postZone(zone || null);
+      status = { ...status, ...next };
+      picked = null;
+      zoneNote = "Saved.";
+      // A poll that started before the save can show the old zone: read again.
+      await refresh().catch(() => {});
+    } catch (e) {
+      if ((e as { status?: number }).status === undefined) {
+        zoneError = "Iris could not tell if it saved the time zone.";
+        await refresh().catch(() => {});
+      } else zoneError = own(e);
+    } finally {
+      zoneBusy = false;
+    }
+  }
 
   // The state of one account, in one sentence, and its tone.
   function stateOf(a: Account): { text: string; tone: "ok" | "busy" | "retry" | "stopped" } {
@@ -42,12 +161,16 @@
 <h1>Accounts</h1>
 <p class="sub">Iris copies each mailbox to this machine. Your brief shows the mail of all accounts in one list.</p>
 
+{#if removed}
+  <p class="done" role="status">Removed {removed}. Its mail is gone from Iris on this machine.</p>
+{/if}
+
 <ul class="accounts">
   {#each status.accounts as a (a.id)}
     {@const s = stateOf(a)}
     <li>
       <span class="tone {s.tone}" aria-hidden="true"></span>
-      <div>
+      <div class="body">
         <p class="address">
           {a.address}{#if names[`a-${a.id}`]}<span class="name">Shown as “{names[`a-${a.id}`]}” in the brief</span>{/if}
         </p>
@@ -60,12 +183,56 @@
           <p class="state">Iris can read this mailbox, but it cannot change it. Your approved changes wait.</p>
           <p class="state">To give write access, run <code>iris account add client.json --write</code> on the machine that runs Iris and sign in again.</p>
         {/if}
+        {#if removals[a.id] && a.state !== "removing"}
+          <p class="state unsure" role="status">
+            {removals[a.id].outcome === "unsure" ? "Iris could not tell if this account is removed. The removal can still run." : "Iris removes this account and deletes its mail from this machine."}
+            <button type="button" class="quiet" onclick={check} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
+          </p>
+        {/if}
+        {#if asking?.id === a.id && removable(a)}
+          <div class="ask" role="group" aria-label={`Remove ${a.address}`}>
+            <p>
+              Remove {a.address}? Iris deletes its mail from this machine. The mailbox at {a.provider === "gmail" ? "Gmail" : a.provider === "outlook" ? "Outlook" : "your provider"} does not
+              change, and you can add it again later. The files of agents in its jobs go. A backup and the notes of jobs keep their copy. The record of what Iris
+              and you did stays: drafts, the reasons of changes, job events and the titles of matters that you decided can hold text from this mail.
+            </p>
+            <p class="actions">
+              <button type="button" class="danger" onclick={() => remove(a)} disabled={busy}>{busy ? "Removing…" : "Remove"}</button>
+              <button type="button" class="quiet" onclick={() => ((asking = null), (error = ""))} disabled={busy}>Keep</button>
+            </p>
+            {#if error}<p class="error" role="alert">{error}</p>{/if}
+          </div>
+        {/if}
       </div>
+      {#if removable(a) && asking?.id !== a.id}
+        <button type="button" class="quiet remove" onclick={() => ((asking = a), (removed = ""))} disabled={busy} aria-label={`Remove ${a.address}`}>Remove</button>
+      {/if}
     </li>
   {:else}
     <li class="none">No account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</li>
   {/each}
 </ul>
+
+{#if status.time_zone_set !== undefined}
+  <section class="zone" aria-labelledby="zone">
+    <h2 id="zone">Time zone</h2>
+    <p>
+      Iris uses this time zone for the days of due dates and defer dates. Now:
+      {#if status.time_zone_set}<strong>{status.time_zone}</strong>, set by you.{:else if status.time_zone}<strong>{status.time_zone}</strong>, the time zone of the machine that runs Iris.{:else}the time zone of the machine that runs Iris. Iris cannot read the name of this zone.{/if}
+    </p>
+    <form class="actions" onsubmit={(e) => (e.preventDefault(), saveZone())}>
+      <label for="zone-pick">Time zone</label>
+      <select id="zone-pick" value={zone} onchange={(e) => ((picked = e.currentTarget.value), (zoneNote = zoneError = ""))} disabled={zoneBusy}>
+        <option value="">The time zone of the machine that runs Iris</option>
+        {#if zone && !zones.includes(zone)}<option value={zone}>{zone}</option>{/if}
+        {#each zones as z (z)}<option value={z}>{z.replaceAll("_", " ")}</option>{/each}
+      </select>
+      <button type="submit" class="quiet" disabled={zoneBusy || zone === zoneNow}>{zoneBusy ? "Saving…" : "Save"}</button>
+    </form>
+    {#if zoneNote}<p class="note" role="status">{zoneNote}</p>{/if}
+    {#if zoneError}<p class="error" role="alert">{zoneError}</p>{/if}
+  </section>
+{/if}
 
 <section class="add" aria-labelledby="add">
   <h2 id="add">Add an account</h2>
@@ -116,6 +283,81 @@
   .tone.stopped {
     background: var(--color-error);
   }
+  .body {
+    flex: 1;
+    min-width: 0;
+  }
+  button {
+    font: inherit;
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    cursor: pointer;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+  button:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+  .quiet,
+  .danger {
+    color: var(--color-text);
+    background: none;
+    border: 1px solid var(--color-border);
+  }
+  .quiet:hover:not(:disabled) {
+    border-color: var(--color-text-faint);
+  }
+  .danger {
+    border-color: var(--color-error);
+  }
+  .danger:hover:not(:disabled) {
+    background: var(--color-background-surface);
+  }
+  /* Quiet until the pointer or the focus is on the line, as the remove of a rule. Always shown on a touch screen. */
+  .remove {
+    flex: none;
+    align-self: center;
+    font-size: var(--font-size--1);
+    padding: var(--space-1) var(--space-3);
+    color: var(--color-text-muted);
+    border-color: transparent;
+  }
+  .accounts li:hover .remove:not(:disabled),
+  .remove:focus-visible {
+    color: var(--color-text);
+    border-color: var(--color-border);
+  }
+  @media (any-pointer: coarse), (max-width: 600px) {
+    button {
+      min-height: var(--size-touch);
+      min-width: var(--size-touch);
+    }
+  }
+  .ask {
+    margin-top: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--color-background-surface);
+  }
+  .ask p {
+    margin: 0;
+  }
+  .ask .actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+  }
+  .error {
+    margin-top: var(--space-2) !important;
+    color: var(--color-error);
+  }
+  .unsure button {
+    margin-left: var(--space-2);
+  }
+  .done {
+    margin: 0 0 var(--space-4);
+    color: var(--color-text-muted);
+  }
   .address {
     margin: 0;
     font-weight: 500;
@@ -132,12 +374,49 @@
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
   }
+  .zone {
+    margin: 0 0 var(--space-8);
+  }
+  .zone h2,
   .add h2 {
     margin: 0 0 var(--space-2);
     font-size: var(--font-size-1);
   }
+  .zone > p,
   .add p {
     margin: 0;
     color: var(--color-text-muted);
+  }
+  .zone strong {
+    color: var(--color-text);
+    font-weight: 500;
+  }
+  .zone .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    align-items: center;
+    margin-top: var(--space-3);
+  }
+  .zone label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .zone select {
+    font: inherit;
+    min-width: 0;
+    max-width: 100%;
+    padding: var(--space-2) var(--space-3);
+    color: var(--color-text);
+    background: var(--color-background);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+  .zone .note {
+    margin-top: var(--space-2);
+    font-size: var(--font-size--1);
   }
 </style>

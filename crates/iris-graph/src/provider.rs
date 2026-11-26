@@ -85,13 +85,15 @@ pub struct Outlook {
     /// The IDs of the sent copies of the messages that Iris sent (spec
     /// section 6): only these get `SENT`.
     own_sent: Mutex<HashSet<String>>,
-    /// Reads the current list of [`Outlook::own_sent`] from the store
-    /// before each read of labels, so a send that another process
-    /// completed counts too (issue #719).
+    /// Asks the store if a message ID is a confirmed sent copy, at each
+    /// label read of that message. A send that another process completed
+    /// counts too (issue #719). With a source, [`Outlook::own_sent`] is
+    /// not used. One indexed lookup for each message, not a read of the
+    /// full list (issue #804).
     sent_source: Option<SentSource>,
 }
 
-type SentSource = Box<dyn Fn() -> Result<Vec<String>, String> + Send + Sync>;
+type SentSource = Box<dyn Fn(&str) -> Result<bool, String> + Send + Sync>;
 
 impl Outlook {
     /// Each message with this `Message-ID`, each page. The apply gives
@@ -124,11 +126,11 @@ impl Outlook {
         self
     }
 
-    /// The provider that reads the sent copies of Iris from `source`
-    /// before each read of labels. `source` gives the full current list.
+    /// The provider that asks `source` at each label read of a message if
+    /// its ID is a sent copy of Iris. `source` gives the current state.
     pub fn with_sent_source(
         mut self,
-        source: impl Fn() -> Result<Vec<String>, String> + Send + Sync + 'static,
+        source: impl Fn(&str) -> Result<bool, String> + Send + Sync + 'static,
     ) -> Outlook {
         self.sent_source = Some(Box::new(source));
         self
@@ -160,24 +162,29 @@ impl Outlook {
         }
     }
 
-    /// The well-known folders ([`Outlook::known`]), after a read of the
-    /// current sent copies from the source. Call it before [`Outlook::labels`].
+    /// The well-known folders ([`Outlook::known`]). Call it before
+    /// [`Outlook::labels`].
     fn label_view(&self, token: &str) -> iris_provider::Result<HashMap<String, &'static str>> {
-        if let Some(source) = &self.sent_source {
-            let ids = source().map_err(iris_provider::Error::Transport)?;
-            *self.own_sent.lock().unwrap() = ids.into_iter().collect();
-        }
         self.known(token).map_err(map)
     }
 
     /// The mirror labels of `m` ([`label_ids`]), with `SENT` for a sent
-    /// copy of a message that Iris sent.
-    fn labels(&self, m: &Message, known: &HashMap<String, &'static str>) -> Vec<String> {
+    /// copy of a message that Iris sent. A failed source gives an error,
+    /// not labels without `SENT`.
+    fn labels(
+        &self,
+        m: &Message,
+        known: &HashMap<String, &'static str>,
+    ) -> iris_provider::Result<Vec<String>> {
         let mut ids = label_ids(m, known);
-        if self.own_sent.lock().unwrap().contains(&m.id) {
+        let sent = match &self.sent_source {
+            Some(source) => source(&m.id).map_err(iris_provider::Error::Transport)?,
+            None => self.own_sent.lock().unwrap().contains(&m.id),
+        };
+        if sent {
             ids.push("SENT".into());
         }
-        ids
+        Ok(ids)
     }
 
     /// The well-known name of each folder ID, from the cache or from Graph.
@@ -199,7 +206,7 @@ impl Outlook {
         known: &HashMap<String, &'static str>,
     ) -> iris_provider::Result<Record> {
         Ok(match self.graph.message(token, &id) {
-            Ok(m) => Record::Added(history(&m, self.labels(&m, known))),
+            Ok(m) => Record::Added(history(&m, self.labels(&m, known)?)),
             Err(Error::NotFound) => Record::Deleted(HistoryMessage {
                 id,
                 thread_id: String::new(),
@@ -311,7 +318,7 @@ impl Outlook {
         let moved = self.graph.move_to(token, id, &to_id, &etag).map_err(map)?;
         Ok(Minimal {
             id: moved.id.clone(),
-            label_ids: self.labels(&moved, &known),
+            label_ids: self.labels(&moved, &known)?,
         })
     }
 }
@@ -727,6 +734,12 @@ impl iris_provider::Provider for Outlook {
         true
     }
 
+    /// `displayName` of `GET /me` (#864): Outlook gives `SENT` only to the
+    /// mail that Iris sent, so the mirror has no other safe source.
+    fn display_name(&self, token: &str) -> iris_provider::Result<Option<String>> {
+        Ok(self.graph.me(token).map_err(map)?.display_name)
+    }
+
     /// The cursor of now is the empty cursor: Graph has no cheap cursor of
     /// now, so the next `changes` starts a new round of each folder.
     fn profile(&self, token: &str) -> iris_provider::Result<Profile> {
@@ -787,19 +800,25 @@ impl iris_provider::Provider for Outlook {
             .graph
             .delta(token, &folder, at.next.as_deref())
             .map_err(map)?;
-        let messages = delta
-            .changes
-            .iter()
-            .filter_map(|c| match c {
-                Change::Message(m) => Some(m),
-                Change::Removed(_) => None,
-            })
-            .filter(|m| label.is_none_or(|l| self.labels(m, &known).iter().any(|x| x == l)))
-            .map(|m| MessageRef {
+        let mut messages = Vec::new();
+        for c in &delta.changes {
+            let Change::Message(m) = c else { continue };
+            if let Some(l) = label {
+                // Only `SENT` asks the sent source.
+                let ids = if l == "SENT" {
+                    self.labels(m, &known)?
+                } else {
+                    label_ids(m, &known)
+                };
+                if !ids.iter().any(|x| x == l) {
+                    continue;
+                }
+            }
+            messages.push(MessageRef {
                 id: m.id.clone(),
                 thread_id: m.conversation_id.clone(),
-            })
-            .collect();
+            });
+        }
         match delta.next {
             Next::More(l) => at.next = Some(l),
             Next::Done(_) => {
@@ -864,7 +883,7 @@ impl iris_provider::Provider for Outlook {
             for c in delta.changes {
                 match c {
                     Change::Message(m) => {
-                        changes.push(Record::Added(history(&m, self.labels(&m, &known))))
+                        changes.push(Record::Added(history(&m, self.labels(&m, &known)?)))
                     }
                     // The read by ID waits for the end of all rounds, so it
                     // gives the folder after the last move of the sync.
@@ -913,7 +932,7 @@ impl iris_provider::Provider for Outlook {
         let known = self.label_view(token)?;
         Ok(Minimal {
             id: m.id.clone(),
-            label_ids: self.labels(&m, &known),
+            label_ids: self.labels(&m, &known)?,
         })
     }
 
@@ -931,7 +950,7 @@ impl iris_provider::Provider for Outlook {
         }
         Ok(Metadata {
             id: m.id.clone(),
-            label_ids: self.labels(&m, &known),
+            label_ids: self.labels(&m, &known)?,
             headers: headers_of(&sink.bytes, headers),
         })
     }
@@ -957,7 +976,7 @@ impl iris_provider::Provider for Outlook {
         Ok(RawMessage {
             id: m.id.clone(),
             thread_id: m.conversation_id.clone(),
-            label_ids: self.labels(&m, &known),
+            label_ids: self.labels(&m, &known)?,
             internal_date,
             size,
         })

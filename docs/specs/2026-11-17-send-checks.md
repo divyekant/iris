@@ -55,10 +55,10 @@ function.
 
 | Flag | Rule |
 |---|---|
-| `new_recipient` | An address of `to` or `cc` is not the account address, and has no valid `sent` evidence: a `sender_evidence` row with the rule `sent` whose message is not gone, has the label `SENT` and not `DRAFT`, and has the same content hash as the row. `iris_senders::sent_to` holds this rule, so the sender axis and the flag agree. A typing error in a known address (a wrong recipient) is a new address, so it gets this flag. |
+| `new_recipient` | An address of `to`, `cc` or `bcc` is not the account address, and has no valid `sent` evidence: a `sender_evidence` row with the rule `sent` whose message is not gone, has the label `SENT` and not `DRAFT`, and has the same content hash as the row. `iris_senders::sent_to` holds this rule, so the sender axis and the flag agree. A typing error in a known address (a wrong recipient) is a new address, so it gets this flag. |
 | `money` | The body or the subject names an amount: a currency sign (`$`, `€`, `£`, `¥`, `₹`) next to a digit, or a number next to a currency code or word (`USD`, `EUR`, `GBP`, `INR`, `JPY`, `CAD`, `AUD`, `CHF`, `dollar(s)`, `euro(s)`, `pound(s)`, `rupee(s)`). |
 | `date` | The body or the subject names a date: a month name or its short form next to a number, a weekday name, `today`, `tonight`, `tomorrow`, `next week`, `next month`, `end of the day`, `end of the week`, `EOD`, `EOW`, an ISO date (`2026-11-17`) or a numeric date (`17/11`, `11/17/2026`). |
-| `attachment` | The body or the subject has a word of the attachment group: `attach`, `attaches`, `attached`, `attaching`, `attachment(s)`, `enclose`, `enclosed`, `encloses`, or a file kind (`pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `csv`, `zip`, `screenshot(s)`). Iris drafts have no attachments (issue #235), so a mention always means a missing attachment. |
+| `attachment` | The body or the subject has a word of the attachment group: `attach`, `attaches`, `attached`, `attaching`, `attachment(s)`, `enclose`, `enclosed`, `encloses`, or a file kind (`pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `csv`, `zip`, `screenshot(s)`). The flag applies only when the draft has no attached file (issue #235): a mention with no file means a missing attachment. A draft with one or more files gets no `attachment` flag. |
 | `untrusted_content` | The subject or the body has a run of 8 words that is a phrase in the clean text (`message_fts`) of an external message: a message with no `SENT` and no `DRAFT` label. Spec 1 and `iris-senders` mark mail of the owner by these labels, not by `From`, because any sender can write the address of the account in `From`. |
 
 `money` and `date` flag each amount and each date that the text names,
@@ -73,12 +73,19 @@ Words match with no case difference and on word bounds. A match inside a
 longer word does not count (`attachments` counts, `reattach` does not).
 
 Each rule reads the subject and the body, each as its own text. The
-`untrusted_content` check splits each of the two into words as the full-text
-index does (letters and digits; each other character ends a word). It
-queries each run of 8 words that starts at word 0, 8, 16 and so on, as an
-FTS5 phrase, and stops at the first match. So a copied run of 15 words or
-more always matches. A shorter copied run can match or not. The words are
-letters and digits only, so the phrase text needs no escape.
+`untrusted_content` check splits each of the two into the tokens of the
+full-text index: it calls the tokenizer of `message_fts` (`unicode61
+remove_diacritics 2`) through the FTS5 C API (`iris_store::index_tokens`,
+issue #756). So the words agree with the index by construction. For
+example, `a` + U+0301 + `b` is one token `ab` (the tokenizer removes the
+combining mark), and `a` + U+0345 + `b` is two tokens. It queries each run
+of 8 tokens that starts at token 0, 8, 16 and so on, as an FTS5 phrase,
+and stops at the first match. So a copied run of 15 tokens or more always
+matches. A shorter copied run can match or not. A token never holds `"`,
+so the phrase text needs no escape.
+
+The other word rules (money, date, attachment) split the text into runs of
+letters and digits (`word_spans`). They do not query the index.
 
 ### 3. Submit
 
@@ -131,7 +138,7 @@ at most 256 KiB, at most 50 addresses).
 | Each case of the test set | Its flag | `each_case_of_the_test_set_gives_its_flag` |
 | A text with no case of the test set | No draft flag | same test, negative cases |
 | Random text, random Unicode, a body of 256 KiB | No panic; the same flags for the same input; the `untrusted_content` check makes at most one query for each 8 words | property test `draft_flags_hold_for_random_text` |
-| A body with FTS5 syntax (`"`, `*`, `NEAR`, `AND`, `^`) | The words are letters and digits only; the query is a phrase of words | property test (the generator writes these) |
+| A body with FTS5 syntax (`"`, `*`, `NEAR`, `AND`, `^`) | The words are the tokens of the `unicode61 remove_diacritics 2` tokenizer (`iris_store::index_tokens`), and a token never holds `"`; the query is a phrase of words | property test (the generator writes these) |
 | A store with no `sender_evidence` row (no sync of sent mail yet) | Each address is new: `new_recipient` | example test |
 | Stale `sent` evidence: its message is gone, lost `SENT`, or has other bytes | The address is new: `new_recipient` | `stale_sent_evidence_makes_the_address_new` |
 | A received message whose `From` is the account address (a forged sender) | External: no `SENT` or `DRAFT` label, so its text gives `untrusted_content` | example test |

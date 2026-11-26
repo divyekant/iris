@@ -1,7 +1,8 @@
 // "Handle this" (card R4-10, docs/specs/2026-11-17-start-job.md): the start
 // of a job from a commitment or a conversation, and the grants inside a job.
 import type { Item, Rule, Summary } from "./api";
-import { ymd } from "./act";
+import { access } from "./access.svelte.ts";
+import { instantOf, offsetOf, today, ymd } from "./act";
 
 /** One message that a start grants (GET /api/items/{id}/job). */
 export type StartMessage = Summary & { readable: boolean };
@@ -12,28 +13,42 @@ export function canStart(item: Item): boolean {
   return (item.form === "commitment" && item.status === "open") || (item.form === "conversation" && (item.status === "active" || item.status === "quiet"));
 }
 
-/** The end of the local day `date` (`YYYY-MM-DD`), as RFC 3339 with the local offset. */
-export function endOfDay(date: string): string {
+/**
+ * The end of the day `date` (`YYYY-MM-DD`) in the time zone of the owner (decision D1,
+ * issue 892), as RFC 3339 with the offset of that zone. With no zone, or a zone that
+ * the browser does not know, the end of the day of the browser. Throws for a day
+ * that the zone skipped (issue 987): no instant of that day exists.
+ */
+export function endOfDay(date: string, zone: string | null | undefined = access.zone): string {
+  const pad = (n: number, w = 2) => String(Math.abs(n)).padStart(w, "0");
+  const offset = (off: number) => `${off < 0 ? "-" : "+"}${pad(Math.trunc(off / 60))}:${pad(off % 60)}`;
+  const skipped = () => new Error(`${date} does not exist in the time zone ${zone || "of this browser"}. Pick another day.`);
+  const end = instantOf(date, 86_399_999, zone, true);
+  if (end !== null) {
+    if (today(new Date(end), zone) !== date) throw skipped();
+    return `${date}T23:59:59.999${offset(Math.round((offsetOf(end, zone) ?? 0) / 60_000))}`;
+  }
   const [y, m, d] = date.split("-").map(Number);
   const t = new Date(2000, 0, 1, 23, 59, 59, 999);
   t.setFullYear(y, m - 1, d);
-  const off = -t.getTimezoneOffset();
-  const pad = (n: number, w = 2) => String(Math.abs(n)).padStart(w, "0");
-  const zone = `${off < 0 ? "-" : "+"}${pad(Math.trunc(off / 60))}:${pad(off % 60)}`;
-  return `${ymd(t)}T23:59:59.999${zone}`;
+  if (ymd(t) !== date) throw skipped();
+  return `${ymd(t)}T23:59:59.999${offset(-t.getTimezoneOffset())}`;
 }
 
-/** The date of the due field of the form: the local day of the due date of a commitment, or "". */
-export function dueDate(item: Item): string {
-  if (item.due?.at) return ymd(new Date(item.due.at));
+/** The day of the instant `at` in the time zone of the owner, as `YYYY-MM-DD`. */
+export const dayOf = (at: string, zone: string | null | undefined = access.zone) => today(new Date(at), zone);
+
+/** The date of the due field of the form: the day of the due date of a commitment in the zone of the owner, or "". */
+export function dueDate(item: Item, zone: string | null | undefined = access.zone): string {
+  if (item.due?.at) return dayOf(item.due.at, zone);
   return item.due?.date ?? "";
 }
 
 /** The `due` of the start: the instant of the commitment if the person kept its day, else the end of the picked day, or null. */
-export function dueValue(item: Item, field: string): string | null {
+export function dueValue(item: Item, field: string, zone: string | null | undefined = access.zone): string | null {
   if (!field) return null;
-  if (item.due?.at && field === dueDate(item)) return item.due.at;
-  return endOfDay(field);
+  if (item.due?.at && field === dueDate(item, zone)) return item.due.at;
+  return endOfDay(field, zone);
 }
 
 /** The subject of a message as the person reads it: "(no subject)" for none, empty or blank, as in the workspace. */
@@ -101,4 +116,22 @@ export function grantView(rules: Rule[], job: string): { switches: Record<Group[
   }
   const general = rules.filter((r) => r.effect === "allow" && !r.job && (r.when?.author == null || r.when.author === "agent"));
   return { switches, others: mine.filter((r) => !taken.has(r.id)), general };
+}
+
+/** The `due` of a typed goal or an edit (decision D25): the old instant if the person kept its day, else the end of the picked day, or null. */
+export function keepDue(old: string | undefined, field: string, zone: string | null | undefined = access.zone): string | null {
+  if (!field) return null;
+  if (old && dayOf(old, zone) === field) return old;
+  return endOfDay(field, zone);
+}
+
+/** The threads of the messages of a search, in the order of the list: one line for each thread, with the subject of its first hit. */
+export function threadsOf(messages: Summary[]): { thread: string; subject: string; hits: number }[] {
+  const out = new Map<string, { thread: string; subject: string; hits: number }>();
+  for (const m of messages) {
+    const t = out.get(m.thread);
+    if (t) t.hits++;
+    else out.set(m.thread, { thread: m.thread, subject: subjectOf(m), hits: 1 });
+  }
+  return [...out.values()];
 }

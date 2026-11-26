@@ -27,6 +27,7 @@
 //! time is linear in the size of the message. The largest use is a PDF of
 //! 10 MiB with one decompressed stream of at most 4 MiB.
 
+mod glyphs;
 mod html;
 mod mime;
 mod pdf;
@@ -86,8 +87,13 @@ pub struct Clean {
     /// the text does not use adds its links too: a mail client can show it.
     pub links: Vec<Link>,
     /// True if links went out: past [`LINK_BYTES`], or past the output
-    /// limit of an HTML part.
+    /// limit of an HTML part, in the message or in an attached message.
     pub links_cut: bool,
+    /// The links of each attached message (`message/rfc822`), at each
+    /// depth, as for [`Clean::links`]. They have their own `From`, which
+    /// the outer message does not prove, so they count with no sender
+    /// proof (issue #372).
+    pub attached_links: Vec<Link>,
 }
 
 /// One HTML link whose text is not its target.
@@ -101,8 +107,8 @@ pub struct Link {
 }
 
 /// True when `rest`, the part of a message past a cut, has a MIME part
-/// header with the type `text/html`: a mail client can show an HTML part
-/// there. `before` is the message from its start up to the cut: the scan
+/// header with the type `text/html`, `message/rfc822` or `message/global`:
+/// a mail client can show an HTML part there, also in an attached message. `before` is the message from its start up to the cut: the scan
 /// reads it first, for the boundaries that the headers declare and to know
 /// if the cut is in a header or in a body. Its HTML parts do not count.
 ///
@@ -235,7 +241,11 @@ impl PartScan {
                 }
             }
         }
+        // An attached message can hold an HTML part, with links that a mail
+        // client shows (issue #372).
         kind.starts_with(b"text/html")
+            || kind.starts_with(b"message/rfc822")
+            || kind.starts_with(b"message/global")
     }
 
     /// True for a delimiter line of a declared boundary: `--`, the
@@ -311,6 +321,7 @@ pub fn clean_cut(raw: &[u8], raw_cut: bool) -> Clean {
             // Iris could not read the message, so it cannot check its links.
             links: Vec::new(),
             links_cut: true,
+            attached_links: Vec::new(),
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -323,14 +334,23 @@ pub fn clean_cut(raw: &[u8], raw_cut: bool) -> Clean {
             // Iris could not read the message, so it cannot check its links.
             links: Vec::new(),
             links_cut: true,
+            attached_links: Vec::new(),
         };
     };
     let invitation = calendar_request(parsed.root().root_part(), 0, &mut 0);
     let at_end = raw_cut.then_some(raw.len());
     let (subject, text, cut, files, links) = message(parsed.root(), 0, &mut parts, at_end);
     let mut attachments = Vec::new();
+    let mut attached = Links::default();
     for f in files {
-        attachment(f, &mut parts, &mut attach_left, &mut attachments);
+        attachment(
+            f,
+            &mut parts,
+            &mut attach_left,
+            &mut attachments,
+            &mut attached,
+            at_end,
+        );
     }
     Clean {
         subject,
@@ -338,8 +358,9 @@ pub fn clean_cut(raw: &[u8], raw_cut: bool) -> Clean {
         cut,
         attachments,
         invitation,
-        links_cut: links.cut,
+        links_cut: links.cut || attached.cut,
         links: links.list,
+        attached_links: attached.list,
     }
 }
 
@@ -629,6 +650,9 @@ struct File<'a> {
     enc: Encoding,
     /// The MIME depth of the part. An attached message goes one level deeper.
     depth: usize,
+    /// An attached message of a version of `multipart/alternative` that the
+    /// text does not use: only its links count, it is not an attachment.
+    links_only: bool,
 }
 
 /// Step 1 of one message: walk the MIME tree, make the text of each body
@@ -726,7 +750,9 @@ impl<'a> Walker<'a> {
             self.body_part(part, enc, mime_type == "text/html", charset.as_deref());
             return;
         }
-        if self.links_only {
+        // A mail client can show any version, so an attached message of a
+        // version that the text does not use still gets its links checked.
+        if self.links_only && mime_type != "message/rfc822" {
             return;
         }
         self.files.push(File {
@@ -736,6 +762,7 @@ impl<'a> Walker<'a> {
             part,
             enc,
             depth,
+            links_only: self.links_only,
         });
     }
 
@@ -766,7 +793,17 @@ impl<'a> Walker<'a> {
             let texts;
             (texts, self.chars, self.cut, _) = before;
             self.texts.truncate(texts);
-            self.files.truncate(before.3);
+            // The version adds no attachment, but its attached messages keep
+            // their link check.
+            let tail = self.files.split_off(before.3);
+            self.files.extend(
+                tail.into_iter()
+                    .filter(|f| f.mime_type == "message/rfc822")
+                    .map(|f| File {
+                        links_only: true,
+                        ..f
+                    }),
+            );
         }
     }
 
@@ -847,7 +884,24 @@ impl<'a> Walker<'a> {
 /// `attach_left`, the one budget of the top message, in the order of the
 /// message. So the budget never has to go back. An attached message adds its
 /// own attachments after it: its text uses the budget first.
-fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec<Attachment>) {
+/// Step 2 for one attachment. The links of an attached message go to
+/// `attached`. `at_end` is the length of the raw message when it is a
+/// prefix of a longer message ([`clean_cut`]).
+fn attachment(
+    f: File,
+    parts: &mut usize,
+    attach_left: &mut usize,
+    out: &mut Vec<Attachment>,
+    attached: &mut Links,
+    at_end: Option<usize>,
+) {
+    // An attached message that only its links count for ([`File`]) adds no
+    // attachment and uses no budget.
+    let (mut no_budget, mut no_out) = (0, Vec::new());
+    let (attach_left, out) = match f.links_only {
+        true => (&mut no_budget, &mut no_out),
+        false => (attach_left, out),
+    };
     let body = f.part.raw_body();
     let enc = f.enc;
     let size = decoded_len(body, enc);
@@ -857,6 +911,11 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
     let mut cut = false;
     let mut inner_attachments = Vec::new();
     if f.mime_type == "message/rfc822" {
+        // An attached message that reaches the end of a cut raw message
+        // can have more links past the cut.
+        if at_end.is_some_and(|end| f.part.offset_end() as usize >= end) {
+            attached.cut = true;
+        }
         // Also with no budget left, the walk lists the attachments of the
         // attached message.
         let had_budget = *attach_left > 0;
@@ -865,6 +924,8 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
         // its bytes past INNER_LIMIT must not count. So parse the capped bytes again.
         let fits = mime_fields_fit(&inner);
         let Some(parsed) = fits.then(|| parser().parse(&inner[..])).flatten() else {
+            // Iris cannot read the message, so it cannot check its links.
+            attached.cut = true;
             out.push(Attachment {
                 name: String::new(),
                 mime_type: f.mime_type,
@@ -880,10 +941,29 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
             });
             return;
         };
-        // shortcut: the links of an attached message do not count; count
-        // them if phishing comes as an attached message.
-        let (subject, mut t, inner_cut, files, _) =
-            message(parsed.root(), f.depth + 1, parts, None);
+        // A clipped message: an HTML part that reaches the clip, or a part
+        // header with the type `text/html` past it, can hold more links. The
+        // standard encodings of an attached message are 7bit, 8bit and binary
+        // (RFC 2046 section 5.2.1): the bytes past the clip are the rest of
+        // the message. Iris does not scan the rest of another encoding.
+        let (subject, mut t, inner_cut, files, links) = message(
+            parsed.root(),
+            f.depth + 1,
+            parts,
+            clipped.then_some(inner.len()),
+        );
+        attached.cut |= links.cut;
+        attached.add(links.list.into_iter().map(|l| (l.text, l.href)).collect());
+        if clipped {
+            attached.cut |= match enc {
+                Encoding::None => {
+                    html_part_in(&inner[..], &body[inner.len().min(body.len())..]).unwrap_or(true)
+                }
+                _ => true,
+            };
+            // The attached messages of a clipped message are not read.
+            attached.cut |= files.iter().any(|f| f.mime_type == "message/rfc822");
+        }
         // The cut mark is not part of the budget: take it off, and put one
         // mark on below.
         if inner_cut {
@@ -899,7 +979,16 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
         // attachments are not known. Do not list them.
         if !clipped {
             for inner_file in files {
-                attachment(inner_file, parts, attach_left, &mut inner_attachments);
+                attachment(
+                    inner_file,
+                    parts,
+                    attach_left,
+                    &mut inner_attachments,
+                    attached,
+                    // The parts of the attached message have offsets in its
+                    // own bytes: the check above covers the cut.
+                    None,
+                );
             }
         }
         if name.is_empty() {
@@ -926,7 +1015,7 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
             let (bytes, _) = decode_capped(body, enc, PDF_LIMIT as usize);
             // The quality check needs some text, also when little budget is
             // left. One byte more than the budget shows a cut.
-            let (found, stopped) = pdf::text_cut(&bytes, (*attach_left + 1).max(PDF_CHECK_TEXT));
+            let (found, stopped) = pdf::text_of(bytes, (*attach_left + 1).max(PDF_CHECK_TEXT));
             if let Some(mut t) = found {
                 cut = stopped;
                 if t.len() > *attach_left {

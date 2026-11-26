@@ -56,6 +56,55 @@ fn store(dir: &TempDir) -> Arc<Store> {
     Arc::new(s)
 }
 
+/// Each message of the test store has raw content, and understanding read
+/// its header from it (migration 70): the reply form uses the header. The
+/// raw file of each one has no `Reply-To` (issue #1174).
+fn read_all(s: &Store) {
+    let ids: Vec<i64> = s
+        .read(|c| {
+            let mut st = c.prepare("SELECT id FROM message")?;
+            let v = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })
+        .unwrap();
+    let raw: Vec<(i64, String)> = ids
+        .into_iter()
+        .map(|id| {
+            let mail = format!("Message-ID: <{id}@test>\r\nSubject: Q4\r\n\r\nHi\r\n");
+            (id, s.put_content(mail.as_bytes()).unwrap())
+        })
+        .collect();
+    s.write(|tx| {
+        tx.execute_batch("CREATE TEMP TABLE raw(id INTEGER PRIMARY KEY, sha TEXT)")?;
+        for (id, sha) in &raw {
+            tx.execute("INSERT INTO raw VALUES (?1, ?2)", rusqlite::params![id, sha])?;
+        }
+        tx.execute_batch(
+            "CREATE TEMP TABLE was AS SELECT id, understood_at FROM message m
+               WHERE content_sha256 IS NULL AND EXISTS (SELECT 1 FROM header h WHERE h.message_id = m.id)
+                 AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                                 WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT');
+             CREATE TEMP TABLE checks AS SELECT message_id FROM link_check;
+             UPDATE message SET content_sha256 = (SELECT sha FROM raw WHERE raw.id = message.id)
+               WHERE id IN (SELECT id FROM was);
+             DROP TABLE raw;
+             -- The test state stays: the same link checks and understanding.
+             DELETE FROM link_check WHERE message_id IN (SELECT id FROM was)
+               AND message_id NOT IN (SELECT message_id FROM checks);
+             DROP TABLE checks;
+             UPDATE message SET understood_at = (SELECT understood_at FROM was WHERE was.id = message.id)
+               WHERE id IN (SELECT id FROM was);
+             DROP TABLE was;
+             UPDATE header SET content_sha256 =
+               (SELECT content_sha256 FROM message WHERE id = header.message_id);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
 async fn call(
     store: &Arc<Store>,
     method: &str,
@@ -115,10 +164,21 @@ fn made(s: &Store) {
             rusqlite::params![
                 iris_compose::hash(&c, None),
                 raw,
-                serde_json::to_string(&c).unwrap(),
+                json!({"content": c, "reply": null}).to_string(),
                 action
             ],
         )?;
+        // The ledger entry of the create: the send of the mark binds to its
+        // hash (draft change spec, section 2).
+        let ops = serde_json::json!({"call": "drafts.create", "message_id": "iris.1@example.com",
+                                     "date": 1, "hash": iris_compose::hash(&c, None), "thread": null});
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, ?2, 'writing', 'none', 0)",
+            rusqlite::params![action, ops.to_string()],
+        )?;
+        tx.execute("UPDATE ledger SET call = 1 WHERE action_id = ?1", [action])?;
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE action_id = ?1", [action])?;
         Ok(())
     })
     .unwrap();
@@ -160,13 +220,30 @@ async fn a_press_writes_the_mail_after_its_warnings() {
     assert_eq!(st["draft"], "d-1");
     assert_eq!(st["sending"], false);
     assert_eq!(st["leaves_at"], Value::Null);
+    assert_eq!(st["bcc_check"], Value::Null);
+    // A send with Bcc says that it waits for the Bcc gate of its provider.
+    s.write(|tx| {
+        let c = json!({"content": {"to": ["priya@example.com"], "cc": [], "bcc": ["sam@example.org"],
+                                   "subject": "Q4", "body": "Hi.\n"}, "reply": null});
+        tx.execute("UPDATE draft SET content = ?1 WHERE id = 1", [c.to_string()])?;
+        tx.execute("UPDATE send_switch SET on_at = 0 WHERE id = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(
+        (&st["state"], &st["bcc_check"]),
+        (&json!("waiting"), &json!("gmail")),
+        "{st}"
+    );
     // The cancel of the outbox stops the write.
     let (code, _) = call(&s, "POST", "/api/outbox/d-1/cancel", None).await;
     assert_eq!(code, StatusCode::OK);
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(
         st,
-        json!({"state": "stopped", "reason": "Cancelled in the outbox.", "draft": "d-1"})
+        json!({"state": "stopped", "reason": "Cancelled in the outbox.", "draft": "d-1",
+               "change": "update"})
     );
 }
 
@@ -331,6 +408,7 @@ async fn a_body_that_is_not_valid_writes_nothing() {
 async fn a_reply_names_the_newest_mail() {
     let dir = temp("reply");
     let s = store(&dir);
+    read_all(&s);
     let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v["account"], "a-1");
@@ -359,6 +437,7 @@ async fn a_reply_names_the_newest_mail() {
     };
     assert!(v["write"].is_string(), "{v}");
     // A thread with no mail, and a thread that does not exist.
+    read_all(&s);
     let (code, _) = call(&s, "GET", "/api/threads/t-9/reply", None).await;
     assert_eq!(code, StatusCode::NOT_FOUND);
     s.write(|tx| {
@@ -368,8 +447,171 @@ async fn a_reply_names_the_newest_mail() {
         )?)
     })
     .unwrap();
+    read_all(&s);
     let (code, _) = call(&s, "GET", "/api/threads/t-2/reply", None).await;
     assert_eq!(code, StatusCode::CONFLICT);
+}
+
+/// The reply goes to the `Reply-To` addresses of the parent, else to its
+/// `From` address (issue #455). `all` gives the other people of the parent
+/// for reply all: each address once, never the account or an address of
+/// `to`, and only addresses that pass the address check. For a parent of
+/// the person, `to` is its `To` list and `all` its `Cc` list.
+#[tokio::test]
+async fn a_reply_goes_to_reply_to_and_offers_the_others() {
+    let dir = temp("reply-all");
+    let s = store(&dir);
+    let set = |sql: &str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE header SET reply_to = 'list@example.org',
+           to_addrs = 'owner@example.com,sam@example.com',
+           cc_addrs = 'Ana <ANA@example.com>, priya@example.com, not an address, sam@example.com'
+         WHERE message_id = 2");
+    read_all(&s);
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["to"], json!(["list@example.org"]));
+    assert_eq!(v["cc"], json!([]));
+    let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
+    assert_eq!(
+        all.iter().map(|a| a.to_lowercase()).collect::<Vec<_>>(),
+        ["priya@example.com", "sam@example.com", "ana@example.com"]
+    );
+    // No Reply-To: the From address, which `all` then leaves out.
+    set("UPDATE header SET reply_to = NULL WHERE message_id = 2");
+    read_all(&s);
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["priya@example.com"]));
+    let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
+    assert_eq!(
+        all.iter().map(|a| a.to_lowercase()).collect::<Vec<_>>(),
+        ["sam@example.com", "ana@example.com"]
+    );
+    // A Reply-To that is not an address counts as none.
+    set("UPDATE header SET reply_to = 'not an address' WHERE message_id = 2");
+    read_all(&s);
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["priya@example.com"]));
+    // The person wrote the parent: its To list, and its Cc list for all.
+    // Its Reply-To is the person's own and does not count.
+    set("INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'SENT', 'SENT', 'system');
+         INSERT INTO message_label(message_id, label_id) SELECT 2, id FROM label WHERE provider_id = 'SENT';
+         UPDATE header SET reply_to = 'owner@example.com', to_addrs = 'sam@example.com'
+         WHERE message_id = 2");
+    read_all(&s);
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["sam@example.com"]));
+    let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
+    assert_eq!(
+        all.iter().map(|a| a.to_lowercase()).collect::<Vec<_>>(),
+        ["ana@example.com", "priya@example.com"]
+    );
+}
+
+/// Issue #1131: a header row of an older build has no `reply_to`. The
+/// reply form reads the `Reply-To` from the head of the raw content.
+#[tokio::test]
+async fn a_reply_to_old_mail_reads_reply_to_from_the_raw_content() {
+    let dir = temp("reply-old");
+    let s = store(&dir);
+    let sha = s
+        .put_content(
+            b"From: Priya Shah <priya@example.com>\r\nReply-To: List <LIST@example.org>, b@example.org\r\n\
+              To: owner@example.com\r\nSubject: Q4\r\n\r\nHi\r\n",
+        )
+        .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE message SET content_sha256 = ?1 WHERE id = 2",
+            [&sha],
+        )?)
+    })
+    .unwrap();
+    read_all(&s);
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["to"], json!(["list@example.org", "b@example.org"]));
+    // A value in the row wins: the raw content is not read.
+    s.write(|tx| {
+        Ok(tx.execute_batch("UPDATE header SET reply_to = 'x@example.org' WHERE message_id = 2")?)
+    })
+    .unwrap();
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["x@example.org"]));
+    // Issue #1174: with no row value and no readable raw file, the form
+    // does not open. It does not give `From` in place of the `Reply-To`.
+    s.write(|tx| Ok(tx.execute_batch("UPDATE header SET reply_to = NULL WHERE message_id = 2")?))
+        .unwrap();
+    std::fs::remove_file(s.content_path(&sha).unwrap()).unwrap();
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+}
+
+/// The reply form gives recipients only from a header row of the content
+/// of the parent now: after a sync of new content and before understanding
+/// reads it, the row is empty or of the old content (migration 70).
+#[tokio::test]
+async fn a_reply_waits_for_the_read_of_new_content() {
+    let dir = temp("reply-new-content");
+    let s = store(&dir);
+    read_all(&s);
+    let set = |sql: &str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    for (sql, code) in [
+        (
+            "UPDATE message SET content_sha256 = 'b' WHERE id = 2;
+          UPDATE header SET content_sha256 = 'a' WHERE message_id = 2",
+            StatusCode::CONFLICT,
+        ),
+        (
+            "UPDATE header SET content_sha256 = NULL WHERE message_id = 2",
+            StatusCode::CONFLICT,
+        ),
+        // The raw file 'b' does not exist: a row value of `reply_to`
+        // means that the form does not read it.
+        (
+            "UPDATE header SET content_sha256 = 'b', reply_to = 'priya@example.com'
+             WHERE message_id = 2",
+            StatusCode::OK,
+        ),
+        // A message with no raw content: neither row has a hash.
+        (
+            "UPDATE message SET content_sha256 = NULL WHERE id = 2;
+             UPDATE header SET content_sha256 = NULL WHERE message_id = 2",
+            StatusCode::CONFLICT,
+        ),
+        (
+            "DELETE FROM header WHERE message_id = 2",
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        set(sql);
+        let (got, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+        assert_eq!(got, code, "{sql}: {v}");
+    }
+}
+
+/// A parent with many recipients: reply all lists each one once, in order.
+#[tokio::test]
+async fn reply_all_lists_a_large_recipient_list_once() {
+    let dir = temp("reply-all-large");
+    let s = store(&dir);
+    let n = 30_000;
+    let cc: Vec<String> = (0..n).map(|i| format!("p{i}@example.com")).collect();
+    let cc = format!("{},{}", cc.join(","), cc.join(",").to_uppercase());
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE header SET to_addrs = NULL, cc_addrs = ?1 WHERE message_id = 2",
+            [cc],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    read_all(&s);
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::OK);
+    let all = v["all"].as_array().unwrap();
+    assert_eq!(all.len(), n);
+    assert_eq!(all[0], "p0@example.com");
+    assert_eq!(all[n - 1], format!("p{}@example.com", n - 1));
 }
 
 /// The start values hold the conversation above the reply form: the newest
@@ -437,6 +679,7 @@ async fn a_reply_shows_the_conversation() {
         Ok(())
     })
     .unwrap();
+    read_all(&s);
     let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     let mails = v["conversation"].as_array().unwrap();
@@ -469,6 +712,7 @@ async fn a_reply_shows_the_conversation() {
         )?)
     })
     .unwrap();
+    read_all(&s);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["earlier"], 0);
     assert_eq!(v["conversation"][0]["hostile"], true);
@@ -531,6 +775,7 @@ async fn a_reply_after_your_own_mail_goes_to_its_recipients() {
         let dir = temp(&format!("own-{i}"));
         let s = store(&dir);
         newest(&s, OWNER, to, true);
+        read_all(&s);
         let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
         assert_eq!(v["to"], json!(want), "{to}");
         assert_eq!(v["subject"], "Re: Q4");
@@ -580,6 +825,7 @@ async fn property_each_start_address_is_valid() {
             )?)
         })
         .unwrap();
+        read_all(&s);
         let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
         for a in v["to"].as_array().unwrap() {
             let a = a.as_str().unwrap().to_string();
@@ -603,6 +849,7 @@ async fn a_forged_from_does_not_choose_the_recipients() {
     let dir = temp("forged");
     let s = store(&dir);
     newest(&s, OWNER, "victim@example.com, other@example.com", false);
+    read_all(&s);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["to"], json!([OWNER]));
 }
@@ -642,12 +889,538 @@ async fn an_old_write_is_stopped() {
         Ok(())
     })
     .unwrap();
-    let old = json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1"});
+    let mut old = json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1", "change": "update"});
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(st, old);
-    // A second stop cause does not hide the age: the draft also changed in Gmail.
+    // A second stop cause does not hide the age: the draft also changed in
+    // Gmail, so Iris cannot change it.
     s.write(|tx| Ok(tx.execute("UPDATE draft SET foreign_at = 1", [])?))
         .unwrap();
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    old["change"] = Value::Null;
     assert_eq!(st, old);
+}
+
+/// One raw request body, with no JSON.
+async fn upload(store: &Arc<Store>, bytes: Vec<u8>) -> (StatusCode, Value) {
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/attachments")
+        .header("host", "127.0.0.1:4800")
+        .header("authorization", auth.bearer())
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(bytes))
+        .unwrap();
+    let res = iris_api::router(store.clone(), auth)
+        .oneshot(req)
+        .await
+        .unwrap();
+    let code = res.status();
+    let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// Send content spec, sections 2 and 6.1: an upload writes the file to
+/// the attachment folder; a file over the limit gets 413; the press of
+/// Send takes the entry, and the same key with another file gets 409.
+#[tokio::test]
+async fn a_file_goes_into_the_folder_and_into_the_press() {
+    let dir = temp("file");
+    let s = store(&dir);
+    let (code, v) = upload(&s, b"%PDF-1 numbers".to_vec()).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let sha = v["sha256"].as_str().unwrap().to_string();
+    assert_eq!(v["size"], 14);
+    assert_eq!(
+        std::fs::read(s.attachment_path(&sha).unwrap()).unwrap(),
+        b"%PDF-1 numbers"
+    );
+    let (code, _) = upload(&s, Vec::new()).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = upload(&s, vec![b'x'; iris_api::ATTACHMENT_LIMIT + 1]).await;
+    assert_eq!(code, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let mut body = new_mail(KEY, json!(["new_recipient", "attachment"]));
+    body["body"] = json!("The numbers are attached.\n");
+    body["attachments"] =
+        json!([{"name": "q4.pdf", "type": "application/pdf", "sha256": sha, "size": 14}]);
+    let (code, v) = call(&s, "POST", "/api/write", Some(body.clone())).await;
+    // A draft with a file has no "no file attached" warning.
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["flags"], json!(["new_recipient"]));
+    body["flags"] = v["flags"].clone();
+    let (code, v) = call(&s, "POST", "/api/write", Some(body.clone())).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let args: String = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT args FROM changeset_action WHERE verb = 'draft'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(args.contains("q4.pdf"), "{args}");
+    body["attachments"][0]["name"] = json!("other.pdf");
+    let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(v["error"], "This key belongs to another mail.");
+}
+
+/// The write of a change of d-1 (draft change spec, section 2), with
+/// `body` as the new text: the first write is withdrawn after its draft,
+/// the change is approved and applied, and the person pressed Send. The
+/// draft row gets the new content, as the apply writes it. Gives the
+/// changeset ID of the change.
+fn changed_write(s: &Store, body: &str) -> String {
+    use iris_changeset::{Author, AuthorKind, Verb};
+    let who = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let mut args = new_mail(KEY, json!([]));
+    let args = args.as_object_mut().unwrap();
+    for k in ["account", "key", "flags"] {
+        args.remove(k);
+    }
+    args.insert("body".into(), json!(body));
+    let cs = iris_changeset::create(s, &who, now()).unwrap();
+    iris_changeset::add_action(s, cs, &who, Verb::Draft, &["d-1"], args, None).unwrap();
+    iris_changeset::submit(s, cs, &who, "Change.", now()).unwrap();
+    s.write(|tx| {
+        let (action, state, reason): (i64, String, Option<String>) = tx.query_row(
+            "SELECT id, state, reason FROM changeset_action WHERE changeset_id = ?1",
+            [cs],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert!(
+            ["proposed", "in_review"].contains(&state.as_str()),
+            "{state} {reason:?}"
+        );
+        tx.execute(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = ?2 WHERE id = ?1",
+            rusqlite::params![action, now()],
+        )?;
+        // The press marks the approved action, before its apply.
+        tx.execute(
+            "INSERT INTO write_send(action_id, request_key, request_hash, flags, created_at)
+             VALUES (?1, ?2, ?3, '[\"new_recipient\"]', ?4)",
+            rusqlite::params![action, "fedcba9876543210-2", "a".repeat(64), now()],
+        )?;
+        let old: String = tx.query_row("SELECT hash FROM draft WHERE id = 1", [], |r| r.get(0))?;
+        let c = iris_compose::Content {
+            to: vec!["priya@example.com".into()],
+            cc: vec![],
+            subject: "Q4".into(),
+            body: body.into(),
+            ..Default::default()
+        }
+        .check()
+        .unwrap();
+        let hash = iris_compose::hash(&c, None);
+        let raw = iris_compose::compose(OWNER, "iris.1@example.com", &c, None, 2);
+        let ops = json!({"call": "drafts.update", "draft": 1, "provider_id": "r1",
+                         "message_id": "iris.1@example.com", "date": 2, "pre_hash": old,
+                         "hash": hash, "thread": null});
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, ?2, 'writing', 'inverse', 0)",
+            rusqlite::params![action, ops.to_string()],
+        )?;
+        tx.execute("UPDATE ledger SET call = 1 WHERE action_id = ?1", [action])?;
+        tx.execute(
+            "UPDATE ledger SET state = 'applied' WHERE action_id = ?1",
+            [action],
+        )?;
+        tx.execute(
+            "UPDATE draft SET content = ?1, hash = ?2, raw = ?3 WHERE id = 1",
+            rusqlite::params![json!({"content": c, "reply": null}).to_string(), hash, raw],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    format!("cs-{cs}")
+}
+
+/// A first write that made d-1 and then was withdrawn, so that d-1 has no
+/// send that waits.
+async fn first_write(s: &Arc<Store>) {
+    let (_, v) = call(
+        s,
+        "POST",
+        "/api/write",
+        Some(new_mail(KEY, json!(["new_recipient"]))),
+    )
+    .await;
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(s);
+    let (code, _) = call(s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
+    assert_eq!(code, StatusCode::OK);
+}
+
+/// The state of the write of a change names the draft that the change
+/// names, once the change applied, and reaches `waiting` after step 2a.
+#[tokio::test]
+async fn a_write_of_a_change_waits_with_its_draft() {
+    let dir = temp("change-wait");
+    let s = store(&dir);
+    first_write(&s).await;
+    let cs = changed_write(&s, "Changed.\n");
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st, json!({"state": "saving"}));
+    assert_eq!(iris_changeset::send_written(&s, 1, &now).unwrap(), 1);
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["state"], "waiting", "{st}");
+    assert_eq!(st["draft"], "d-1");
+}
+
+/// The send of a change binds to the content of the press: a draft row
+/// with other content stops the write with the reason, and the draft.
+#[tokio::test]
+async fn a_write_of_a_change_stops_on_other_content() {
+    let dir = temp("change-other");
+    let s = store(&dir);
+    first_write(&s).await;
+    let cs = changed_write(&s, "Changed.\n");
+    // The row then holds other valid content, as a refresh from Gmail
+    // writes it.
+    let c = iris_compose::Content {
+        to: vec!["priya@example.com".into()],
+        cc: vec![],
+        subject: "Q4".into(),
+        body: "Other.\n".into(),
+        ..Default::default()
+    }
+    .check()
+    .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE draft SET content = ?1, hash = ?2, raw = ?3 WHERE id = 1",
+            rusqlite::params![
+                json!({"content": c, "reply": null}).to_string(),
+                iris_compose::hash(&c, None),
+                iris_compose::compose(OWNER, "iris.1@example.com", &c, None, 3)
+            ],
+        )?)
+    })
+    .unwrap();
+    assert_eq!(iris_changeset::send_written(&s, 1, &now).unwrap(), 1);
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(
+        st,
+        json!({"state": "stopped", "reason": iris_changeset::DRAFT_CHANGED, "draft": "d-1",
+               "change": "update"})
+    );
+}
+
+/// A write of a new mail that made d-1, then was withdrawn: no send of
+/// d-1 waits. Gives its changeset ID.
+async fn stopped_write(s: &Arc<Store>) -> String {
+    let (_, v) = call(
+        s,
+        "POST",
+        "/api/write",
+        Some(new_mail(KEY, json!(["new_recipient"]))),
+    )
+    .await;
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(s);
+    let (code, _) = call(s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
+    assert_eq!(code, StatusCode::OK);
+    cs
+}
+
+/// A stopped write with a Gmail draft offers a change in place, and the
+/// form reads the content of the draft (draft change spec, section 5).
+/// A press with the draft targets the draft, not the account.
+#[tokio::test]
+async fn a_stopped_write_changes_its_draft() {
+    let dir = temp("change-press");
+    let s = store(&dir);
+    let cs = stopped_write(&s).await;
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["change"], "update", "{st}");
+    let (code, d) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        d,
+        json!({"draft": "d-1", "account": "a-1", "thread": null, "to": ["priya@example.com"],
+               "cc": [], "bcc": [], "subject": "Q4", "body": "Hi.\n", "attachments": [],
+               "change": "update"})
+    );
+    let mut body = new_mail("0123456789abcdef-2", json!(["new_recipient"]));
+    body["body"] = json!("Changed.\n");
+    body["draft"] = json!("d-1");
+    let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let targets: String = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT a.targets FROM write_send w JOIN changeset_action a ON a.id = w.action_id
+                 ORDER BY w.action_id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(targets, r#"{"drafts":["d-1"]}"#);
+    // The draft waits for the change now: the first write offers none.
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["change"], Value::Null, "{st}");
+    let (_, d) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(
+        d["change"], st["change"],
+        "the draft and the write agree: {d}"
+    );
+    // A draft that the person changed into a form that Iris does not write
+    // has no content to show.
+    s.write(|tx| Ok(tx.execute("UPDATE draft SET foreign_at = 1 WHERE id = 1", [])?))
+        .unwrap();
+    let (code, _) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+}
+
+/// A draft field that is not a draft of the account or the thread of the
+/// press: 400, nothing written. The key and the draft are in the request
+/// hash: the same key with another draft is a 409.
+#[tokio::test]
+async fn a_press_names_a_draft_of_its_own_mail() {
+    let dir = temp("change-other");
+    let s = store(&dir);
+    stopped_write(&s).await;
+    s.add_account("gmail", "other@example.com").unwrap();
+    let before = count(&s, "SELECT count(*) FROM changeset");
+    for (account, draft) in [("a-2", "d-1"), ("a-1", "d-9"), ("a-1", "t-1")] {
+        let mut body = new_mail("0123456789abcdef-3", json!(["new_recipient"]));
+        body["account"] = json!(account);
+        body["draft"] = json!(draft);
+        let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{account} {draft} {v}");
+    }
+    let reply = json!({"thread": "t-1", "parent": "m-2", "to": ["priya@example.com"],
+                           "cc": [], "body": "Hi.\n", "key": "0123456789abcdef-4",
+                           "flags": [], "draft": "d-1"});
+    let (code, v) = call(&s, "POST", "/api/write", Some(reply.clone())).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(count(&s, "SELECT count(*) FROM changeset"), before);
+    let mut body = new_mail("0123456789abcdef-5", json!(["new_recipient"]));
+    body["draft"] = json!("d-1");
+    let (code, _) = call(&s, "POST", "/api/write", Some(body.clone())).await;
+    assert_eq!(code, StatusCode::CREATED);
+    body.as_object_mut().unwrap().remove("draft");
+    let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+    assert_eq!(
+        (code, &v["error"]),
+        (StatusCode::CONFLICT, &json!(KEY_TAKEN))
+    );
+}
+
+const KEY_TAKEN: &str = "This key belongs to another mail.";
+
+/// The `change` of a stopped write (draft change spec, section 5): none
+/// for a sent draft, `new` for a draft of an account that is not Gmail,
+/// none for a draft of any provider that Iris does not write, and none
+/// for a Gmail draft whose attachment file is gone.
+#[tokio::test]
+async fn a_stopped_write_says_how_its_draft_can_change() {
+    let dir = temp("change-kinds");
+    let s = store(&dir);
+    let cs = stopped_write(&s).await;
+    let set = |sql: &'static str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE draft SET sent_at = 1, sent_message = 's1' WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    set(
+        "UPDATE draft SET sent_at = NULL, sent_message = NULL WHERE id = 1;
+         UPDATE account SET provider = 'outlook' WHERE id = 1;",
+    );
+    assert_eq!(change(&s, &cs).await, "new");
+    set("UPDATE draft SET foreign_at = 1 WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    // An attachment of the draft whose file is not in the attachment
+    // folder: a new draft does not need the old file, a change in place
+    // does (draft change spec, section 1).
+    set("UPDATE draft SET foreign_at = NULL WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, "new");
+    set(
+        "UPDATE draft SET content = json_set(content, '$.content.attachments',
+           json('[{\"name\": \"q4.pdf\", \"type\": \"application/pdf\",
+                   \"sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\",
+                   \"size\": 14}]')) WHERE id = 1",
+    );
+    assert_eq!(change(&s, &cs).await, "new");
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+}
+
+/// `newer_mail` of the stopped write `cs`. The draft read of d-1 gives the
+/// same value (issue 941).
+async fn newer_mail(s: &Arc<Store>, cs: &str) -> Value {
+    let st = call(s, "GET", &format!("/api/write/{cs}"), None).await.1["newer_mail"].clone();
+    let d = call(s, "GET", "/api/drafts/d-1", None).await.1["newer_mail"].clone();
+    assert_eq!(st, d, "the write state and the draft read agree");
+    st
+}
+
+async fn change(s: &Arc<Store>, cs: &str) -> Value {
+    call(s, "GET", &format!("/api/write/{cs}"), None).await.1["change"].clone()
+}
+
+/// A stopped reply: its draft answers the parent of the press, m-2, also
+/// when the mirror has no Message-ID of m-2. The change ends when the
+/// thread gets a newer mail, for each provider. A press of the draft with
+/// another parent of the same thread: 400, nothing written.
+#[tokio::test]
+async fn a_stopped_reply_changes_only_for_its_parent() {
+    let dir = temp("change-reply");
+    let s = store(&dir);
+    let reply = json!({"thread": "t-1", "parent": "m-2", "to": ["priya@example.com"],
+                       "cc": [], "body": "Hi.\n", "key": KEY, "flags": ["new_recipient"]});
+    let (code, v) = call(&s, "POST", "/api/write", Some(reply)).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(&s);
+    let set = |sql: &'static str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE draft SET thread_id = 1 WHERE id = 1;
+         UPDATE header SET message_id_hdr = NULL WHERE message_id = 2;");
+    let (code, _) = call(&s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(change(&s, &cs).await, "update");
+    assert_eq!(newer_mail(&s, &cs).await, Value::Null);
+    set("UPDATE account SET provider = 'outlook' WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, "new");
+    // A gone parent with an older message left is no new mail (#1077).
+    set("UPDATE message SET gone_at = 1 WHERE id = 2");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    assert_eq!(newer_mail(&s, &cs).await, Value::Null);
+    set("UPDATE message SET gone_at = NULL WHERE id = 2");
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1;
+         INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+           VALUES (1, 1, 'p3', 3000);
+         INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
+           VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    // The state says why: a newer mail came into the thread (#1077).
+    assert_eq!(newer_mail(&s, &cs).await, true);
+    set("UPDATE account SET provider = 'outlook' WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    assert_eq!(newer_mail(&s, &cs).await, true);
+    // A parent with no date sorts before each date, as in `reply_parent`.
+    set("UPDATE message SET internal_date = -10 WHERE id = 1;
+         UPDATE message SET internal_date = NULL WHERE id = 2;
+         UPDATE message SET internal_date = -5 WHERE id = 3;");
+    assert_eq!(newer_mail(&s, &cs).await, true);
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1");
+    let before = count(&s, "SELECT count(*) FROM changeset");
+    let press = json!({"thread": "t-1", "parent": "m-3", "to": ["priya@example.com"],
+                       "cc": [], "body": "Hi.\n", "key": "0123456789abcdef-6",
+                       "flags": ["new_recipient"], "draft": "d-1"});
+    let (code, v) = call(&s, "POST", "/api/write", Some(press)).await;
+    assert_eq!(
+        (code, &v["error"]),
+        (
+            StatusCode::BAD_REQUEST,
+            &json!("The draft does not answer this message.")
+        ),
+        "{v}"
+    );
+    assert_eq!(count(&s, "SELECT count(*) FROM changeset"), before);
+}
+
+/// An agent asks to send d-1, and the send waits in the review. Gives the
+/// `change` and `newer_mail` of its review entry (issue 1104), after a
+/// check that each is the value of the draft read of d-1 once the person
+/// denied this send only.
+async fn review_change(s: &Arc<Store>) -> (Value, Value) {
+    let agent = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Agent,
+        name: Some("Claude Code".into()),
+        session: None,
+        job: None,
+    };
+    let row = iris_changeset::create(s, &agent, now()).unwrap();
+    iris_changeset::add_action(
+        s,
+        row,
+        &agent,
+        iris_changeset::Verb::Send,
+        &["d-1"],
+        &Default::default(),
+        None,
+    )
+    .unwrap();
+    iris_changeset::submit(s, row, &agent, "Send the reply.", now()).unwrap();
+    let cs = format!("cs-{row}");
+    let (code, v) = call(s, "GET", &format!("/api/changesets/{cs}/drafts"), None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let entry = &v["drafts"][0];
+    assert_eq!(entry["draft"], "d-1", "{v}");
+    let said = (entry["change"].clone(), entry["newer_mail"].clone());
+    assert_eq!(
+        call(s, "GET", "/api/drafts/d-1", None).await.1["change"],
+        Value::Null,
+        "the send waits"
+    );
+    let a = call(s, "GET", &format!("/api/changesets/{cs}"), None)
+        .await
+        .1["actions"][0]
+        .clone();
+    let deny = json!({"actions": [{"revision": a["revision"], "n": a["n"], "approve": false, "hash": a["hash"]}]});
+    let (code, v) = call(
+        s,
+        "POST",
+        &format!("/api/changesets/{cs}/decide"),
+        Some(deny),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let d = call(s, "GET", "/api/drafts/d-1", None).await.1;
+    assert_eq!(
+        said,
+        (d["change"].clone(), d["newer_mail"].clone()),
+        "the review and the draft read agree"
+    );
+    said
+}
+
+/// Issue 1104: the review entry of a waiting send of a reply says if the
+/// person can change its draft after a deny of that send. A newer mail in
+/// the thread stops the change, and the entry says why.
+#[tokio::test]
+async fn the_review_says_if_a_denied_send_can_change() {
+    let dir = temp("review-change");
+    let s = store(&dir);
+    let reply = json!({"thread": "t-1", "parent": "m-2", "to": ["priya@example.com"],
+                       "cc": [], "body": "Hi.\n", "key": KEY, "flags": ["new_recipient"]});
+    let (code, v) = call(&s, "POST", "/api/write", Some(reply)).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let write = v["write"].as_str().unwrap().to_string();
+    made(&s);
+    let set = |sql: &'static str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE draft SET thread_id = 1 WHERE id = 1");
+    let (code, _) = call(
+        &s,
+        "POST",
+        &format!("/api/changesets/{write}/withdraw"),
+        None,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(review_change(&s).await, (json!("update"), Value::Null));
+    set("UPDATE account SET provider = 'outlook' WHERE id = 1");
+    assert_eq!(review_change(&s).await, (json!("new"), Value::Null));
+    set(
+        "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+           VALUES (1, 1, 'p3', 3000);
+         INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
+           VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');",
+    );
+    assert_eq!(review_change(&s).await, (Value::Null, json!(true)));
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1");
+    assert_eq!(review_change(&s).await, (Value::Null, json!(true)));
+    set("UPDATE message SET gone_at = 1 WHERE id = 3");
+    assert_eq!(review_change(&s).await, (json!("update"), Value::Null));
 }

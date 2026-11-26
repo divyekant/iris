@@ -126,6 +126,8 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
     let mut out = Outcome::default();
     // Step 0 always runs, before each early stop.
     let (row, skip) = write(store, |tx| {
+        // An expired signal is not live, so it leaves its matters here.
+        iris_store::expire_signals(tx, now)?;
         out.cleaned = clean(tx)?;
         let Some(row) = model_row(tx)? else {
             return Ok((None, Some(Skip::NoModel)));
@@ -196,17 +198,21 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
         out.skip = Some(Skip::Same);
         return Ok(out);
     };
-    let model = Budgeted::new(inner.as_ref(), store, run, Some(&row));
+    let model = Budgeted::new(inner.as_ref(), store, run, Some(&row)).yielding();
     let reply = model.ask(INSTRUCTION, &data);
     let state = model.state();
     // The wait starts at the end of the call, as in an understanding run.
     let ended = batch::clock_ms().max(now);
     // The outcome of the call decides each write below:
-    // - no call went out (the budget refused it): undo the attempt;
+    // - no call went out (the budget refused it, or a waiter came first):
+    //   undo the attempt;
     // - no answer of the known format, or an unknown result: the wait;
     // - an answer: the fingerprint, and proposals only from a complete one
     //   (`Some(Some(..))`); a refused or cut answer is `Some(None)`.
     let refused = matches!(reply, Err(iris_model::Error::Budget(_))) && !state.store_failed;
+    // A waiter of the run lock that came before the request: no request
+    // went out, so the attempt is undone as for a refusal (issue #1175).
+    let unsent = refused || (state.cancelled && !state.sent);
     let answer: Option<Option<Value>> = match &reply {
         Err(_) => None,
         Ok(r) if r.stop != Stop::End => Some(None),
@@ -218,22 +224,36 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
     };
     // Only evidence of the model starts the wait: a failed store write of
     // the counts is no such evidence (#156).
+    // A call stopped for a waiter of the run lock (issue #1126) is no
+    // evidence of the model: no wait. It is an attempt of the hourly gate.
+    let cancelled = state.cancelled;
     let failed = !refused
+        && !cancelled
         && ((answer.is_none() && !state.store_failed)
             || state.key_refused
             || state.server_failed
             || state.unknown);
     let name = model.name().to_string();
     let (proposed, dropped, added) = write(store, |tx| {
-        if refused {
+        if unsent {
             tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
             tx.execute("UPDATE matter_run SET tried_at = ?1 WHERE id = 1", [before])?;
             return Ok((0, 0, 0));
         }
+        let stop = match () {
+            _ if cancelled => "yield",
+            _ if failed => "model",
+            _ => "done",
+        };
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![run, ended, if failed { "model" } else { "done" }],
+            params![run, ended, stop],
         )?;
+        if cancelled {
+            // The call can be out and charged: the run row keeps its cost,
+            // and `tried_at` stays, so the hourly gate counts the attempt.
+            return Ok((0, 0, 0));
+        }
         batch::update_wait(tx, failed, !failed && answer.is_some(), ended)?;
         let Some(answer) = &answer else {
             return Ok((0, 0, 0));
@@ -244,8 +264,11 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             "UPDATE matter_run SET candidates = ?1 WHERE id = 1",
             [&print],
         )?;
+        // A signal can expire during the call: the checks of the write
+        // read the status at the end of the call.
+        iris_store::expire_signals(tx, ended)?;
         match answer {
-            Some(v) => save(tx, v, &sent, &matters, &name, run, now),
+            Some(v) => save(tx, v, &sent, &matters, &name, run, ended),
             None => Ok((0, 0, 0)),
         }
     })?;

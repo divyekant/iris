@@ -463,3 +463,245 @@ fn the_name_address_check_holds_for_any_name() {
         assert!(!spoof(&list, from), "{list:?}");
     }
 }
+
+/// Property of the name check (#911): an address in the name ends at the
+/// first ASCII character that a domain cannot hold. An address of the same
+/// owner, with any such character and text after it, is never a spoof. A
+/// foreign address with the same tail always is.
+#[test]
+fn an_address_in_the_name_ends_at_a_character_that_a_domain_cannot_hold() {
+    use iris_understand::name_address_spoof as spoof;
+    let from = "noreply@bank.example";
+    let tails = ["help", "x", "", "a.b", "é", "1"];
+    for c in (0x21u8..0x7f).map(char::from) {
+        if c.is_ascii_alphanumeric() || "-.@".contains(c) {
+            continue;
+        }
+        for t in tails {
+            let own = format!("support@bank.example{c}{t}");
+            assert!(!spoof(&own, from), "{own:?}");
+            let own = format!("Bank support@mail.bank.example.{c}{t}");
+            assert!(!spoof(&own, from), "{own:?}");
+            let foreign = format!("support@other.example{c}{t}");
+            assert!(spoof(&foreign, from), "{foreign:?}");
+        }
+    }
+    // A character outside ASCII does not end the domain, so a mixed-script
+    // domain still differs from the owner.
+    assert!(spoof("support@bank.example\u{202E}x.y", from));
+}
+
+/// Property (#982): the domain of an address in the display name is read
+/// as the owner check reads it, after the UTS 46 mapping. A punctuation
+/// character (classes Pd, Po, Ps, Pe, Pi and Pf) that maps to ASCII acts
+/// as that ASCII text. One that stays outside ASCII ends the domain, as
+/// ASCII punctuation does, unless IDNA2008 allows it in a label
+/// (`IDNA_PUNCTUATION`): then the domain is longer, with another owner.
+#[test]
+fn unicode_punctuation_ends_an_address_in_the_name() {
+    use idna::uts46::{AsciiDenyList, Hyphens, Uts46};
+    use iris_understand::{name_address_spoof as spoof, IDNA_PUNCTUATION};
+    use unicode_general_category::{get_general_category, GeneralCategory as G};
+    let from = "noreply@bank.example";
+    let map = |c: char| {
+        let s = c.to_string();
+        let (m, _) = Uts46::new().to_unicode(s.as_bytes(), AsciiDenyList::EMPTY, Hyphens::Allow);
+        m.into_owned()
+    };
+    let (mut ascii, mut cut, mut kept) = (0, 0, 0);
+    let punct = |c: char| {
+        matches!(
+            get_general_category(c),
+            G::DashPunctuation
+                | G::OtherPunctuation
+                | G::OpenPunctuation
+                | G::ClosePunctuation
+                | G::InitialPunctuation
+                | G::FinalPunctuation
+        )
+    };
+    for c in (0x80u32..0x3_0000).filter_map(char::from_u32) {
+        if !punct(c) {
+            continue;
+        }
+        let m = map(c);
+        // The first character after the mapping decides.
+        let ends = m.chars().next().is_some_and(|x| match x.is_ascii() {
+            true => !(x.is_ascii_alphanumeric() || "-.@".contains(x)),
+            false => punct(x) && !IDNA_PUNCTUATION.contains(&x),
+        });
+        for t in ["help", "evil.test", "日本.com", ""] {
+            let own = format!("support@bank.example{c}{t}");
+            let foreign = format!("support@other.example{c}{t}");
+            if m.is_ascii() {
+                // The same result as the mapped ASCII text.
+                let same = format!("support@bank.example{m}{t}");
+                assert_eq!(spoof(&own, from), spoof(&same, from), "{own:?} as {same:?}");
+                let same = format!("support@other.example{m}{t}");
+                assert_eq!(spoof(&foreign, from), spoof(&same, from), "{foreign:?}");
+                ascii += 1;
+            } else if !ends {
+                assert!(spoof(&own, from), "{own:?}");
+                assert!(spoof(&foreign, from), "{foreign:?}");
+                kept += 1;
+            } else {
+                assert!(!spoof(&own, from), "{own:?}");
+                assert!(spoof(&foreign, from), "{foreign:?}");
+                cut += 1;
+            }
+        }
+    }
+    assert!(ascii > 0 && cut > 1000 && kept > 0, "{ascii} {cut} {kept}");
+    assert!(!spoof("support@bank.example\u{2014}help", from));
+    // The cases of the review of PR #1066.
+    assert!(spoof(
+        "support@company.jp\u{30FB}日本.com",
+        "noreply@company.jp"
+    ));
+    assert!(spoof("support@bank.example\u{FF0D}evil.com", from));
+    assert!(spoof("support@bank.example\u{FE63}evil.com", from));
+    // An IDNA dot alone separates the labels of an address.
+    for dot in ['\u{3002}', '\u{FF0E}', '\u{FF61}'] {
+        let name = format!("ceo@bank{dot}example");
+        assert!(spoof(&name, "x@evil.example.net"), "{name:?}");
+        assert!(!spoof(&name, "x@bank.example"), "{name:?}");
+        let name = format!("support@bank.example{dot}evil.test");
+        assert!(spoof(&name, from), "{name:?}");
+    }
+    // These stay in the domain: the domain then differs from the owner.
+    for c in ['\u{202E}', '\u{200D}', '\u{0301}', '\u{FE0F}'] {
+        let w = format!("support@bank.example{c}x.y");
+        assert!(spoof(&w, from), "{w:?}");
+    }
+}
+
+/// Issue #1033: a header block that does not end in the read limit can hide
+/// the `From` field past the limit. For each size of the block around the
+/// limit, a received message gets its `From` read or the mark `spoof`,
+/// never neither. Your sent mail never gets the mark.
+#[test]
+fn a_from_past_the_header_limit_is_a_spoof() {
+    use iris_understand::head::HEAD_LIMIT;
+    let from = "From: \"ceo@bank.example\" <x@evil.example.net>\n";
+    for pad in [
+        0,
+        1_000,
+        HEAD_LIMIT - 200,
+        HEAD_LIMIT - 60,
+        HEAD_LIMIT - 1,
+        HEAD_LIMIT,
+        HEAD_LIMIT + 5_000,
+    ] {
+        for at_end in [false, true] {
+            // Folded lines of one long field: about 78 bytes each.
+            let mut raw = String::from("X-Pad: a\n");
+            while raw.len() < pad {
+                raw.push_str(" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+            }
+            let raw = if at_end {
+                format!("Subject: Hi\n{raw}{from}\nBody.\n")
+            } else {
+                format!("Subject: Hi\n{from}{raw}\nBody.\n")
+            };
+            let a = analysis(&raw, &[], &[], &[]);
+            assert!(
+                a.head.from_addr.is_some() || a.marks.contains(&Mark::Spoof),
+                "pad {pad} at_end {at_end}"
+            );
+            let bytes = crlf(&raw);
+            let header = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            if header > HEAD_LIMIT {
+                assert!(
+                    a.head.cut,
+                    "pad {pad}: the end of the header is past the limit"
+                );
+            }
+            if header + 4 < HEAD_LIMIT {
+                assert!(!a.head.cut, "pad {pad}: the header ends in the limit");
+            }
+            assert!(!run(&raw, &["SENT"], &[], &[]).contains(&Mark::Spoof));
+        }
+    }
+    // A folded line whose line break ends at the last byte of the limit:
+    // the piece after it is empty, but it is no end of the header.
+    let mut raw = String::from("Subject: Hi\nX-Pad: a\n");
+    let crlf_len = |s: &str| s.len() + s.matches('\n').count();
+    while HEAD_LIMIT - crlf_len(&raw) > 200 {
+        raw.push_str(&format!(" {}\n", "a".repeat(75)));
+    }
+    let rest = HEAD_LIMIT - crlf_len(&raw);
+    raw.push_str(&format!(" {}\n", "a".repeat(rest - 3)));
+    assert_eq!(crlf_len(&raw), HEAD_LIMIT);
+    raw.push_str(from);
+    raw.push_str("\nBody.\n");
+    let a = analysis(&raw, &[], &[], &[]);
+    assert!(a.head.cut, "the header goes on past the limit");
+    assert!(a.marks.contains(&Mark::Spoof));
+
+    // A message of exactly the limit, all header, with no From: Iris cannot
+    // know what a mail program shows, so it is a spoof.
+    let mut raw = String::from("Subject: Hi\nX-Pad: a\n");
+    while HEAD_LIMIT - crlf_len(&raw) > 200 {
+        raw.push_str(&format!(" {}\n", "a".repeat(75)));
+    }
+    let rest = HEAD_LIMIT - crlf_len(&raw);
+    raw.push_str(&format!(" {}", "a".repeat(rest - 1)));
+    assert_eq!(crlf_len(&raw), HEAD_LIMIT);
+    let a = analysis(&raw, &[], &[], &[]);
+    assert!(a.head.from_addr.is_none() && a.head.cut);
+    assert!(a.marks.contains(&Mark::Spoof));
+    // One byte less is a whole message with no From: no mark from this rule.
+    let short = &raw[..raw.len() - 1];
+    let a = analysis(short, &[], &[], &[]);
+    assert!(!a.head.cut);
+    assert!(!a.marks.contains(&Mark::Spoof));
+
+    // A long header that ends in the limit, with a From of its own owner,
+    // is no spoof.
+    let mut raw = String::from("Subject: Hi\nFrom: Ana <ana@example.org>\nX-Pad: a\n");
+    while raw.len() < HEAD_LIMIT - 10_000 {
+        raw.push_str(
+            " aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        );
+    }
+    raw.push_str("\nBody. ");
+    raw.push_str(&"b".repeat(HEAD_LIMIT));
+    let a = analysis(&raw, &[], &[], &[]);
+    assert!(!a.head.cut);
+    assert!(!a.marks.contains(&Mark::Spoof));
+}
+
+/// The link of an attached message counts with no sender proof: the DMARC
+/// pass of the outer sender for the shown domain does not prove the
+/// attached message (issue #372).
+#[test]
+fn a_deceptive_link_of_an_attached_message_is_a_mark() {
+    let mail = |target: &str| {
+        format!(
+            "Authentication-Results: mx.google.com; dkim=pass header.i=@shop.com; dmarc=pass (p=NONE) header.from=shop.com
+From: Shop <alerts@shop.com>
+Subject: Fwd: account
+Content-Type: multipart/mixed; boundary=o
+
+--o
+Content-Type: text/plain
+
+See below.
+--o
+Content-Type: message/rfc822
+
+From: Shop <alerts@shop.com>
+Subject: Your account
+Content-Type: text/html; charset=utf-8
+
+<p><a href=\"{target}\">https://www.shop.com/account</a></p>
+--o--
+"
+        )
+    };
+    assert_eq!(
+        run(&mail("https://click.mailer.example.org/r/1"), &[], &[], &[]),
+        vec![Mark::Link]
+    );
+    assert!(run(&mail("https://www.shop.com/account"), &[], &[], &[]).is_empty());
+}

@@ -8,7 +8,7 @@ use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 
-use crate::read::{doc_at, rfc3339, row_of, MATTER};
+use crate::read::{doc_at, ready_columns, ready_into, rfc3339, row_of, MATTER};
 use crate::{Error, Result};
 
 /// The forms of a member, with the ID kind of each (signals since
@@ -28,11 +28,12 @@ const MEMBER_FORMS: [(&str, Kind); 4] = [
 /// member of a declined matter (the full grouping that the person
 /// declined). A proposal that is not valid now is not read. A member that
 /// comes from hostile mail is not read (issue 112), and [`load`] leaves out
-/// a matter with too few members to show.
-fn select(filter: &str, order: &str) -> String {
+/// a matter with too few members to show. `ready` is "" or the columns of
+/// [`ready_columns`] with a leading comma, for the member documents.
+fn select(filter: &str, order: &str, ready: &str) -> String {
     format!(
         "SELECT m.id, m.title, m.status, m.model, m.prompt, m.created_at, m.updated_at,
-                m.decided_at, item.id, item.form, item.status, item.doc, {MATTER}, m.author
+                m.decided_at, item.id, item.form, item.status, item.doc, {MATTER}, m.author{ready}
            FROM matter m
            LEFT JOIN matter_item mi ON mi.matter_id = m.id AND CASE m.status
                 WHEN 'proposed' THEN mi.item_id IN
@@ -48,7 +49,8 @@ fn select(filter: &str, order: &str) -> String {
 }
 
 /// The matters of one statement of [`select`], in its order: each matter
-/// document with the documents of its members by form (when `members`).
+/// document with the documents of its members by form (when `members`;
+/// the statement then has the ready columns).
 fn load(
     c: &Connection,
     sql: &str,
@@ -105,7 +107,14 @@ fn load(
         doc["counts"][*f] = n.into();
         if members {
             if let Some(Value::Array(list)) = by_form.get_mut(*f) {
-                list.push(doc_at(r, 8)?);
+                let mut d = doc_at(r, 8)?;
+                // Only a confirmed matter shows its members as brief lines, with the
+                // pills of `ready` (issue #1015). A proposal and an addition ask for a
+                // decision about the grouping: their rows show no pill, so no `ready`.
+                if doc["status"] == "confirmed" {
+                    ready_into(r, &mut d)?;
+                }
+                list.push(d);
             }
         }
     }
@@ -127,6 +136,7 @@ pub fn matters(store: &Store) -> Result<Value> {
         "m.status IN ('proposed', 'confirmed')",
         "m.status = 'confirmed',
          CASE m.status WHEN 'proposed' THEN m.created_at ELSE m.updated_at END DESC",
+        "",
     );
     let all = store.read(|c| {
         let mut all = load(c, &sql, [], false)?;
@@ -151,7 +161,7 @@ pub fn matters(store: &Store) -> Result<Value> {
 /// for a matter with too few members that are not hostile mail.
 pub fn matter(store: &Store, id: &str) -> Result<Option<Value>> {
     let row = row_of(id, Kind::Matter)?;
-    Ok(store.read(|c| Ok(view(c, row)?))?)
+    Ok(store.read(|c| view(c, row))?)
 }
 
 /// The person confirms the proposal `id` with a title and the item IDs to
@@ -191,7 +201,7 @@ fn decided(
     r: std::result::Result<(), MatterError>,
 ) -> Result<Option<Value>> {
     match r {
-        Ok(()) => Ok(store.read(|c| Ok(view(c, row)?))?),
+        Ok(()) => Ok(store.read(|c| view(c, row))?),
         Err(MatterError::NotFound) => Ok(None),
         Err(e) => Err(error(e)),
     }
@@ -213,9 +223,11 @@ fn member(id: &str) -> Result<(i64, &'static str)> {
 }
 
 /// The matter document with its member documents, or `None`. One
-/// statement.
-fn view(c: &Connection, row: i64) -> rusqlite::Result<Option<Value>> {
-    let sql = select("m.id = ?1", "m.id");
+/// statement. Each member of a confirmed matter has `ready`, as a brief
+/// line (issue #1015).
+fn view(c: &Connection, row: i64) -> iris_store::Result<Option<Value>> {
+    let ready = format!(", {}", ready_columns(c)?);
+    let sql = select("m.id = ?1", "m.id", &ready);
     let Some((mut doc, items)) = load(c, &sql, [row], true)?.pop() else {
         return Ok(None);
     };
@@ -277,7 +289,7 @@ pub fn create_matter(store: &Store, title: &str, items: &[String], now_ms: i64) 
     let items = refs(items)?;
     let row = iris_matters::create(store, title, &items, now_ms).map_err(error)?;
     store
-        .read(|c| Ok(view(c, row)?))?
+        .read(|c| view(c, row))?
         .ok_or_else(|| Error::Conflict("the new matter is not visible".into()))
 }
 

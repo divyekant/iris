@@ -141,6 +141,9 @@ pub struct Text {
     pub links: Vec<iris_clean::Link>,
     /// `iris-clean` could not list each link.
     pub links_cut: bool,
+    /// The links of the attached messages (from `iris-clean`). They count
+    /// with no sender proof.
+    pub attached_links: Vec<iris_clean::Link>,
 }
 
 impl Text {
@@ -171,6 +174,7 @@ impl Text {
             invitation: c.invitation,
             links: c.links,
             links_cut: c.links_cut || html_after,
+            attached_links: c.attached_links,
         }
     }
 }
@@ -239,6 +243,11 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
         .iter()
         .filter_map(|w| {
             let (local, domain) = w.split_once('@')?;
+            // The domain as the owner check reads it: mapped by UTS 46,
+            // then cut where a domain cannot go on (#911, #982).
+            let domain = name_domain(domain);
+            let domain = domain.as_str();
+            let w = format!("{local}@{domain}");
             let ok = !local.is_empty()
                 && !domain.contains('@')
                 && domain.contains('.')
@@ -248,16 +257,89 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
         .any(|a| a != from.to_lowercase() && owner(&a) != from_owner)
 }
 
+/// The domain of an address in a display name, from the text after its
+/// `@` (#911, #982). Each character gets the UTS 46 mapping, the mapping
+/// of the owner check (the URL host parser), one character at a time, so
+/// that the context of the mail cannot change it: `－` (U+FF0D) is `-` and
+/// `。` (U+3002) is `.`. The domain ends at the first mapped character that
+/// a domain cannot hold: an ASCII character other than a letter, a digit,
+/// `-`, `.` and `@`, or a Unicode punctuation character that IDNA2008
+/// disallows in a label (so `bank.example—help` ends at the dash). All other
+/// characters stay, so a mixed-script, reversed or longer domain has
+/// another owner. A character that UTS 46 disallows maps to U+FFFD, which
+/// stays.
+fn name_domain(text: &str) -> String {
+    use idna::uts46::{AsciiDenyList, Hyphens, Uts46};
+    use unicode_general_category::{get_general_category, GeneralCategory as G};
+    let ends = |c: char| {
+        if c.is_ascii() {
+            return !(c.is_ascii_alphanumeric() || "-.@".contains(c));
+        }
+        !IDNA_PUNCTUATION.contains(&c)
+            && matches!(
+                get_general_category(c),
+                G::DashPunctuation
+                    | G::OtherPunctuation
+                    | G::OpenPunctuation
+                    | G::ClosePunctuation
+                    | G::InitialPunctuation
+                    | G::FinalPunctuation
+            )
+    };
+    // Memory: one String of the length of the mapped domain. An ASCII
+    // character allocates nothing more; a non-ASCII character allocates
+    // its short mapping for one step only.
+    let uts46 = Uts46::new();
+    let mut out = String::with_capacity(text.len());
+    let mut one = [0u8; 4];
+    'text: for c in text.chars() {
+        if c.is_ascii() {
+            let c = c.to_ascii_lowercase();
+            if ends(c) {
+                break;
+            }
+            out.push(c);
+            continue;
+        }
+        let one = c.encode_utf8(&mut one).as_bytes();
+        let mapped = uts46
+            .to_unicode(one, AsciiDenyList::EMPTY, Hyphens::Allow)
+            .0;
+        for m in mapped.chars() {
+            if ends(m) {
+                break 'text;
+            }
+            out.push(m);
+        }
+    }
+    out.truncate(out.trim_end_matches('.').len());
+    out
+}
+
+/// The punctuation that a domain label can hold after the UTS 46 mapping:
+/// the exceptions of RFC 5892 section 2.6. IDNA2008 disallows each other
+/// punctuation character in a label.
+pub const IDNA_PUNCTUATION: [char; 5] =
+    ['\u{00B7}', '\u{05F3}', '\u{05F4}', '\u{0F0B}', '\u{30FB}'];
+
 /// True when the links of a received message give the mark `link`
-/// ([`link::deceptive`]). The caller skips your sent mail.
-pub fn link_mark(head: &Head, links: &[iris_clean::Link], links_cut: bool) -> bool {
+/// ([`link::deceptive`]). The caller skips your sent mail. `attached` holds
+/// the links of the attached messages: their own sender is not proven, so
+/// no `From` domain and no DMARC result of the outer message counts for
+/// them (issue #372).
+pub fn link_mark(
+    head: &Head,
+    links: &[iris_clean::Link],
+    attached: &[iris_clean::Link],
+    links_cut: bool,
+) -> bool {
     let from_domain = head::domain(head.from_addr.as_deref().unwrap_or(""));
     link::deceptive(
         links,
         links_cut,
         from_domain,
         dmarc_of(head) == Some("pass"),
-    )
+    ) || link::deceptive(attached, false, "", false)
 }
 
 /// [`analyze`] for the first bytes of a message, with the flags of
@@ -301,16 +383,19 @@ pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) ->
             }
         }
     }
+    // A header block past the read limit can hide the `From` field that a
+    // mail program shows, so Iris cannot check the sender (issue #1033).
     if !sent
         && !marks.contains(&Mark::Spoof)
-        && head
-            .from_name
-            .as_deref()
-            .is_some_and(|n| name_address_spoof(n, from))
+        && (head.cut
+            || head
+                .from_name
+                .as_deref()
+                .is_some_and(|n| name_address_spoof(n, from)))
     {
         marks.push(Mark::Spoof);
     }
-    if !sent && link_mark(&head, &text.links, text.links_cut) {
+    if !sent && link_mark(&head, &text.links, &text.attached_links, text.links_cut) {
         marks.push(Mark::Link);
     }
     if cx.labels.iter().any(|l| l == "SPAM") {
@@ -468,6 +553,17 @@ pub trait Model {
     /// The model name for `derived.model`.
     fn name(&self) -> &str;
     fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error>;
+    /// [`Model::ask`], but the wait for the answer stops with
+    /// `iris_model::Error::Cancelled` when `cancel` gives true (issue #1126).
+    /// The default does not read `cancel`: the wait ends with the answer.
+    fn ask_cancel(
+        &self,
+        instruction: &str,
+        data: &str,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<iris_model::Reply, iris_model::Error> {
+        self.ask(instruction, data)
+    }
     /// An upper bound of the bytes of the request body for these texts: the
     /// input tokens of the worst case of a call (`batch`). The default
     /// allows JSON escapes (at most 6 bytes for each byte) and the framing.
@@ -491,6 +587,15 @@ impl Model for Named {
         self.client.ask(instruction, data)
     }
 
+    fn ask_cancel(
+        &self,
+        instruction: &str,
+        data: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<iris_model::Reply, iris_model::Error> {
+        self.client.ask_cancel(instruction, data, cancel)
+    }
+
     fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
         self.client.request_bytes(instruction, data)
     }
@@ -511,6 +616,18 @@ pub struct Decision {
     /// No rule matched and the retry state holds the model call: nothing
     /// to save.
     pub waiting: bool,
+    /// The rule of each draft that the fixed rules made, before a draft
+    /// that a pinned item already holds is left out (#946). Empty when no
+    /// fixed rule completed the message.
+    pub rules: Vec<&'static str>,
+    /// For each earlier message of the thread in the data of the last
+    /// model call, newest first, the bytes of its escaped text that the
+    /// data held (the budget can cut or leave out older ones). Empty with
+    /// no model call: the thread context then shaped nothing (issue 1049).
+    pub context_held: Vec<usize>,
+    /// The bytes of the budget for the known parties in the data of the
+    /// last model call, when the data left out a party.
+    pub parties_room: Option<usize>,
     pub calls: u32,
     pub usage: Usage,
 }
@@ -534,6 +651,13 @@ pub fn decide(
         return Ok(d);
     }
     if let Some(mut drafts) = rules::apply(a, cx) {
+        d.rules = drafts
+            .iter()
+            .filter_map(|x| match x.by {
+                By::Rule(r) => Some(r),
+                By::Model => None,
+            })
+            .collect();
         // A rule finds an existing item again by its form and its rule.
         drafts.retain(|x| {
             let By::Rule(rule) = x.by else { return true };
@@ -548,16 +672,44 @@ pub fn decide(
         d.waiting = true;
         return Ok(d);
     };
-    let data = prompt::data(a, cx);
+    let (mut data, held) = prompt::data_kept(a, cx, prompt::MAX_DATA);
+    d.context_held = held.thread;
+    d.parties_room = held.parties_room;
     // Known until a call gives no reliable usage (see `add`).
     d.usage.known = true;
+    // A refusal for size (HTTP 400 or 413) of large data gets one more call
+    // with the small budget (#101): a local model can have a small window.
+    // The small data is never larger, so this happens at most once. A
+    // priced model refuses the second call (`Budgeted`: the charge of the
+    // refusal is not known): the first refusal then stands.
+    let mut ask = |instruction: &str, d: &mut Decision| match model.ask(instruction, &data) {
+        Err(
+            first @ iris_model::Error::Rejected {
+                status: 400 | 413, ..
+            },
+        ) if data.len() > prompt::SMALL_DATA => {
+            let (small, held) = prompt::data_kept(a, cx, prompt::SMALL_DATA);
+            match model.ask(instruction, &small) {
+                Err(iris_model::Error::Budget(_)) => Err(first),
+                r => {
+                    d.calls += 1;
+                    d.usage.known = false;
+                    d.context_held = held.thread;
+                    d.parties_room = held.parties_room;
+                    data = small;
+                    r
+                }
+            }
+        }
+        r => r,
+    };
     for attempt in 0..2 {
         let instruction = if attempt == 0 {
             INSTRUCTION.to_string()
         } else {
             format!("{INSTRUCTION}{}", prompt::RETRY_NOTE)
         };
-        let reply = match model.ask(&instruction, &data) {
+        let reply = match ask(&instruction, &mut d) {
             Ok(r) => r,
             // HTTP 200 with a body of an unknown format: the answer is not valid.
             Err(iris_model::Error::BadAnswer(_)) => {

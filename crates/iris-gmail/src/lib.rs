@@ -64,6 +64,7 @@ mod cost {
     pub const DRAFTS_GET: u32 = 5;
     pub const DRAFTS_LIST: u32 = 5;
     pub const DRAFTS_SEND: u32 = 100;
+    pub const DRAFTS_UPDATE: u32 = 15;
 }
 
 /// The settings of a client.
@@ -267,6 +268,8 @@ enum Method<'a> {
     /// A POST that the client sends one time, also after a rate limit
     /// (spec `docs/specs/2026-11-16-send.md`, section 5.2).
     PostOnce(&'a [u8]),
+    /// A PUT that the client sends one time, as [`Method::PostOnce`].
+    PutOnce(&'a [u8]),
 }
 
 /// A Gmail API client. Share one client between threads.
@@ -429,6 +432,27 @@ impl Gmail {
             "drafts",
             cost::DRAFTS_CREATE,
             "draft create",
+        )
+    }
+
+    /// `users.drafts.update`: replaces the message of the draft `id` with
+    /// `raw`, in the thread `thread_id` for a reply. One request, as
+    /// [`Gmail::send_draft`]: the caller never makes the call again after an
+    /// unknown result (`docs/specs/2026-11-25-draft-change.md`, section 4).
+    pub fn update_draft(
+        &self,
+        token: &str,
+        id: &str,
+        raw: &[u8],
+        thread_id: Option<&str>,
+    ) -> Result<Draft> {
+        let body = draft_body(Some(id), raw, thread_id);
+        self.write(
+            token,
+            Method::PutOnce(body.as_bytes()),
+            &format!("drafts/{}", segment(id)),
+            cost::DRAFTS_UPDATE,
+            "draft update",
         )
     }
 
@@ -746,6 +770,17 @@ impl Gmail {
                     }
                     r.send(body)
                 }
+                Method::PutOnce(body) => {
+                    let mut r = self
+                        .agent
+                        .put(&url)
+                        .header("Authorization", &auth)
+                        .content_type("application/json");
+                    for (k, v) in query {
+                        r = r.query(*k, v);
+                    }
+                    r.send(body)
+                }
             };
             let response = sent.map_err(|e| Error::Transport(e.to_string()))?;
             let status = response.status().as_u16();
@@ -756,7 +791,7 @@ impl Gmail {
             let rate_limit = status == 429
                 || (status == 403
                     && (reason == "rateLimitExceeded" || reason == "userRateLimitExceeded"));
-            let once = matches!(method, Method::PostOnce(_));
+            let once = matches!(method, Method::PostOnce(_) | Method::PutOnce(_));
             if (rate_limit && !once) || (is_read && status >= 500) {
                 std::thread::sleep(jitter(wait));
                 wait = (wait * 2).min(self.config.backoff_max);
@@ -813,7 +848,7 @@ fn jitter(wait: Duration) -> Duration {
     wait + wait.mul_f64((r % 1000) as f64 / 2000.0)
 }
 
-/// The JSON body of `drafts.create` and `drafts.send`.
+/// The JSON body of `drafts.create`, `drafts.update` and `drafts.send`.
 fn draft_body(id: Option<&str>, raw: &[u8], thread_id: Option<&str>) -> String {
     let mut message = serde_json::json!({ "raw": encode_url(raw) });
     if let Some(t) = thread_id {
@@ -904,6 +939,18 @@ impl Provider for Gmail {
     }
     fn send_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Sent> {
         Gmail::send_draft(self, token, id, raw, thread)
+    }
+    fn update_draft(
+        &self,
+        token: &str,
+        id: &str,
+        raw: &[u8],
+        thread: Option<&str>,
+    ) -> Result<Draft> {
+        Gmail::update_draft(self, token, id, raw, thread)
+    }
+    fn updates_drafts(&self) -> bool {
+        true
     }
     fn sets_draft_message_id(&self) -> bool {
         true

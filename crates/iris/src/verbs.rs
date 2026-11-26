@@ -178,12 +178,19 @@ pub fn watch(store: &Store, command: &crate::WatchCommand) -> Output {
 /// `iris list` in host mode (issue #523): the items of `iris_api::items`,
 /// the same page as `GET /api/items`. A list is JSON Lines (specification
 /// 2, section 8.3). The text form names the command of the next page.
-pub fn list(store: &Store, filter: &iris_api::Filter, limit: u32, as_json: bool) -> Output {
-    let page = iris_api::items(store, filter, limit).map_err(|e| e.to_string())?;
+/// A refused filter is `iris_api::Error::Query`, so the caller can give it
+/// the usage code (issue #899).
+pub fn list(
+    store: &Store,
+    filter: &iris_api::Filter,
+    limit: u32,
+    as_json: bool,
+) -> Result<String, iris_api::Error> {
+    let page = iris_api::items(store, filter, limit)?;
     let mut out = String::new();
     for i in &page.items {
         if as_json {
-            out.push_str(&serde_json::to_string(i).map_err(|e| e.to_string())?);
+            out.push_str(&i.to_string());
             out.push('\n');
         } else {
             let s = |k: &str| field(i[k].as_str().unwrap_or("-"));

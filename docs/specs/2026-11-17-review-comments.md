@@ -73,8 +73,10 @@ runs in one write transaction, and does these checks in this order:
    #538).
 4. If the state is not `open`: refuse. A `draft` has a new revision that
    the person cannot see yet, a `withdrawn` changeset changes no more, and
-   a `closed` changeset is not on the review screen, which shows only
-   open changesets. The person writes the comment first, then denies.
+   a `closed` changeset takes no new comment. The review screen loads only
+   open changesets. A changeset that closes while the screen is open stays
+   there with its state (issue 184), and its comment box does not show. The
+   person writes the comment first, then denies.
 5. If `revision` is not the newest revision: refuse, "the changeset has a
    newer revision". The person reloads and sees the new revision.
 6. If the changeset has a job and the job is `done`: refuse, "the job is
@@ -250,8 +252,10 @@ Each other input gets 400 or 409, and writes nothing.
 
 ## Assumptions
 
-- The review screen shows only open changesets
-  (`crates/iris-api/src/review.rs`, the condition `OPEN`).
+- The review screen loads only open changesets
+  (`crates/iris-api/src/review.rs`, the condition `OPEN`). A changeset
+  that closes while the screen is open stays there with its state, and
+  takes no new comment (`Comments.svelte`, `c.state === "open"`).
 - Row IDs of one table follow the commit order: one write connection
   (`iris_store::Store::write`) and `AUTOINCREMENT`.
 - A build runs before each session (`iris_session::launch`, spec 3,

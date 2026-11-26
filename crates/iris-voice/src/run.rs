@@ -57,7 +57,7 @@ impl std::fmt::Display for Failure {
 }
 
 /// Writes and saves the draft of the reply to `thread`, with one model call
-/// through the budget. `now_ms` is the time of the start; `clock` gives the
+/// through the budget, and one more if the answer is not a valid draft. `now_ms` is the time of the start; `clock` gives the
 /// time of the end of the run (never before the start).
 pub fn draft(
     store: &Store,
@@ -69,8 +69,8 @@ pub fn draft(
 ) -> Result<Drafted, Failure> {
     // The lock of cost control: no `iris model set` and no budget approval
     // can change the model row or the budget during the call.
-    // shortcut: a running understanding run makes this call fail at once, wait for the lock if this bothers the owner.
-    let _lock = batch::lock(store).map_err(|e| match e {
+    // A running understanding run stops before its next message (#279).
+    let _lock = batch::lock_wait(store, batch::WAIT).map_err(|e| match e {
         batch::Error::Busy => Failure::Busy,
         e => Failure::Connect(e.to_string()),
     })?;

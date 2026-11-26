@@ -459,11 +459,13 @@ person or a sender can set. Two existing rules read such data as proof:
   Outlook account, only a message that Iris sent itself (the sent copy of
   a ledger send row, section 5) gets `SENT`, and only when the completion
   confirmed that its content is the approved content. R6-16: the engine
-  gives the provider a source of the `sent_message` of each sent draft of
-  the account (`iris_apply::sent_by_iris`). The provider reads the source
-  before each label read, so a send that another engine process completed
-  counts too (issue #719). A failed read of the source is an error, not
-  labels with no `SENT`. Migration 41 keeps the rule in the store, for
+  gives the provider a source that tells if one message ID is a confirmed
+  sent copy of the account (`iris_apply::is_sent_by_iris`, one indexed
+  lookup of the view `iris_sent_copy`, issue #804). The provider asks the
+  source at each label read of a message, so a send that another engine
+  process completed counts too (issue #719). A list of a label other than
+  `SENT` does not ask the source. A failed read of the source is an error,
+  not labels with no `SENT`. Migration 41 keeps the rule in the store, for
   each order of a sync and a completion: the view `iris_sent_copy` holds
   the confirmed copies (`sent_by_iris` reads it), a write that removes
   `SENT` from a confirmed copy of an Outlook account does nothing, and a

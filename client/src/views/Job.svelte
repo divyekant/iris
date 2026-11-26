@@ -5,14 +5,39 @@
   shows as text only.
 -->
 <script lang="ts">
-  import { get, type JobDetail } from "../api";
-  import { agent, clock, day, due, now, steps, waitMail } from "../jobs";
+  import { own, type JobDetail } from "../api";
+  import { agent, asker, clock, day, due, editJob, endJob, loadJob, now, sameDue, steps, waitMail, wakeJob } from "../jobs";
+  import AnswerForm from "./AnswerForm.svelte";
   import Grants from "./Grants.svelte";
+  import JobForm from "./JobForm.svelte";
+  import Scope from "./Scope.svelte";
 
   // `every`: the ms between two reads of a job whose session can still change (a prop for the tests).
   let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let detail = $state(first);
+  // Each request of this page about the job (a read, an edit, an end, an answer, a scope change) runs
+  // in one queue, one at a time, and a job that it gives shows before the next request starts. So the page
+  // shows the job of the last request, and a late answer never puts back an older job (issue 322).
+  let chain: Promise<unknown> = Promise.resolve();
+  let queued = 0;
+  function queue<T>(work: () => Promise<T>): Promise<T> {
+    queued++;
+    const step = chain.then(async () => {
+      try {
+        const out = await work();
+        if (isDetail(out)) detail = out;
+        return out;
+      } finally {
+        queued--;
+      }
+    });
+    chain = step.catch(() => {});
+    return step;
+  }
+  const isDetail = (x: unknown): x is JobDetail => typeof (x as JobDetail)?.job?.id === "string";
+  // Read the job again and show it. It throws if the read fails.
+  const reload = () => queue(() => loadJob(detail.job.id));
   // A failed read counts here, so the next read is planned again.
   let misses = $state(0);
   // While the job works, its session can start, fail or end at any time, also
@@ -20,17 +45,13 @@
   $effect(() => {
     void misses;
     if (detail.job.state !== "working") return;
-    const id = detail.job.id;
     let live = true;
     const timer = setTimeout(() => {
-      get<JobDetail>(`jobs/${encodeURIComponent(id)}`).then(
-        (d) => {
-          if (live) detail = d;
-        },
-        () => {
-          if (live) misses++;
-        },
-      );
+      // A request of the person runs: its answer shows the job, and the next poll reads after it.
+      if (queued > 0) return void misses++;
+      reload().catch(() => {
+        if (live) misses++;
+      });
     }, every);
     return () => {
       live = false;
@@ -45,19 +66,112 @@
   let idle = $derived(agent(detail));
   // The day shows above the first step of each day.
   const newDay = (i: number) => i === 0 || day(list[i - 1].at) !== day(list[i].at);
+
+  let editing = $state(false);
+  async function save(goal: string, dueAt: string | null): Promise<string> {
+    try {
+      await queue(() => editJob(job.id, goal, dueAt));
+      editing = false;
+      return "";
+    } catch (e) {
+      // The edit can have arrived (a lost answer, or a failed read after it): show the job as the engine has it.
+      const fresh = await reload().catch(() => null);
+      if (fresh) {
+        if (fresh.job.goal === goal && sameDue(fresh.job.due, dueAt)) {
+          editing = false;
+          return "";
+        }
+      }
+      return own(e) || (e as Error).message;
+    }
+  }
+
+  // End the job (issue 322): one question in place, as the remove of an account.
+  let ending = $state(false);
+  let endBusy = $state(false);
+  let endError = $state("");
+  async function end(kind: "complete" | "cancel") {
+    endBusy = true;
+    endError = "";
+    try {
+      await queue(() => endJob(job.id, kind));
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      // A refusal (4xx, not a conflict) wrote nothing. Any other failure can come after the end: no answer,
+      // a body that the client cannot read, a 5xx, or a 409 because the job ended already. Read the job again.
+      if (status !== undefined && status >= 400 && status < 500 && status !== 409) endError = own(e) || (e as Error).message;
+      else await reload().catch(() => {});
+    } finally {
+      endBusy = false;
+    }
+    if (detail.job.state === "done") ending = editing = false;
+    else endError ||= "Iris does not know if the job ended. Try again, or open the job again later.";
+  }
+
+
+  // End the wait early (issue 959). A wake by the person starts no agent: the Now card then gives the command.
+  let wakeBusy = $state(false);
+  let wakeError = $state("");
+  async function wake() {
+    wakeBusy = true;
+    wakeError = "";
+    // The job at the press: a request before it in the queue can show a newer wait, which this press must not end.
+    const seen = { id: job.id, events: job.events.length };
+    try {
+      await queue(() => wakeJob(seen.id, seen.events));
+    } catch (e) {
+      // A 409 wrote nothing: the job does not wait now, or waits for another thing. Any failure with
+      // no answer can come after the wake. Both read the job again and show it.
+      wakeError = own(e) || (e as Error).message;
+      await reload().catch(() => {});
+      if (detail.job.state !== "waiting" && (e as { status?: number }).status === undefined) wakeError = "";
+    } finally {
+      wakeBusy = false;
+    }
+  }
 </script>
 
 <p class="eyebrow">Job</p>
-<h1>{job.goal}</h1>
-<p class="limits">
-  {#if limit}<span class={limit.tone}>{limit.text}{#if limit.tone}<span class="dot" aria-hidden="true"></span>{/if}</span>{/if}
-  <span>Started {day(job.created)}</span>
-</p>
+{#if editing}
+  <JobForm goal={job.goal} due={job.due} action="Save" {save} oncancel={() => (editing = false)} />
+{:else}
+  <h1>{job.goal}</h1>
+  <p class="limits">
+    {#if limit}<span class={limit.tone}>{limit.text}{#if limit.tone}<span class="dot" aria-hidden="true"></span>{/if}</span>{/if}
+    <span>Started {day(job.created)}</span>
+    {#if job.state !== "done"}
+      <button class="edit" type="button" onclick={() => ((editing = true), (ending = false))}>Edit</button>
+      <button class="edit" type="button" onclick={() => ((ending = true), (endError = ""))} disabled={ending}>End</button>
+    {/if}
+  </p>
+{/if}
+
+{#if ending && job.state !== "done"}
+  <div class="ask" role="group" aria-label="End the job">
+    <p>End this job? The agent stops, and the copy of the mail for the agent goes. The steps stay on this page.</p>
+    <p class="actions">
+      <button type="button" class="primary" onclick={() => end("complete")} disabled={endBusy}>Mark as done</button>
+      <button type="button" class="quiet" onclick={() => end("cancel")} disabled={endBusy}>Cancel the job</button>
+      <button type="button" class="quiet" onclick={() => ((ending = false), (endError = ""))} disabled={endBusy}>Keep the job</button>
+    </p>
+    {#if endError}<p class="error" role="alert">{endError}</p>{/if}
+  </div>
+{/if}
 
 <section class="now {job.state}" class:idle aria-label="Now">
   {#if job.state === "needs_you"}
-    <p class="label">The agent asks you</p>
+    <p class="label">{asker(job)} asks you</p>
     <p class="question">{job.question}</p>
+    {#key job.updated}
+      <AnswerForm
+        {job}
+        {queue}
+        onanswered={() => {}}
+        onchanged={() => reload().catch(() => {})}
+        onunknown={() => reload().catch(() => {})}
+        lost="Iris does not know if your answer arrived. Open the job again to see."
+      />
+    {/key}
   {:else}
     <p class="said">{idle ? idle.said : now(job)}</p>
     {#if idle}
@@ -67,8 +181,16 @@
       {/if}
     {/if}
     {#if mail}<p class="mail"><a class="touch" href={mail.link}>{mail.subject}</a></p>{/if}
+    {#if job.state === "waiting"}
+      <p class="wake"><button class="edit" type="button" onclick={wake} disabled={wakeBusy}>Wake now</button></p>
+    {/if}
   {/if}
+  <!-- In each state: a refused wake can find the job asking a question now (issue 1132). -->
+  {#if wakeError}<p class="error" role="alert">{wakeError}</p>{/if}
 </section>
+
+<!-- The queue shows the job of each scope request, so `onchange` has nothing to do here. -->
+<Scope {detail} {queue} onchange={() => {}} />
 
 <Grants {job} />
 
@@ -109,6 +231,72 @@
     gap: var(--space-1) var(--space-4);
     margin: 0 0 var(--space-8);
     color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+  }
+  .edit {
+    font: inherit;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-primary);
+    cursor: pointer;
+  }
+  .edit:hover {
+    text-decoration: underline;
+  }
+  .edit:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .edit:disabled {
+    color: var(--color-text-faint);
+    cursor: default;
+    text-decoration: none;
+  }
+  .ask {
+    margin: calc(-1 * var(--space-4)) 0 var(--space-8);
+    padding: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-3);
+  }
+  .actions button {
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+  }
+  .actions button:hover:not(:disabled) {
+    border-color: var(--color-text-muted);
+  }
+  .actions .primary {
+    border-color: var(--color-primary);
+    background: var(--color-primary);
+    color: var(--color-on-primary);
+    font-weight: 500;
+  }
+  .actions button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .actions button:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .ask .error,
+  .now .error {
+    margin-top: var(--space-3);
+    border-left: 4px solid var(--color-error);
+    padding-left: var(--space-2);
     font-size: var(--font-size--1);
   }
   .dot {
@@ -165,6 +353,9 @@
   code {
     font-family: var(--font-family-mono);
     overflow-wrap: anywhere;
+  }
+  .wake {
+    margin-top: var(--space-2);
   }
   .mail {
     color: var(--color-text-muted);
@@ -283,6 +474,17 @@
     }
     .now {
       padding: var(--space-4);
+    }
+  }
+  @media (max-width: 600px), (any-pointer: coarse) {
+    .actions button,
+    .edit {
+      min-height: var(--size-touch);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .actions button {
+      transition: none;
     }
   }
 </style>

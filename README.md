@@ -118,11 +118,20 @@ time: the account keeps its copy of the mail.
 3. If the browser is on another machine than Iris, add `--paste`. Then copy
    the address of the browser after the sign-in, and paste it into the
    command.
-4. Start the engine:
+4. Start the engine. If `install.sh` started the background service, the
+   service runs the engine, and the account syncs with no more step. Run
+   this command in these cases:
+
+   - a source build;
+   - an install with `IRIS_NO_SERVICE=1`;
+   - an install that printed "the background service did not start".
 
    ```bash
    iris serve
    ```
+
+   Do not run `iris serve` while the service runs. The second engine stops
+   with the error "another engine runs on this data folder".
 
 The engine syncs the mailbox at once, then each 60 seconds. If Google refuses
 the stored sign-in, run `iris account add` again.
@@ -141,7 +150,8 @@ record `docs/decisions/2026-11-microsoft-sign-in.md` tells how to make one.
 2. Open the address that the command prints, and sign in to Microsoft. For
    a single-tenant registration, add `--tenant <tenant ID>`. For a browser
    on another machine, add `--paste`.
-3. Start the engine with `iris serve`.
+3. If the background service does not run the engine, start it with
+   `iris serve` (see "Connect a Gmail account", step 4).
 
 Microsoft gives a new refresh token at each refresh. Iris encrypts each new
 token in place of the old one. If Microsoft refuses the stored sign-in, run
@@ -159,12 +169,14 @@ The command asks for the password with no echo, signs in one time to check
 it, and saves it encrypted. Use an app password if your provider has them.
 `--port` (default 993) and `--user` (default the address) change the sign-in.
 To give a new password, run `iris account add-imap <address>` with no
-`--host`. Then start the engine with `iris serve`.
+`--host`. If the background service does not run the engine, start it
+with `iris serve` (see "Connect a Gmail account", step 4).
 
 An IMAP account has these limits: Iris can change the read state of a
-message, and add or remove a keyword that the server already lists. It cannot
-archive, move, trash, draft or send (issues #775 and #628), and it makes no new
-keyword (issue #652).
+message, and add or remove a keyword that the server already lists. Iris can
+archive, move to the inbox, trash and restore a message only if the server
+supports `MOVE` and `UIDPLUS`. Iris cannot draft or send, and makes no new
+keyword.
 
 ## Data folder and the web client
 
@@ -197,8 +209,10 @@ object, and JSON Lines for a list.
 ## Changesets from the terminal
 
 These commands talk to the running engine through the socket `iris.sock` in
-the data folder. They do not read the store. Start the engine with
-`iris serve` first. With no engine, they exit with code 4.
+the data folder. They do not read the store. They need a running engine.
+After `install.sh`, the background service runs the engine. For a source
+build, or an install with no service, run `iris serve` first (see "Connect a
+Gmail account", step 4). With no engine, they exit with code 4.
 
 | Command | Does |
 |---|---|
@@ -243,11 +257,16 @@ that adds an action gives the JSON `{"changeset": ..., "n": ...}`.
 
 The tools take the same path as the command, with the same author (`local`),
 the same policy and the same review. The read tools and the watch tools use
-the store directly. The other tools need the engine: start `iris serve`
-first. A failed tool call
+the store directly. The other tools need a running engine: the background
+service after `install.sh`, or `iris serve` (see "Connect a Gmail account",
+step 4). A failed tool call
 gives the error line and the exit code of the command. MCP has no tool to
 approve, to deny or to change the policy. Only the web client does these
 steps.
+
+In a job workspace (a folder with `.iris/` in it or above it), `iris mcp`
+uses the session socket of the job, as the command does. The tools then see
+only the mail of the job, and a session cannot send, skip, mute or dismiss.
 
 Add Iris to the MCP settings of the agent. For example:
 
@@ -304,6 +323,55 @@ max_minutes = 60
 
 Iris adds the fixed prompt as the last argument of `command`.
 
+CAUTION: The agent can read each file in a read path and send it to its
+hosts. List only folders of programs. Do not list a folder with keys,
+logins or mail.
+
+If the program of an agent needs files outside the system folders (for
+example a Node.js program in `~/.nvm`), list the folders in `read_paths`:
+
+```toml
+[agent.my-agent]
+command = ["/home/me/.nvm/versions/node/v22.11.0/bin/node", "/home/me/tools/agent.js"]
+read_paths = ["/home/me/.nvm/versions/node/v22.11.0", "/home/me/tools"]
+```
+
+- The session can read a read path, not write it. Each path is absolute, at
+  most 16 paths.
+- Iris refuses a run if a read path is the data folder, is in it or holds
+  it; is a home folder or holds one (`~/.nvm` is allowed, `~` and `/home`
+  are not); is, is in or holds a folder of system state (`/proc`, `/sys`,
+  `/dev`, `/run`, `/tmp` and others); or holds a socket, a FIFO, a device,
+  a mount point, or a file with more than one hard link on the device of
+  the data folder or of a home folder.
+- On Linux, a folder in a read path needs a kernel that permits an
+  overlay in a user namespace (Linux 5.11 or later). If the system limits
+  user namespaces to programs with an AppArmor profile (Ubuntu 24.04 and
+  later), give the `iris` program a profile with `userns`, as for `bwrap`.
+  Else a session with a read path folder does not start. A socket that a
+  program makes in the folder during a session is not reachable from the
+  session.
+- The built-in agents get no read paths. They sign in only with their
+  variables.
+
+CAUTION: The agent can send the files of the job to the program on the
+local port. Give only the port of a model server. Do not give the port of
+a service that runs commands or holds data (for example a Docker API or a
+database).
+
+If the agent uses a model server on this machine (for example a local
+model on port 11434), give its port in `allow_local`:
+
+```toml
+[agent.my-agent]
+command = ["/usr/local/bin/my-agent"]
+allow_local = 11434
+```
+
+- The session can connect to `127.0.0.1:<allow_local>` over TCP, and to
+  no other local port. The agent gets the port in `IRIS_LOCAL_PORT`.
+- One port from 1 to 65535 for each agent. The built-in agents get none.
+
 On Linux, the sandbox needs `bwrap`. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 gives the prerequisites of the sandbox on Linux and on macOS.
 
@@ -341,7 +409,8 @@ A watch tells you one time when a new mail matches a search text.
 | `iris watch remove <id>` | Removes the watch (`w-3`). |
 
 Test the text with `iris search` first. Only mail that arrives after the
-watch can match. `iris serve` checks each minute. Mail that you send, drafts
+watch can match. The engine checks each minute, and `iris mirror` and
+`iris understand` check before they end. Mail that you send, drafts
 and hostile mail never match.
 
 ## Understand the mail
@@ -374,7 +443,8 @@ same person first), and writes the reply in their style. The command saves
 the draft and prints it. It sends nothing. When you open the reply to the
 same thread in the web client (`#/write/t-42`), the reply box shows the saved
 draft. If a newer mail came into the thread, the draft does not show. The call uses the same budget as
-understanding. Iris makes no draft for a thread with hostile mail, or for a
+understanding. If the answer of the model is not a valid draft, Iris asks
+the model one more time. Iris makes no draft for a thread with hostile mail, or for a
 thread with a message that understanding did not read yet.
 
 ## Back up, export and move
@@ -399,7 +469,7 @@ iris export <empty-folder>
 | File | Content |
 |---|---|
 | `items.jsonl` | One item on each line, as the open model gives it |
-| `messages.jsonl` | One message on each line, as `iris show <id> --json` gives it, with `file`: the path of its raw message |
+| `messages.jsonl` | One message on each line, as `iris show <id> --json` gives it, with `file`: the path of its raw message, and `hostile_mail`: `true` for hostile mail (a hostile mark, the label SPAM or a hostile sender) |
 | `mail/<id>.eml` | The raw message. A mail program can open it. |
 
 The export holds no secret: no key, no sign-in and no model key.

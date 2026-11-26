@@ -445,6 +445,7 @@ fn marked<'a>(c: &'a Content, m: &Mark) -> &'a str {
     match m.field {
         Field::To(i) => &c.to[i][m.range.clone()],
         Field::Cc(i) => &c.cc[i][m.range.clone()],
+        Field::Bcc(i) => &c.bcc[i][m.range.clone()],
         Field::Subject => &c.subject[m.range.clone()],
         Field::Body => &c.body[m.range.clone()],
     }
@@ -494,6 +495,20 @@ fn each_mark_of_the_test_set_is_on_its_words() {
         names(&marks),
         s.read(|x| Ok(draft_flags(x, OWNER, &c).unwrap())).unwrap()
     );
+
+    // Send content spec, section 6: a new Bcc address is marked, and a
+    // draft with a file has no "no file attached" mark.
+    c.bcc = vec!["spy@new.example".into()];
+    c.attachments = vec![iris_compose::Attachment::of(
+        "q4.pdf",
+        "application/pdf",
+        b"x",
+    )];
+    let marks = s.read(|x| Ok(draft_marks(x, OWNER, &c).unwrap())).unwrap();
+    assert!(marks
+        .iter()
+        .any(|m| m.flag == "new_recipient" && m.field == Field::Bcc(0)));
+    assert!(!marks.iter().any(|m| m.flag == "attachment"), "{marks:?}");
 }
 
 /// The amounts and dates that a mark covers, from the neighbors of the sign
@@ -631,4 +646,52 @@ fn marks_agree_with_the_flags_for_random_text() {
             assert!(alone, "{m:?} {text:?}");
         }
     }
+}
+
+/// A copied run of words with combining marks gets the flag (issue #756):
+/// the words of the phrase are the tokens of the index, so a mark inside a
+/// word does not split it in two.
+#[test]
+fn a_copied_run_with_combining_marks_gives_untrusted_content() {
+    let dir = TempDir::new("combining");
+    let s = store(&dir);
+    let a = s
+        .read(|c| Ok(c.query_row("SELECT id FROM account", [], |r| r.get::<_, i64>(0))?))
+        .unwrap();
+    let theirs: String = (0..12)
+        .map(|k| format!("wo\u{301}rd{k} pa\u{308}y{k}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.put_messages(
+        a,
+        &[NewMessage {
+            provider_id: "g4".into(),
+            thread_provider_id: "gt4".into(),
+            internal_date: Some(1),
+            header: Header {
+                from_addr: Some("stranger@example.net".into()),
+                subject: Some("Marks".into()),
+                message_id_hdr: Some("<g4@x.org>".into()),
+                ..Default::default()
+            },
+            body: Some(Body {
+                subject: "Marks".into(),
+                sender: "stranger@example.net".into(),
+                text: theirs.clone(),
+            }),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let got = s
+        .read(|c| {
+            Ok(draft_flags(
+                c,
+                OWNER,
+                &content("priya@example.com", "Plan", &format!("Note: {theirs}")),
+            )
+            .unwrap())
+        })
+        .unwrap();
+    assert_eq!(got, vec!["untrusted_content"]);
 }

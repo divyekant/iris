@@ -120,7 +120,9 @@ and it is not the source (`item_source`) of a `signal` item. A signal can
 hold a security code, and the source text holds the same code, so no part
 of that message goes into a workspace.
 The rule of hostile mail is the rule of spec 1 section 6.7: a hostile mark,
-or a sender of the kind `hostile` on a message that you did not send. A
+the label `SPAM`, or a sender of the kind `hostile` on a message that you
+did not send. A message that waits for its link check is not clean either
+(`iris_store::may_be_hostile!()`). A
 message that is not understood yet is not clean, because the engine has not
 checked it for hostile marks. The build checks each message again on each
 build, so a message that became hostile mail after the grant leaves the
@@ -225,12 +227,13 @@ The forms `feed`, `signal` and
 The build reads nothing else from the mailbox.
 
 The thread file holds the clean body text of each message (`body.text`),
-not the text of its attachments. Understanding reads the attachment text
-from the raw message, and the store does not keep it, so a record from a
-PDF invoice can have facts that the workspace does not show. The agent
-sees the item file and the body. This is a known limit, with a GitHub
-issue: a later card adds the clean attachment text of the granted
-messages, with the same grant rules and a size limit.
+then the text of each attachment that has text (a plain-text file, an
+attached message or a simple PDF). The build reads the attachment text from
+the raw message file of each granted message, with `iris-clean`, as
+understanding does: at most the first 8 MiB of the file, and at most
+`iris_clean::ATTACHMENT_TEXT_LIMIT` (1,000,000) bytes of attachment text
+for each message. So a record from a PDF invoice shows the same facts in
+the workspace. A message with no raw file shows no attachment text.
 
 Each value in a file that the build writes comes from the granted
 messages, from the job and its scope, or is identity data. Identity data
@@ -286,7 +289,7 @@ these rules:
   `submit` and again just before the apply, with the same results as for
   a message. A feed, signal or conversation item is never a target in a
   session, so `correct` on one is refused.
-- `iris send` and `iris nudge` make send actions. The engine refuses
+- `iris send` makes send actions (`iris nudge` is not built, decision D8). The engine refuses
   these verbs in session mode, and refuses at `submit` each send action
   in a changeset of a session, on each path that makes one: only a person
   sends (decision D2). `iris draft` in session mode makes a reply in a
@@ -360,6 +363,12 @@ Subject: Q4 numbers
 ```mail
 <clean text>
 ```
+
+Attachment: invoice.pdf
+
+```mail
+<attachment text>
+```
 ````
 
 The heading is the subject of the first message in the file, or `(no
@@ -388,7 +397,9 @@ mailbox is one `iris` verb, and no change reaches the mailbox before
 `submit`; drafts go in `drafts/`; notes go in `notes.md`; the session has
 no mailbox credentials; the only network is the allowed hosts of the
 adapter (the model host for a built-in adapter), through the egress proxy
-of the engine (`docs/specs/2026-11-17-session-launcher.md`), and the agent
+of the engine (`docs/specs/2026-11-17-session-launcher.md`), and the local
+port of the adapter, if `agents.toml` gives one
+(`docs/specs/2026-11-25-agents-read-paths-local-port.md`), and the agent
 tool can send the files of this folder to these hosts before any
 `submit`. The key of the agent tool is not a
 mailbox credential.
@@ -563,7 +574,8 @@ Markdown and JSON with `serde_json`.
   session read verbs go through the session socket and see only the grant
   of the job, and `iris brief` is a host verb.
 - `docs/spec/01-mirror-store-forms.md` section 5.1: the data folder has
-  `workspaces/`, and the backup does not copy it (known limit).
+  `workspaces/`. The backup copies only `drafts/` of each job workspace
+  (issue #350), not the other files: the build makes them again.
 - No change to a screen, the API or the command.
 
 ## Assumptions

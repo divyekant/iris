@@ -218,6 +218,11 @@
           "description": "A field of a minor version is refused in a document that claims an older minor version (specification 4, rule 2.8). account: since 1.1.",
           "if": { "properties": { "model": { "const": "iris/1.0" } }, "required": ["model"] },
           "then": { "not": { "required": ["account"] } }
+        },
+        {
+          "description": "The ready value summary: since 1.4 (specification 4, rule 2.8).",
+          "if": { "properties": { "model": { "enum": ["iris/1.0", "iris/1.1", "iris/1.2", "iris/1.3"] } }, "required": ["model"] },
+          "then": { "properties": { "ready": { "not": { "contains": { "const": "summary" } } } } }
         }
       ],
       "type": "object",
@@ -307,13 +312,14 @@
           "pattern": "^a-[1-9][0-9]*$"
         },
         "ready": {
-          "description": "What Iris prepared for the item, on the items of the brief only (card R3-09). draft: the thread of the origin message has a reply draft that is not stale.",
+          "description": "What Iris prepared for the item, on the items that show as brief lines only: the brief, the gate, the item lists and the members of a confirmed matter (card R3-09, issue 1015). draft: the thread of the origin message has a reply draft that is not stale. summary (since iris/1.4): the item needs the person, and the thread of the origin message has a summary that is not stale.",
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "items": {
             "enum": [
-              "draft"
+              "draft",
+              "summary"
             ]
           }
         },

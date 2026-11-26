@@ -66,11 +66,17 @@ measures two values:
 | Value | Limit | How the test measures it |
 |---|---|---|
 | Start time | 1 second | From the program start to the first HTTP 200 answer |
-| Resident memory (RSS) | 50 MB | `ps -o rss= -p <pid>`, on macOS and Linux |
-| RSS after a first sync | 50 MB | The same, after `iris serve` syncs 2,000 synthetic messages from the fake Gmail |
+| Memory at the start | Linux: 20 MiB of anonymous memory. macOS: 50 MB RSS. | Linux: the line `Anonymous:` of `/proc/<pid>/smaps_rollup`. macOS: `ps -o rss= -p <pid>` |
+| Memory after a first sync | The same | The same, after `iris serve` syncs 2,000 synthetic messages from the fake Gmail |
+
+On Linux the test leaves out the pages of the program file: in a debug build
+they are about 33 MB, and they grow with the code, not with the work (issue
+#1011). The anonymous memory holds the heap, the stacks and the SQLite page
+cache (the store uses no mmap). The 50 MB RSS target of a release build with
+100,000 messages is a check of the real mailbox.
 
 If a value is over its limit, the test fails. The limits are the constants
-`MAX_START` and `MAX_RSS_KIB` at the top of the file. `cargo test` runs the
+`MAX_START`, `MAX_ANON_KIB` and `MAX_RSS_KIB` at the top of the file. `cargo test` runs the
 test, so local CI runs it too.
 
 To see the measured values, run:

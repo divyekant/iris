@@ -175,8 +175,9 @@ update lets you roll back.
 
 If you run Iris with another data folder (`--data <path>` or `IRIS_DATA`),
 give the same folder to each `iris` command below, for example
-`iris --data <path> backup <empty-folder>`. The background service uses
-only the default data folder (issue #243).
+`iris --data <path> backup <empty-folder>`. `iris service install` writes
+the data folder of the command into the service file, so the background
+service uses the same folder.
 
 Before each update, run `iris backup <empty-folder>`. Keep the backup until
 you no longer need to roll back. The backup holds your mail and the key, so
@@ -193,18 +194,25 @@ To roll back, do these steps:
    ```
 
    Replace `v2026.11.16.1` with the tag of the earlier release (see the
-   GitHub Releases page).
+   GitHub Releases page). If the first install set `IRIS_INSTALL_DIR`, set
+   the same `IRIS_INSTALL_DIR` in this command. Else the earlier release goes
+   to `~/.local/bin`, and `iris` can still run the bad release.
+
+   Run `iris --version`. Make sure that it prints the tag of the earlier
+   release. Do not do step 4 before this check: the bad release can migrate
+   the restored store again.
 
    CAUTION: The restore in step 3 removes each local change since the
    backup: decisions, ledger entries, items, drafts and job state. The mail
    syncs again from the mail provider, but these local changes do not come
    back. Keep the moved data folder until you no longer need it.
 
-   CAUTION: `iris backup` does not copy the `workspaces` folder (issue
-   #350). An agent draft that a job did not submit is only in the
-   `workspaces` folder of the moved data folder, also when the draft is older
-   than the backup. Before you start Iris in step 4, copy the `workspaces`
-   folder from the moved data folder into the restored data folder.
+   CAUTION: `iris backup` copies only the `drafts` folder of each job
+   workspace: each regular file, with no link and no subfolder. An agent
+   draft that a job wrote after the backup is only in the `workspaces`
+   folder of the moved data folder. Before you start Iris in step 4, copy
+   each such draft from the moved data folder into the restored data
+   folder.
 
 3. If the bad release migrated the store, move the data folder away and copy
    the backup in its place. Use the data folder of your installation: the
@@ -213,8 +221,7 @@ To roll back, do these steps:
    or `~/.local/share/iris` on Linux.
 4. Run `iris status` (with the same `--data` if you set one). Make sure that
    it shows your accounts.
-5. If you use the default data folder, run `iris service install`. Else
-   start `iris serve` with your data folder.
+5. Run `iris service install`, with the same `--data` if you set one.
 
 The service file points to `~/.local/bin/iris`, so the service runs the old
 program after a restart of the service. To restart it:

@@ -41,6 +41,8 @@ impl Isolation for Plain {
         _egress_port: Option<u16>,
         program: &Path,
         args: &[String],
+        _reads: &[std::path::PathBuf],
+        _local_port: Option<u16>,
     ) -> Command {
         Command {
             program: program.to_path_buf(),
@@ -219,10 +221,13 @@ fn the_session_socket_answers_status_and_refuses_other_verbs() {
     assert_eq!(v["result"]["job"], format!("j-{}", f.job), "{v}");
     assert_eq!(v["result"]["goal"], "Get the contract.", "{v}");
     assert_eq!(v["result"]["state"], "working", "{v}");
-    for verb in ["job.run", "brief", "drafts", "status.all"] {
+    for verb in ["job.run", "brief", "status.all"] {
         let v = ask(&f, verb, serde_json::json!({})).unwrap();
         assert_eq!(v["code"], 3, "{verb}: {v}");
     }
+    // `drafts` gives only the draft of the job (issue #440): none yet.
+    let v = ask(&f, "drafts", serde_json::json!({})).unwrap();
+    assert_eq!(v["result"]["changesets"], serde_json::json!([]), "{v}");
     // The read verbs of the session (R4-04f) answer on the socket.
     let v = ask(&f, "list", serde_json::json!({})).unwrap();
     assert_eq!(v["ok"], true, "{v}");
@@ -1007,26 +1012,42 @@ fn a_slow_isolation_stop_does_not_hold_a_stop_of_another_job() {
 }
 
 fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
-    // The agent writes its proxy address, and ignores the TERM of the
-    // helper: it lives about 5 s after the end.
-    let f = fixture_with(
-        "egressend",
-        "trap '' TERM; echo $HTTPS_PROXY > proxy-url; sleep 30",
-        "allow_hosts = [\"example.com\"]\n",
-    );
+    // The agent ignores the TERM of the helper: it lives about 5 s after
+    // the end. For each file `knock-<n>` in the workspace, it hands one
+    // connection to the proxy on the socket pair of the session (the
+    // descriptor of the helper, which this plain isolation passes on), as
+    // the Linux relay does, and sends a head that is not `CONNECT`.
+    let f = fixture_with("egressend", "", "allow_hosts = [\"example.com\"]\n");
+    let knocker = f.root.join("knock.py");
+    fs::write(
+        &knocker,
+        "import os, socket, time\n\
+         pair = socket.socket(fileno=3)\n\
+         n = 0\n\
+         while True:\n\
+         \x20   if os.path.exists(f'knock-{n}'):\n\
+         \x20       l = socket.create_server(('127.0.0.1', 0))\n\
+         \x20       c = socket.create_connection(l.getsockname())\n\
+         \x20       s, _ = l.accept()\n\
+         \x20       socket.send_fds(pair, [b'x'], [s.fileno()])\n\
+         \x20       s.close()\n\
+         \x20       c.sendall(b'GET / HTTP/1.1\\r\\n\\r\\n')\n\
+         \x20       n += 1\n\
+         \x20   time.sleep(0.05)\n",
+    )
+    .unwrap();
+    fs::write(
+        f.store.dir().join("agents.toml"),
+        format!(
+            "[agent.script]\ncommand = [\"/bin/sh\", \"-c\", \"trap '' TERM; exec python3 {}\"]\n\
+             allow_hosts = [\"example.com\"]\n",
+            knocker.display()
+        ),
+    )
+    .unwrap();
     let s = sessions(&f);
     let id = s.run(f.job, "script").unwrap();
     until(&s, &f, id, |r| r.started_ms.is_some());
-    let url = workspace(&f).join("proxy-url");
-    let end = Instant::now() + Duration::from_secs(20);
-    while !fs::read_to_string(&url).is_ok_and(|t| t.ends_with('\n')) {
-        assert!(Instant::now() < end, "no proxy address");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let text = fs::read_to_string(&url).unwrap();
-    let port: u16 = text.trim().rsplit(':').next().unwrap().parse().unwrap();
-    // The test connects from 127.0.0.1, not from the peer address of the
-    // session: the proxy refuses it, and its log says why.
     let log = f.store.dir().join(format!("sessions/se-{id}.egress.log"));
     let lines = |word: &str| {
         fs::read_to_string(&log)
@@ -1034,20 +1055,22 @@ fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
             .matches(word)
             .count()
     };
-    let knock = |word: &str| {
+    let mut n = 0;
+    let mut knock = |word: &str| {
         let before = lines(word);
-        let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the port is bound");
-        let _ = std::io::Read::read(&mut c, &mut [0u8; 64]);
-        let end = Instant::now() + Duration::from_secs(4);
+        fs::write(workspace(&f).join(format!("knock-{n}")), "").unwrap();
+        n += 1;
+        let end = Instant::now() + Duration::from_secs(10);
         while lines(word) == before {
             assert!(Instant::now() < end, "no `{word}` line in the egress log");
             std::thread::sleep(Duration::from_millis(50));
         }
     };
-    knock("not_session");
+    knock("not_connect");
     iris_job::end(&f.store, id, EndReason::Stop, None, now()).unwrap();
     s.turn(now());
-    // The proxy is closed, and its port stays bound until the reap.
+    // The proxy is closed, and its end of the pair stays open until the
+    // reap.
     knock("reason=stopped");
     assert_eq!(
         session(&f.store, id).unwrap().reaped_ms,

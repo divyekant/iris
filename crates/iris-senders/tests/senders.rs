@@ -1159,39 +1159,89 @@ fn synthetic_mailbox_meets_the_sender_targets() {
     assert!(failed.is_empty(), "{failed:?}\n{text}");
 }
 
-/// #111: when a name becomes the name of a known person, each other
-/// sender with mail under that name goes to `rerun`, so that the spoof
-/// check reads that mail again. Also when the name goes away.
+/// The `From` addresses of the mail in the queue of the fixed rules
+/// (`fixed_due`, decision D31), sorted. Empties the queue.
+fn due(c: &Case) -> Vec<String> {
+    c.store
+        .write(|tx| {
+            let v = tx
+                .prepare(
+                    "SELECT DISTINCT h.from_addr FROM fixed_due f
+                       JOIN header h ON h.message_id = f.message_id ORDER BY 1",
+                )?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            tx.execute("DELETE FROM fixed_due", [])?;
+            Ok(v)
+        })
+        .unwrap()
+}
+
+/// #111, decision D31: when a name becomes the name of a known person, the
+/// mail under that name goes to the queue of the fixed rules, so that the
+/// spoof check reads it again with no model call. Also when the name goes
+/// away. No model rerun.
 #[test]
-fn a_new_known_name_reruns_the_mail_of_other_senders_with_that_name() {
+fn a_new_known_name_queues_the_mail_under_that_name() {
     let mut c = Case::new("name-twins");
     let forged = "From: Ana Lee <ana@evil.example.net>\r\nTo: owner@example.com";
     c.put("t1", &["INBOX"], forged);
-    let evil = sender_id(&c, "ana@evil.example.net");
+    due(&c);
     // You write to the real Ana: her name is now a known name.
     let d = c.put(
         "t2",
         &["SENT"],
         &format!("From: {OWNER}\r\nTo: Ana Lee <ana@example.org>"),
     );
-    assert_eq!(d.rerun, [evil]);
+    assert!(d.rerun.is_empty(), "no model rerun");
+    assert_eq!(due(&c), ["ana@evil.example.net"]);
     // The same name again changes nothing.
-    let d = c.put(
+    c.put(
         "t3",
         &["SENT"],
         &format!("From: {OWNER}\r\nTo: ANA LEE <ana@example.org>"),
     );
-    assert!(d.rerun.is_empty());
+    assert!(due(&c).is_empty());
     // A new name: the mail under the old name and the new name goes again.
     let bo = "From: Ana Bo <x@other.example.net>\r\nTo: owner@example.com";
     c.put("t4", &["INBOX"], bo);
-    let x = sender_id(&c, "x@other.example.net");
+    due(&c);
     let d = c.put(
         "t5",
         &["SENT"],
         &format!("From: {OWNER}\r\nTo: Ana Bo <ana@example.org>"),
     );
-    assert_eq!(d.rerun, [evil, x]);
+    assert!(d.rerun.is_empty());
+    assert_eq!(due(&c), ["ana@evil.example.net", "x@other.example.net"]);
+}
+
+/// #111, decision D31: a sender that becomes or stops being a service
+/// queues its mail, so the code-signal rule reads it again.
+#[test]
+fn a_service_change_queues_the_mail_of_the_sender() {
+    let mut c = Case::new("service-due");
+    c.put(
+        "t1",
+        &["INBOX"],
+        "From: Bank <no-reply@bank.example>\r\nTo: owner@example.com",
+    );
+    due(&c);
+    let set = |kind: &str| {
+        c.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE sender SET kind = ?1 WHERE address = 'no-reply@bank.example'",
+                    [kind],
+                )?)
+            })
+            .unwrap();
+    };
+    set("service");
+    assert_eq!(due(&c), ["no-reply@bank.example"]);
+    set("service");
+    assert!(due(&c).is_empty(), "no change, no queue");
+    set("stranger");
+    assert_eq!(due(&c), ["no-reply@bank.example"]);
 }
 
 fn sender_id(c: &Case, addr: &str) -> i64 {
@@ -1207,10 +1257,10 @@ fn sender_id(c: &Case, addr: &str) -> i64 {
 }
 
 /// #111: a second Ana Lee has a spoof result while the first is known.
-/// When you write to the second one, its own mail goes again too, so the
-/// mark can clear. A sender with no other person of its name does not.
+/// When you write to the second one, its own mail goes to the queue too,
+/// so the mark can clear.
 #[test]
-fn a_new_person_with_a_known_name_reruns_its_own_mail() {
+fn a_new_person_with_a_known_name_queues_its_own_mail() {
     let mut c = Case::new("own-twin");
     c.put(
         "t1",
@@ -1227,19 +1277,20 @@ fn a_new_person_with_a_known_name_reruns_its_own_mail() {
         &["INBOX"],
         "From: Bo Ray <bo@example.net>\r\nTo: owner@example.com",
     );
-    let work = sender_id(&c, "ana@work.example.net");
+    due(&c);
     let d = c.put(
         "t4",
         &["SENT"],
         &format!("From: {OWNER}\r\nTo: Ana Lee <ana@work.example.net>, Bo Ray <bo@example.net>"),
     );
-    assert_eq!(d.rerun, [work]);
+    assert!(d.rerun.is_empty());
+    assert_eq!(due(&c), ["ana@work.example.net", "bo@example.net"]);
 }
 
 /// #111: a sender that the person accepts at the gate makes its name a
-/// known name, so the mail of other senders with that name goes again.
+/// known name, so the mail under that name goes to the queue.
 #[test]
-fn an_accept_at_the_gate_reruns_the_mail_under_the_name() {
+fn an_accept_at_the_gate_queues_the_mail_under_the_name() {
     let mut c = Case::new("gate-twins");
     c.put(
         "t1",
@@ -1251,11 +1302,10 @@ fn an_accept_at_the_gate_reruns_the_mail_under_the_name() {
         &["INBOX"],
         "From: Cy Ray <cy@example.org>\r\nTo: owner@example.com",
     );
-    let (evil, cy) = (
-        sender_id(&c, "cy@evil.example.net"),
-        sender_id(&c, "cy@example.org"),
-    );
-    assert_eq!(gate_of(&c, accept, cy), Gate::Done { rerun: vec![evil] });
+    let cy = sender_id(&c, "cy@example.org");
+    due(&c);
+    assert_eq!(gate_of(&c, accept, cy), Gate::Done { rerun: vec![] });
+    assert_eq!(due(&c), ["cy@evil.example.net", "cy@example.org"]);
 }
 
 // The stranger gate (spec 1 section 6.7, card R5-03).
@@ -1517,4 +1567,71 @@ fn reopen_keeps_a_kind_that_a_person_set_outside_the_gate() {
     gate_of(&c, gate::reopen, ana);
     assert_eq!(declined_at(&c, "ana@example.org"), None);
     assert_eq!(c.row("ana@example.org").3.as_deref(), Some("person"));
+}
+
+#[test]
+fn a_trusted_near_copy_is_a_person_until_reopen() {
+    // Issue #49: the person trusts a sender that the near-copy rule marks
+    // hostile. Reopen gives the row back to the engine.
+    let mut c = Case::new("trust");
+    for t in ["t1", "t2", "t3"] {
+        c.put(t, &[], &service_mail());
+    }
+    let look = c
+        .put(
+            "t4",
+            &[],
+            "From: <alerts@shop-secure.example.net>\r\nTo: owner@example.com",
+        )
+        .sender
+        .unwrap();
+    let a = "alerts@shop-secure.example.net";
+    assert_eq!(c.row(a).1.as_deref(), Some("hostile"));
+
+    assert_eq!(
+        gate_of(&c, gate::trust, look),
+        Gate::Done { rerun: vec![look] }
+    );
+    let (_, kind, basis, by) = c.row(a);
+    assert_eq!(
+        (kind.as_deref(), basis.as_deref(), by.as_deref()),
+        (Some("person"), Some(gate::TRUSTED), Some("person"))
+    );
+    // A new message and a refresh keep the trust. A second trust changes nothing.
+    assert_eq!(c.put("t4", &[], &format!("From: <{a}>")).kind, Kind::Person);
+    c.store.write(|tx| Ok(refresh(tx, 10)?)).unwrap();
+    assert_eq!(c.row(a).1.as_deref(), Some("person"));
+    assert_eq!(gate_of(&c, gate::trust, look), Gate::Done { rerun: vec![] });
+
+    // Reopen: the engine marks it hostile again and reports the change.
+    let Gate::Done { rerun } = gate_of(&c, gate::reopen, look) else {
+        panic!("reopen")
+    };
+    assert!(rerun.contains(&look), "{rerun:?}");
+    assert_eq!(c.row(a).1.as_deref(), Some("hostile"));
+
+    // Only an engine `hostile` row can be trusted.
+    let shop = c
+        .store
+        .read(|r| {
+            Ok(r.query_row(
+                "SELECT id FROM sender WHERE address LIKE '%@shop.example.com'",
+                [],
+                |x| x.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        gate_of(&c, gate::trust, shop),
+        Gate::NotHostile(Some(Kind::Service))
+    );
+    set(
+        &c,
+        "UPDATE sender SET decided_by = 'person' WHERE address = 'alerts@shop-secure.example.net'",
+    );
+    assert_eq!(
+        gate_of(&c, gate::trust, look),
+        Gate::NotHostile(Some(Kind::Hostile))
+    );
+    assert_eq!(gate_of(&c, gate::trust, 999), Gate::NoSender);
 }

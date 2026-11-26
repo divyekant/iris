@@ -668,3 +668,576 @@ const HOSTILE: [(&str, &str); 3] = [
         "UPDATE sender SET kind = 'person' WHERE address = 'bad@example.com'",
     ),
 ];
+
+/// A `draft` action of account 1 with `content` as its arguments, its
+/// draft row, and a `send` action of that draft, each with an applied
+/// ledger entry as `iris-apply` writes it: the create keeps the content in
+/// its `post` (only with `post`), and the send keeps only the hash in its
+/// ops. Gives the ledger row IDs (draft, send) and the draft row ID.
+fn mailed(s: &Store, content: &iris_compose::Content, post: bool) -> (i64, i64, i64) {
+    let c = content.clone().check().unwrap();
+    let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+    let hash = iris_compose::hash(&c, None);
+    s.write(|tx| {
+        tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)", [])?;
+        let cs = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', ?2)",
+            params![cs, serde_json::to_string(&c).unwrap()],
+        )?;
+        let draft_action = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                               action_id, created_at, updated_at)
+             VALUES (1, 'r' || ?3, 'iris.' || ?3 || '@example.com', '{}', ?1, ?2, ?3, 0, 0)",
+            params![hash, raw, draft_action],
+        )?;
+        let draft = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 2, 'send', ?2, '{}')",
+            params![cs, format!("{{\"drafts\":[\"d-{draft}\"]}}")],
+        )?;
+        let send_action = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO action_draft(action_id, draft_id) VALUES (?1, ?2)",
+            [send_action, draft],
+        )?;
+        for a in [draft_action, send_action] {
+            let (_, h) = iris_changeset::hash(tx, a).unwrap();
+            tx.execute("UPDATE changeset_action SET hash = ?2 WHERE id = ?1", params![a, h])?;
+        }
+        tx.execute(
+            "UPDATE changeset SET why = 'Write to Dana.', submitted_at = ?2 WHERE id = ?1",
+            params![cs, NOW],
+        )?;
+        let create = json!({"call": "drafts.create", "message_id": "iris.1@example.com",
+                            "date": 1, "hash": hash, "thread": null});
+        let stored = post.then(|| json!({"content": c, "reply": null}).to_string());
+        let send = json!({"call": "drafts.send", "draft": draft, "provider_id": "r1",
+                          "message_id": "iris.1@example.com", "hash": hash});
+        let mut ids = vec![];
+        for (a, ops, post) in [(draft_action, create, stored), (send_action, send, None)] {
+            tx.execute(
+                "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1
+                 WHERE id = ?1",
+                [a],
+            )?;
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at)
+                 VALUES (?1, 1, ?2, ?3, 'writing', 'none', ?4)",
+                params![a, ops.to_string(), post, NOW],
+            )?;
+            let l = tx.last_insert_rowid();
+            tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [l])?;
+            ids.push(l);
+        }
+        Ok((ids[0], ids[1], draft))
+    })
+    .unwrap()
+}
+
+/// Write `content` into the draft row `draft`, as a refresh of a draft that
+/// the person changed at Gmail does (`changed_at_gmail`): new bytes, and
+/// with `rehash` also the new hash.
+fn rewrite(s: &Store, draft: i64, content: &iris_compose::Content, rehash: bool) {
+    let c = content.clone().check().unwrap();
+    let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+    let hash = iris_compose::hash(&c, None);
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE draft SET raw = ?2 WHERE id = ?1",
+            params![draft, raw],
+        )?;
+        if rehash {
+            tx.execute(
+                "UPDATE draft SET hash = ?2 WHERE id = ?1",
+                params![draft, hash],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A send and a draft entry name the subject and the recipients of their
+/// mail as it was at that entry (issue 490). The subject is bounded, the
+/// first recipient comes from to, and the count covers to, cc and bcc. A
+/// later change of the draft, with or without a new hash, never changes
+/// the words of an older entry. Each other entry has no mail.
+#[tokio::test]
+async fn a_send_names_its_subject_and_recipients() {
+    let dir = temp("mail");
+    let s = store(&dir);
+    let archive = archived(&s, "person", &[1], PERSON);
+    let long = "A".repeat(250);
+    let mail = |to: &str, subject: &str| iris_compose::Content {
+        to: vec![to.into()],
+        subject: subject.into(),
+        body: "Hello".into(),
+        ..Default::default()
+    };
+    let (draft, send, row) = mailed(
+        &s,
+        &iris_compose::Content {
+            cc: vec!["lee@example.com".into()],
+            bcc: vec!["sam@example.com".into()],
+            ..mail("dana@example.com", &long)
+        },
+        true,
+    );
+    // A send whose draft Iris did not create keeps no post: only its draft row.
+    let (_, kept, kept_row) = mailed(&s, &mail("priya@example.com", "Q4 plan"), false);
+    let (_, lost, lost_row) = mailed(&s, &mail("kim@example.com", "Lunch"), false);
+    let entries = |p: &Value| p["entries"].as_array().unwrap().clone();
+    let by = |p: &Value, l: i64| {
+        entries(p)
+            .into_iter()
+            .find(|e| e["id"] == format!("l-{l}"))
+            .unwrap()["mail"]
+            .clone()
+    };
+    let want = json!({ "subject": "A".repeat(200), "to": "dana@example.com", "recipients": 3 });
+    let q4 = json!({ "subject": "Q4 plan", "to": "priya@example.com", "recipients": 1 });
+    let lunch = json!({ "subject": "Lunch", "to": "kim@example.com", "recipients": 1 });
+    let (code, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(by(&p, draft), want);
+    assert_eq!(by(&p, send), want);
+    assert_eq!(by(&p, kept), q4);
+    assert_eq!(by(&p, lost), lunch);
+    assert_eq!(by(&p, archive), Value::Null);
+
+    // The person changes each draft at Gmail after the send: new bytes and a
+    // new hash, or new bytes only. The entries keep the mail that they wrote
+    // or sent, or name none. They never name the later mail.
+    rewrite(&s, row, &mail("eve@example.com", "Later"), true);
+    rewrite(&s, kept_row, &mail("eve@example.com", "Later"), true);
+    rewrite(&s, lost_row, &mail("eve@example.com", "Later"), false);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(by(&p, draft), want);
+    assert_eq!(by(&p, send), want);
+    assert_eq!(by(&p, kept), Value::Null);
+    assert_eq!(by(&p, lost), Value::Null);
+    for e in entries(&p) {
+        assert_ne!(e["mail"]["subject"], "Later", "{e}");
+    }
+}
+
+/// A draft entry says if it changed a draft that exists (draft change
+/// spec, section 6): a create has `change` false, a `drafts.update` entry
+/// has `change` true and names the mail of its `post`. Each other entry
+/// has `change` false.
+#[tokio::test]
+async fn a_change_of_a_draft_is_marked() {
+    let dir = temp("change");
+    let s = store(&dir);
+    let archive = archived(&s, "person", &[1], PERSON);
+    let first = iris_compose::Content {
+        to: vec!["dana@example.com".into()],
+        subject: "Q4 plan".into(),
+        body: "Hello".into(),
+        ..Default::default()
+    };
+    let (create, _, draft) = mailed(&s, &first, true);
+    let changed = iris_compose::Content {
+        body: "Hello again".into(),
+        ..first.clone()
+    }
+    .check()
+    .unwrap();
+    let change = s
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+                [],
+            )?;
+            let cs = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (?1, 1, 1, 'draft', ?2, ?3)",
+                params![
+                    cs,
+                    format!("{{\"drafts\":[\"d-{draft}\"]}}"),
+                    serde_json::to_string(&changed).unwrap()
+                ],
+            )?;
+            let a = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO action_draft(action_id, draft_id) VALUES (?1, ?2)",
+                [a, draft],
+            )?;
+            let (_, h) = iris_changeset::hash(tx, a).unwrap();
+            tx.execute("UPDATE changeset_action SET hash = ?2 WHERE id = ?1", params![a, h])?;
+            tx.execute(
+                "UPDATE changeset SET why = 'Change.', submitted_at = ?2 WHERE id = ?1",
+                params![cs, NOW],
+            )?;
+            tx.execute(
+                "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1
+                 WHERE id = ?1",
+                [a],
+            )?;
+            let ops = json!({"call": "drafts.update", "draft": draft, "provider_id": "r1",
+                             "message_id": "iris.1@example.com", "date": 2, "pre_hash": "a",
+                             "hash": "b", "thread": null});
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at)
+                 VALUES (?1, 1, ?2, ?3, 'writing', 'none', ?4)",
+                params![
+                    a,
+                    ops.to_string(),
+                    json!({"content": changed, "reply": null}).to_string(),
+                    NOW
+                ],
+            )?;
+            let l = tx.last_insert_rowid();
+            tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [l])?;
+            Ok(l)
+        })
+        .unwrap();
+    let (code, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(code, StatusCode::OK);
+    let by = |l: i64| {
+        p["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{l}"))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by(change)["change"], true);
+    assert_eq!(by(change)["mail"]["subject"], "Q4 plan");
+    assert_eq!(by(create)["change"], false);
+    assert_eq!(by(archive)["change"], false);
+}
+
+/// A failed `archive` entry: the recovery cannot confirm `unknown`, and
+/// Gmail confirmed `done`. Gives the ledger row ID.
+fn unconfirmed(s: &Store, unknown: &[i64], done: &[i64]) -> i64 {
+    unconfirmed_in(s, unknown, done, &[], true)
+}
+
+/// As `unconfirmed`, with the messages `pending` that the recovery did not
+/// check yet. With `end` false, the entry stays in `writing`: its recovery
+/// did not end.
+fn unconfirmed_in(s: &Store, unknown: &[i64], done: &[i64], pending: &[i64], end: bool) -> i64 {
+    let all: Vec<i64> = unknown.iter().chain(done).chain(pending).copied().collect();
+    s.write(|tx| {
+        tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)", [])?;
+        let cs = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 1, 'archive', '{\"messages\":[]}', '{}')",
+            [cs],
+        )?;
+        let a = tx.last_insert_rowid();
+        for m in &all {
+            tx.execute(
+                "INSERT INTO action_message(action_id, message_id) VALUES (?1, ?2)",
+                params![a, m],
+            )?;
+        }
+        let (_, h) = iris_changeset::hash(tx, a).unwrap();
+        tx.execute("UPDATE changeset_action SET hash = ?2 WHERE id = ?1", params![a, h])?;
+        tx.execute(
+            "UPDATE changeset SET why = 'Tidy up.', submitted_at = ?2 WHERE id = ?1",
+            params![cs, NOW],
+        )?;
+        tx.execute(
+            &format!("UPDATE changeset_action SET state = 'approved', {PERSON} WHERE id = ?1"),
+            [a],
+        )?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":1}',
+                     'writing', 'inverse', ?2)",
+            params![a, NOW],
+        )?;
+        let l = tx.last_insert_rowid();
+        for m in &all {
+            tx.execute(
+                "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                 VALUES (?1, ?2, 1, '[\"INBOX\"]', '[]')",
+                params![l, m],
+            )?;
+        }
+        tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [l])?;
+        for m in done {
+            tx.execute(
+                "UPDATE ledger_message SET done = 1 WHERE ledger_id = ?1 AND message_id = ?2",
+                params![l, m],
+            )?;
+        }
+        for m in unknown {
+            tx.execute(
+                "UPDATE ledger_message SET listed = 'unknown' WHERE ledger_id = ?1 AND message_id = ?2",
+                params![l, m],
+            )?;
+        }
+        if end {
+            tx.execute(
+                "UPDATE ledger SET state = 'failed', error = 'Gmail did not answer.' WHERE id = ?1",
+                [l],
+            )?;
+        }
+        Ok(l)
+    })
+    .unwrap()
+}
+
+async fn dismiss(store: &Arc<Store>, body: Value) -> (StatusCode, Value) {
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    let req = Request::post("/api/ledger/unconfirmed/dismiss")
+        .header("host", "127.0.0.1:4800")
+        .header("authorization", auth.bearer())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = iris_api::router(store.clone(), auth)
+        .oneshot(req)
+        .await
+        .unwrap();
+    let code = res.status();
+    let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// Issue #216 (specification 2, section 7.3): the brief shows the messages
+/// that the recovery cannot confirm in one line, until the person
+/// dismisses it. A dismissal covers only the entries that the line showed,
+/// so a later entry shows a new line.
+#[tokio::test]
+async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
+    let dir = temp("unconfirmed");
+    let s = store(&dir);
+    let ok = archived(&s, "person", &[3], PERSON);
+    let first = unconfirmed(&s, &[1, 2], &[3]);
+    let (_, page) = call(&s, false, "/api/ledger").await;
+    let entry = |id: i64| {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{id}"))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(entry(first)["unknown"], 2);
+    assert_eq!(entry(first)["changed"], 1);
+    assert_eq!(entry(ok)["unknown"], 0);
+    let (code, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{first}")], "more": 0, "waiting": 0})
+    );
+
+    // The line showed `first`. A later failure comes before the dismissal.
+    let second = unconfirmed(&s, &[3], &[]);
+    let (code, b) = dismiss(
+        &s,
+        json!({"entries": [format!("l-{first}"), format!("l-{ok}")]}),
+    )
+    .await;
+    assert_eq!((code, b), (StatusCode::OK, json!({"dismissed": 1})));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 1, "entries": [format!("l-{second}")], "more": 0, "waiting": 0})
+    );
+    // A second dismissal of the same entry changes nothing.
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{first}")]})).await;
+    assert_eq!(b, json!({"dismissed": 0}));
+    // An ID that is not `l-<n>` writes nothing.
+    for bad in [
+        json!({"entries": ["x"]}),
+        json!({"entries": [format!("l-{second}"), "l-01"]}),
+        json!({}),
+    ] {
+        let (code, _) = dismiss(&s, bad).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{second}")]})).await;
+    assert_eq!(b, json!({"dismissed": 1}));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 0, "entries": [], "more": 0, "waiting": 0})
+    );
+}
+
+/// Issue #216, review: the line is the entries that it lists. With more
+/// entries than `MAX_LIMIT`, the count covers only the listed entries, so
+/// one dismissal of them ends the line; the older entries then show in the
+/// next line.
+#[tokio::test]
+async fn one_dismissal_ends_a_full_line() {
+    let dir = temp("unconfirmed-full");
+    let s = store(&dir);
+    let max = iris_api::MAX_LIMIT as usize;
+    let ids: Vec<i64> = (0..=max).map(|_| unconfirmed(&s, &[1, 2], &[])).collect();
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    let line = &brief["unconfirmed"];
+    let shown: Vec<Value> = line["entries"].as_array().unwrap().clone();
+    assert_eq!(shown.len(), max);
+    assert_eq!(line["messages"], 2 * max as i64);
+    assert_eq!(line["more"], 1);
+    assert_eq!(shown[0], format!("l-{}", ids[max]));
+    let (code, b) = dismiss(&s, json!({ "entries": shown })).await;
+    assert_eq!((code, b), (StatusCode::OK, json!({"dismissed": max})));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{}", ids[0])], "more": 0, "waiting": 0})
+    );
+}
+
+/// Issue #216, review: the brief shows nothing of an account in
+/// `removing` or `removed`, also no unconfirmed line.
+#[tokio::test]
+async fn a_removed_account_has_no_unconfirmed_line() {
+    for state in ["removing", "removed"] {
+        let dir = temp(&format!("unconfirmed-{state}"));
+        let s = store(&dir);
+        unconfirmed(&s, &[1], &[]);
+        s.write(|tx| {
+            tx.execute("UPDATE account SET state = ?1 WHERE id = 1", [state])?;
+            Ok(())
+        })
+        .unwrap();
+        let (_, brief) = call(&s, false, "/api/brief").await;
+        assert_eq!(
+            brief["unconfirmed"],
+            json!({"messages": 0, "entries": [], "more": 0, "waiting": 0}),
+            "{state}"
+        );
+    }
+}
+
+/// Issue #216, pre-review: the recovery of an entry in `writing` can list
+/// more messages `unknown` later, for example after a failed read that it
+/// tries again. The line warns of the messages that it listed at once
+/// (`waiting`), but a dismissal waits for the final state `failed`, so
+/// that it covers the final list.
+#[tokio::test]
+async fn the_line_waits_for_the_end_of_the_recovery() {
+    let dir = temp("unconfirmed-writing");
+    let s = store(&dir);
+    // Message 2 is not checked yet.
+    let l = unconfirmed_in(&s, &[1], &[3], &[2], false);
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 0, "entries": [], "more": 0, "waiting": 1})
+    );
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
+    assert_eq!(b, json!({"dismissed": 0}));
+    // The recovery lists one more message, and the entry fails.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "UPDATE ledger_message SET listed = 'unknown'
+               WHERE ledger_id = {l} AND message_id = 2;
+             UPDATE ledger SET state = 'failed', error = 'Gmail did not answer.' WHERE id = {l};"
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{l}")], "more": 0, "waiting": 0})
+    );
+}
+
+/// Issue #216, pre-review: an undo restores only the confirmed messages,
+/// so an `undone` entry keeps its line until the person dismisses it.
+#[tokio::test]
+async fn an_undone_entry_keeps_its_line() {
+    let dir = temp("unconfirmed-undone");
+    let s = store(&dir);
+    let l = unconfirmed(&s, &[1], &[2]);
+    // The undo of the confirmed message 2 ends as the apply ends it
+    // (section 7.4, step 5).
+    call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    s.write(|tx| {
+        let a: i64 = tx.query_row(
+            "SELECT action_id FROM ledger_undo WHERE ledger_id = ?1",
+            [l],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, '{\"call\":\"batchModify\",\"add\":[\"INBOX\"],\"remove\":[],\"calls\":1}', 'writing', 'inverse', ?2)",
+            params![a, NOW + 1],
+        )?;
+        let u = tx.last_insert_rowid();
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [u])?;
+        tx.execute(
+            "UPDATE ledger SET state = 'undone', undone_by = ?2 WHERE id = ?1",
+            [l, u],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(p["entries"][1]["state"], "undone");
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 1, "entries": [format!("l-{l}")], "more": 0, "waiting": 0})
+    );
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
+    assert_eq!(b, json!({"dismissed": 1}));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(brief["unconfirmed"]["entries"], json!([]));
+}
+
+/// Issue #216: the person can read which messages of an entry the
+/// recovery cannot confirm, a page at a time. A confirmed message of the
+/// same entry is not in the list.
+#[tokio::test]
+async fn an_entry_lists_its_unconfirmed_messages() {
+    let dir = temp("unknown-list");
+    let s = store(&dir);
+    let l = unconfirmed(&s, &[1, 2], &[3]);
+    let ids = |v: &Value| -> Vec<String> {
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (code, all) = call(&s, false, &format!("/api/ledger/l-{l}/unknown")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(ids(&all), ["m-1", "m-2"]);
+    assert_eq!(all["next"], Value::Null);
+    assert_eq!(all["messages"][0]["subject"], "Hi");
+
+    let (_, first) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?limit=1")).await;
+    assert_eq!(ids(&first), ["m-1"]);
+    assert_eq!(first["next"], "m-1");
+    let (_, second) = call(
+        &s,
+        false,
+        &format!("/api/ledger/l-{l}/unknown?limit=1&after=m-1"),
+    )
+    .await;
+    assert_eq!(ids(&second), ["m-2"]);
+    assert_eq!(second["next"], Value::Null);
+
+    let ok = archived(&s, "person", &[3], PERSON);
+    let (code, none) = call(&s, false, &format!("/api/ledger/l-{ok}/unknown")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(none, json!({"messages": [], "next": null}));
+
+    let (code, _) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?after=x-1")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?limit=0")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = call(&s, false, "/api/ledger/l-999/unknown").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+}

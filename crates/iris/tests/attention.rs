@@ -33,11 +33,12 @@ fn a_turn_updates_the_conversations_that_a_kind_change_marked() {
                 [],
             )?;
             // The mark of an understanding run that stopped before its end.
-            tx.execute("INSERT INTO talk_due(thread_id) VALUES (1)", [])?;
+            // The header trigger (migration 69) can queue the thread first.
+            tx.execute("INSERT OR IGNORE INTO talk_due(thread_id) VALUES (1)", [])?;
             Ok(())
         })
         .unwrap();
-    let mut mark = None;
+    let mut mark = iris::engine::AttentionState::default();
     iris::engine::attention_turn(&store, &mut mark);
     let conversation = "SELECT count(*) FROM item WHERE form = 'conversation' AND status <> 'gone'";
     assert_eq!(
@@ -74,7 +75,7 @@ fn the_attention_turn_moves_a_due_job_once() {
     let store = Store::open(&dir).unwrap();
     let now = iris::engine::now_ms();
     let job = iris_job::create(&store, "Renew the passport.", Some(now - 1), now - 2).unwrap();
-    let mut mark = None;
+    let mut mark = iris::engine::AttentionState::default();
     let shown = iris::engine::attention_turn(&store, &mut mark);
     let due: Vec<_> = shown
         .iter()
@@ -89,6 +90,46 @@ fn the_attention_turn_moves_a_due_job_once() {
     assert!(
         again.iter().all(|s| s.title != "Iris: Job due"),
         "{again:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A question of an agent gives a row in the notice list but no system
+/// notice (`PRODUCT.md`: Iris interrupts only by a rule of the person or on
+/// a due date). After a restart, the engine shows no old `Job due` row.
+#[test]
+fn a_question_gives_no_system_notice_and_a_restart_shows_no_old_row() {
+    let dir = std::env::temp_dir().join(format!("iris-attention-ask-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let now = iris::engine::now_ms();
+    let mut state = iris::engine::AttentionState::default();
+    assert!(iris::engine::attention_turn(&store, &mut state).is_empty());
+    let job = iris_job::create(&store, "Book the flight.", None, now).unwrap();
+    iris_job::ask(&store, job, "Which day?", None, now + 1).unwrap();
+    let shown = iris::engine::attention_turn(&store, &mut state);
+    assert!(shown.is_empty(), "{shown:?}");
+    assert_eq!(
+        col(
+            &store,
+            "SELECT count(*) FROM notice WHERE rule_name = 'Job question'"
+        ),
+        1
+    );
+
+    // A due move commits, then the engine stops before its system notice.
+    iris_job::create(&store, "Renew the passport.", Some(now - 1), now - 2).unwrap();
+    iris_job::move_due(&store, now).unwrap();
+    let mut restarted = iris::engine::AttentionState::default();
+    let shown = iris::engine::attention_turn(&store, &mut restarted);
+    assert!(shown.is_empty(), "{shown:?}");
+    // The row stays in the list for the person.
+    assert_eq!(
+        col(
+            &store,
+            "SELECT count(*) FROM notice WHERE rule_name = 'Job due' AND done_at IS NULL"
+        ),
+        1
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

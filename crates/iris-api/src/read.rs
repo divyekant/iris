@@ -74,6 +74,9 @@ pub struct Status {
     /// (`iris zone`, decision D1). `None` when the time zone of the computer
     /// has no IANA name: then a client uses its own.
     pub time_zone: Option<String>,
+    /// True when the owner set the time zone (`iris zone <name>`, or the
+    /// web client, issue 891). False when it is the zone of the computer.
+    pub time_zone_set: bool,
     /// The end of the wait after model errors (RFC 3339), while it runs.
     /// No model call runs before it, unless the person asks for a try now
     /// (`POST /api/model/try`, issue #136).
@@ -178,8 +181,32 @@ pub struct Message {
     /// sender with no row or no kind yet is a `stranger`. A hostile sender can
     /// send a message with no hostile mark.
     pub sender_kind: String,
+    /// The trust offer: the sender row of `sender_kind` when only the
+    /// near-copy rule makes it hostile, so the person can trust it (`POST
+    /// /api/senders/{id}/trust`, issue #49). `None` for each other sender.
+    pub near_copy: Option<NearCopy>,
+    /// The hostile marks that the person released for the current content
+    /// (`POST /api/messages/{id}/release`, issues 369, 373 and 374). Each
+    /// leaves `hostile` after the fixed check reads the message again.
+    /// `POST /api/messages/{id}/unrelease` ends the release.
+    pub released: Vec<String>,
+    /// The Undo of a trust: the `p-` ID of a sender row of the `From`
+    /// address, in any case, that the person trusted, so the person can
+    /// undo the trust (`reopen`, issue #1043). Rows can differ only in
+    /// case, so a mail can have a trust offer for one row and an Undo for
+    /// another. `None` with no trusted row.
+    pub trusted_sender: Option<String>,
     /// The items that are not gone and that have this message as a source.
     pub items: Vec<String>,
+}
+
+/// A sender that the near-copy rule marks hostile.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct NearCopy {
+    /// The `p-` ID of the sender row.
+    pub sender: String,
+    /// The known domain that the domain of the sender looks like.
+    pub of: String,
 }
 
 /// One section of the brief: the full count, and at most [`MAX_LIMIT`] items.
@@ -265,6 +292,9 @@ pub struct Brief {
     pub hostile: i64,
     /// The count of messages that the model failed 3 times.
     pub not_understood: i64,
+    /// The ledger entries with messages that the recovery cannot confirm,
+    /// until the person dismisses them (specification 2, section 7.3).
+    pub unconfirmed: crate::ledger::Unconfirmed,
     /// The date of the oldest fetched message that is not gone: the brief
     /// covers the mail from this date (specification 1, section 4.2).
     pub oldest_fetched: Option<String>,
@@ -377,13 +407,15 @@ pub fn status(store: &Store) -> Result<Status> {
         let model_retry_at = iris_understand::batch::retry_after(c)?
             .filter(|&t| t > now)
             .map(rfc3339);
+        let (time_zone, time_zone_set) = zone_of(c)?;
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
             model,
             waits_model,
-            time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
+            time_zone,
+            time_zone_set,
             model_retry_at,
         })
     })?;
@@ -476,6 +508,8 @@ pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Me
         return Ok(None);
     };
     more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
+    more.near_copy = near_copy(c, summary.from.address.as_deref())?;
+    more.trusted_sender = trusted_sender(c, summary.from.address.as_deref())?;
     // The same items as `GET /api/items/{id}` shows: none of hostile mail.
     let mut st = c.prepare_cached(concat!(
         "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
@@ -585,18 +619,19 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     let (outer, inner) = (date("item"), date("i"));
     let items = store.read(|c| {
         let mut st = c.prepare(&format!(
-            "SELECT id, form, status, doc, {MATTER} FROM item
+            "SELECT id, form, status, doc, {MATTER}, {ready} FROM item
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
                AND NOT {FROM_HOSTILE}
                AND (?4 IS NULL OR ({outer}, id) <
                     (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
-             ORDER BY {outer} DESC, id DESC LIMIT ?5"
+             ORDER BY {outer} DESC, id DESC LIMIT ?5",
+            ready = ready_columns(c)?
         ))?;
         let rows = st.query_map(
             params![filter.form, filter.status, filter.kind, before, limit + 1],
-            doc_of,
+            ready_doc_of,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
@@ -652,6 +687,17 @@ const RECORD: &str = concat!(
     "form = 'record' AND status != 'gone' AND NOT ",
     iris_store::from_hostile_mail!("item")
 );
+
+/// The filter of the items that need the person at the time `now`: the
+/// items that the brief shows in You owe, Owed to you and Conversations
+/// ([`section_sql`]: the head of each pair, attention `shown`, from no
+/// hostile mail, and no item at the stranger gate). The thread summary
+/// (issue 478) reads it for its candidates and for `ready`, so the two use
+/// one rule.
+pub fn needs_you_sql(now: i64) -> String {
+    let [you_owe, owed, conversations, ..] = section_sql(now);
+    format!("(({}) OR ({}) OR ({}))", you_owe.0, owed.0, conversations.0)
+}
 
 /// The filter of the head of each pair in the place `filter`: an item of the
 /// place that is not a possible duplicate of an item of the same place
@@ -974,18 +1020,14 @@ fn read_section(
         "SELECT id, form, status, doc, {list}, {MATTER}, {} FROM item
          WHERE ({shown}) AND ({seek})
          ORDER BY {order} LIMIT {limit}",
-        ready_draft()
+        ready_columns(c)?
     ))?;
     let (items, page_keys): (Vec<_>, Vec<_>) = st
         .query_map(rusqlite::params_from_iter(after.unwrap_or_default()), |r| {
             let row_keys = (4..4 + keys.len())
                 .map(|i| r.get::<_, SqlValue>(i))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut doc = doc_of(r)?;
-            if r.get::<_, bool>("ready_draft")? {
-                doc["ready"] = Value::from(vec!["draft"]);
-            }
-            Ok((doc, row_keys))
+            Ok((ready_doc_of(r)?, row_keys))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
@@ -1123,6 +1165,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             declined: crate::gate::count_gate(c, now, true)?,
             hostile,
             not_understood,
+            unconfirmed: crate::ledger::unconfirmed(c)?,
             oldest_fetched,
             proposal: Some(verb_counts(c, TRIAGE_OPEN)?),
             handled: Handled {
@@ -1215,7 +1258,17 @@ pub fn brief_section(
 /// shortcut: the case-insensitive match scans the sender table, one scan
 /// for each message detail and never for a search (about 4 ms for 100,000
 /// senders). Add a `lower(address)` index to the store if it shows in a profile.
-fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String> {
+/// True if the message has the label `SENT`: the owner sent it.
+pub(crate) fn is_sent(c: &Connection, message: i64) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                         WHERE ml.message_id = ?1 AND l.provider_id = 'SENT')",
+        [message],
+        |r| r.get(0),
+    )
+}
+
+pub(crate) fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String> {
     let Some(address) = address else {
         return Ok("stranger".into());
     };
@@ -1233,6 +1286,50 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
     Ok(kind.unwrap_or_else(|| "stranger".into()))
 }
 
+/// The trust offer of `address`: the row of [`sender_kind`] (the most
+/// cautious kind, then the lowest ID) when it has the kind `hostile` from
+/// the engine with a near-copy basis. The near-copy rule is the only engine
+/// rule that gives `hostile`. So the offer is always for the row that makes
+/// the mail hostile.
+fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<NearCopy>> {
+    let Some(address) = address else {
+        return Ok(None);
+    };
+    let row: Option<(i64, Option<String>, bool, Option<String>)> = c
+        .query_row(
+            "SELECT id, kind, decided_by IS 'person', basis FROM sender
+              WHERE address = ?1 COLLATE NOCASE
+              ORDER BY CASE coalesce(kind, 'stranger') WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
+                       WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END, id
+              LIMIT 1",
+            [address],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(id, kind, by_person, basis)| {
+        let of = basis?.strip_prefix("near copy of ")?.to_string();
+        (kind.as_deref() == Some("hostile") && !by_person).then(|| NearCopy {
+            sender: format_id(Kind::Sender, id),
+            of,
+        })
+    }))
+}
+
+/// The trusted row of `address` in any case, with the lowest ID.
+fn trusted_sender(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<String>> {
+    let Some(address) = address else {
+        return Ok(None);
+    };
+    c.query_row(
+        "SELECT id FROM sender WHERE address = ?1 COLLATE NOCASE
+            AND kind = 'person' AND decided_by = 'person' AND basis = ?2
+          ORDER BY id LIMIT 1",
+        rusqlite::params![address, iris_senders::gate::TRUSTED],
+        |r| Ok(format_id(Kind::Sender, r.get(0)?)),
+    )
+    .optional()
+}
+
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
 pub(crate) fn message_row(
@@ -1242,12 +1339,14 @@ pub(crate) fn message_row(
     let found = c
         .query_row(
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,
-                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile
+                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile,
+                    m.released
              FROM message m LEFT JOIN header h ON h.message_id = m.id
              LEFT JOIN body b ON b.message_id = m.id WHERE m.id = ?1",
             [row],
             |r| {
                 let hostile: Option<String> = r.get(9)?;
+                let released: Option<String> = r.get(10)?;
                 Ok((
                     MessageSummary {
                         id: format_id(Kind::Message, row),
@@ -1270,6 +1369,11 @@ pub(crate) fn message_row(
                             .and_then(|h| serde_json::from_str(&h).ok())
                             .unwrap_or_default(),
                         sender_kind: String::new(),
+                        near_copy: None,
+                        released: released
+                            .and_then(|h| serde_json::from_str(&h).ok())
+                            .unwrap_or_default(),
+                        trusted_sender: None,
                         items: Vec::new(),
                     },
                 ))
@@ -1311,25 +1415,99 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
      WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter,
      item.account_id AS account";
 
-/// The column `ready_draft` of an item row: true when the thread of the
-/// mail that made the item has a reply draft that the person can use now
-/// (card R3-09, [`iris_voice::ready_item_sql`]). A nudge (card R3-07)
-/// marks only its own commitment.
-fn ready_draft() -> String {
+/// The SQL of the thread of the origin message of the outer `item` row.
+const ORIGIN_THREAD: &str =
+    "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
+     WHERE os.item_id = item.id AND os.role = 'origin'";
+
+/// The columns `ready_draft` and `ready_summary` of an item row.
+/// `ready_draft` is true when the thread of the mail that made the item has
+/// a reply draft that the person can use now (card R3-09,
+/// [`iris_voice::ready_item_sql`]). A nudge (card R3-07) marks only the
+/// commitments of its key, at the time of this read. `ready_summary` is
+/// true when the item needs the person ([`needs_you_sql`]) and the thread
+/// of its origin has a summary that is ready (issue 478,
+/// [`iris_summary::ready_sql`]). So an item at the stranger gate never
+/// shows a summary.
+pub(crate) fn ready_columns(c: &Connection) -> iris_store::Result<String> {
+    let now = crate::now_ms();
+    // `today` gives `YYYY-MM-DD`, so the quoted literal is safe.
+    let today = format!("'{}'", iris_store::today(c, now)?);
+    Ok(format!(
+        "{} AS ready_draft, {} AS ready_summary",
+        iris_voice::ready_item_sql(ORIGIN_THREAD, "item.id", (&now.to_string(), &today)),
+        summary_sql(now)
+    ))
+}
+
+/// The condition of a ready summary on the outer `item` row at the time
+/// `now`. The inner `item` of the subquery hides the outer one, so the
+/// filter of [`needs_you_sql`] reads the same row by its ID, with no
+/// ambiguous column in a join.
+fn summary_sql(now: i64) -> String {
     format!(
-        "{} AS ready_draft",
-        iris_voice::ready_item_sql(
-            "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
-             WHERE os.item_id = item.id AND os.role = 'origin'",
-            "item.id"
-        )
+        "(item.id IN (SELECT id FROM item WHERE {}) AND {})",
+        needs_you_sql(now),
+        iris_summary::ready_sql(ORIGIN_THREAD)
     )
+}
+
+/// As [`doc_of`], with `ready` from the columns [`ready_columns`] of the
+/// row. Each list whose items show as brief lines (the sections and the
+/// gate) reads its items with this function, so a prepared draft or summary
+/// shows on each. The lists: the sections and bundles of the brief, the
+/// gate, and the lists of one form (`/api/items`).
+pub(crate) fn ready_doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let mut doc = doc_of(r)?;
+    ready_into(r, &mut doc)?;
+    Ok(doc)
+}
+
+/// Sets `ready` of `doc` from the columns [`ready_columns`] of the row `r`.
+/// The members of a matter use it too (issue #1015).
+pub(crate) fn ready_into(r: &rusqlite::Row, doc: &mut Value) -> rusqlite::Result<()> {
+    let ready: Vec<&str> = [("ready_draft", "draft"), ("ready_summary", "summary")]
+        .into_iter()
+        .filter_map(|(col, name)| r.get::<_, bool>(col).map(|b| b.then_some(name)).transpose())
+        .collect::<rusqlite::Result<_>>()?;
+    if !ready.is_empty() {
+        doc["ready"] = Value::from(ready);
+    }
+    Ok(())
+}
+
+/// The summary of the thread of the origin of the item `id` that is ready,
+/// with the same two conditions as `ready` ([`ready_columns`]). `None` for
+/// an unknown item, an item that does not need the person, or no ready
+/// summary.
+pub fn summary(store: &Store, id: &str, now: i64) -> Result<Option<Value>> {
+    let (kind, row) = parse_id(id).ok_or_else(|| bad_id(id))?;
+    let Some(form) = FORMS.iter().find(|(_, k)| *k == kind).map(|(f, _)| *f) else {
+        return Err(bad_id(id));
+    };
+    // One statement reads the item and the summary: one snapshot.
+    let threads = format!(
+        "SELECT ({ORIGIN_THREAD}) FROM item WHERE id = ?1 AND form = ?2 AND {}",
+        summary_sql(now)
+    );
+    Ok(store.read(|c| {
+        Ok(
+            iris_summary::ready_in(c, &threads, params![row, form])?.map(|s| {
+                serde_json::json!({
+                    "text": s.text,
+                    "based_on": iris_store::format_id(iris_store::Kind::Message, s.based_on),
+                    "created": rfc3339(s.created_at),
+                    "model": s.model,
+                })
+            }),
+        )
+    })?)
 }
 
 /// The document of an item row (id, form, status, doc, and the column
 /// [`MATTER`] by name). The row is the true copy of the ID, the status,
 /// the matter and the account, so they replace the values of the document. A stored `ready`
-/// is removed: only [`read_section`] sets it, from the store. Each output of
+/// is removed: only [`ready_doc_of`] sets it, from the store. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     doc_at(r, 0)
@@ -1401,6 +1579,22 @@ pub fn rfc3339(ms: i64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// The time zone of the owner and if the owner set it (decision D1), from
+/// one read of `owner_setting`, so the two values always agree. A saved
+/// name that the computer no longer knows gives the zone of the computer,
+/// as [`iris_store::time_zone`] does, so it counts as not set.
+fn zone_of(c: &Connection) -> rusqlite::Result<(Option<String>, bool)> {
+    let (zone, set) = iris_store::time_zone_and_set(c)?;
+    Ok((zone.iana_name().map(str::to_string), set))
+}
+
+/// The time zone of the owner after a change from the web client (issue
+/// 891): `{"time_zone", "time_zone_set"}`, as in the status.
+pub fn zone(store: &Store) -> Result<serde_json::Value> {
+    let (time_zone, time_zone_set) = store.read(|c| Ok(zone_of(c)?))?;
+    Ok(serde_json::json!({ "time_zone": time_zone, "time_zone_set": time_zone_set }))
 }
 
 #[cfg(test)]

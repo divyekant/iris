@@ -8,12 +8,14 @@
 -->
 <script lang="ts">
   import { href } from "../route";
+  import { fileLine } from "../format";
   import { get, post, type Changeset, type DraftView, type Item, type Part, type Recipient, type Target, type Would } from "../api";
   import Comments from "./Comments.svelte";
   import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, would, type Row } from "../review";
 
-  // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
-  let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
+  // `read` runs each read and write that gives the request back, so that the review shows it as it is now.
+  // The review runs them one at a time, in its queue.
+  let { changeset: c, read = (work) => work() }: { changeset: Changeset; read?: (work: () => Promise<Changeset>) => Promise<Changeset> } = $props();
 
   // The messages endpoint takes at most 200 IDs, and the engine at most 500 decisions (issue 197).
   const PAGE = 200;
@@ -36,6 +38,14 @@
   // with an unknown result, or a 409, until the request loads again.
   let stale = $state(false);
   let who = $derived(author(c));
+  // Who withdrew the request (decision D16). A store from before the change does not know.
+  let withdrawn = $derived(
+    c.withdrawn_by === "person" || (c.withdrawn_by === "author" && c.author.kind === "person")
+      ? "You withdrew this request."
+      : c.withdrawn_by === "author"
+        ? `${who} withdrew this request.`
+        : "This request is withdrawn.",
+  );
   let mark = $derived(who.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join(""));
 
   // The targets of each action, loaded in pages: messages by their summaries, items one by one.
@@ -57,13 +67,16 @@
   // The reason of each submitted revision (issue 189): an open change of an older revision
   // shows the reason of its own revision, not the quote above, which is the reason of the newest.
   let reasons: Record<number, string> = $state({});
-  let older = $derived(open.some((a) => a.revision < c.revision));
-  let askedReasons = false;
+  // Each document of the request can bring new older revisions: the reasons load again for each
+  // revision that has no reason yet, once for each set of revisions.
+  let reasonsNeed = $derived([...new Set(open.filter((a) => a.revision < c.revision && !(a.revision in reasons)).map((a) => a.revision))].join(","));
+  let reasonsAsked = "";
   $effect(() => {
-    if (!older || askedReasons) return;
-    askedReasons = true;
+    const need = reasonsNeed;
+    if (!need || need === reasonsAsked) return;
+    reasonsAsked = need;
     get<{ revisions: { revision: number; why: string }[] }>(`changesets/${encodeURIComponent(c.id)}/revisions`).then(
-      (got) => (reasons = Object.fromEntries(got.revisions.map((r) => [r.revision, r.why]))),
+      (got) => (reasons = { ...reasons, ...Object.fromEntries(got.revisions.map((r) => [r.revision, r.why])) }),
       // Without the reasons, each older change still says which revision it comes from.
       () => {},
     );
@@ -96,24 +109,26 @@
   let failed: Record<string, boolean> = $state({});
   let problem = $state("");
   // The draft of each draft and send action that waits (card R4-07), by the key of the action.
+  // A key names one action of one revision, so a draft never changes under its key. Each document
+  // of the request can bring new mail actions: the drafts load again for each set of keys that has
+  // no draft yet. A failed load waits for Try again.
   let drafts: Record<string, DraftView> | null = $state(null);
-  let draftsFailed = $state(false);
-  let mails = $derived(open.some(mail));
+  let draftsNeed = $derived(open.filter((a) => mail(a) && !drafts?.[key(a)]).map(key).join(","));
+  let draftsAsked = "";
+  let draftsTry = $state(0);
   $effect(() => {
-    if (!mails || drafts || draftsFailed) return;
+    void draftsTry;
+    const need = draftsNeed;
+    if (!need || need === draftsAsked) return;
+    draftsAsked = need;
     get<{ drafts: DraftView[] }>(`changesets/${encodeURIComponent(c.id)}/drafts`).then(
       (got) => {
-        const map: Record<string, DraftView> = Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d]));
-        // The answer leaves out an action that is not open now: the request changed after it loaded.
-        if (open.some((a) => mail(a) && !map[key(a)])) {
-          draftsFailed = true;
-          refresh("This request changed after you opened it. Here it is as it is now.");
-        } else drafts = map;
+        const map: Record<string, DraftView> = { ...drafts, ...Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d])) };
+        drafts = map;
+        // The answer leaves out an action that is open now: the request changed after it loaded.
+        if (need.split(",").some((k) => !map[k])) refresh("This request changed after you opened it. Here it is as it is now.");
       },
-      (e) => {
-        draftsFailed = true;
-        problem = e instanceof Error ? e.message : String(e);
-      },
+      (e) => (problem = e instanceof Error ? e.message : String(e)),
     );
   });
   // An action is complete when each of its rows loaded, and for a mail action its draft too:
@@ -141,8 +156,8 @@
   function retry() {
     problem = "";
     failed = {};
-    drafts = null;
-    draftsFailed = false;
+    draftsAsked = "";
+    draftsTry++;
   }
 
   let ready = $derived(!busy && !stale && !missing.length);
@@ -151,11 +166,32 @@
   async function refresh(why: string) {
     stale = true;
     try {
-      onchange(await get<Changeset>(`changesets/${encodeURIComponent(c.id)}`));
+      await read(() => get<Changeset>(`changesets/${encodeURIComponent(c.id)}`));
       stale = false;
       problem = why;
     } catch {
       problem = `${why} Iris could not load the request again. Load it again before you decide.`.trim();
+    }
+  }
+
+  // Issue 208: the person changes the text of a send of the request. The press denies this
+  // send only, then the write view opens its draft (#/write/d-N), as "Change and send" of the
+  // Outbox. The next press of Send there is a new write of the person, with its own hold.
+  async function changeSend(a: (typeof actions)[number], draft: string) {
+    // A deny is a decision too: only after each row of each waiting change shows (spec 2 section 5.5).
+    if (!ready) return;
+    busy = true;
+    problem = saved = "";
+    try {
+      await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: [{ revision: a.revision, n: a.n, approve: false, hash: a.hash }] }));
+      location.hash = href.change(draft);
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      if (status === 409) await refresh("Iris did not deny this send, because the request changed after you opened it. Here it is as it is now.");
+      else if (status === undefined || status >= 500) await refresh("Iris does not know if it denied this send. Here is the request as it is now.");
+      else problem = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
     }
   }
 
@@ -172,8 +208,7 @@
     problem = saved = "";
     const before = new Set(c.actions.filter((a) => a.decision?.state === "cancelled").map(key));
     try {
-      const after = await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {});
-      onchange(after);
+      const after = await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {}));
       asking = false;
       const gone = after.actions.filter((a) => a.decision?.state === "cancelled" && !before.has(key(a))).length;
       const going = after.actions.filter((a) => a.decision?.state === "approved").length;
@@ -203,7 +238,7 @@
     let done = 0;
     try {
       for (; done < all.length; done += BATCH) {
-        onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: all.slice(done, done + BATCH) }));
+        await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: all.slice(done, done + BATCH) }));
       }
       saved = [yes && `You approved ${yes === 1 ? "one change" : `${yes} changes`}.`, no && `You denied ${no === 1 ? "one change" : `${no} changes`}.`].filter(Boolean).join(" ");
     } catch (e) {
@@ -239,7 +274,10 @@
 {#snippet draft(d: DraftView)}
   {#if d.readable}
     <div class="mail">
-      <dl>{@render people("To", d.to)}{@render people("Cc", d.cc)}</dl>
+      <dl>
+        {@render people("To", d.to)}{@render people("Cc", d.cc)}{@render people("Bcc", d.bcc ?? [])}
+        {#if d.attachments?.length}<dt>Files</dt><dd>{fileLine(d.attachments)}</dd>{/if}
+      </dl>
       <p class="subject-line">{@render text(d.subject)}</p>
       <p class="text">{@render text(d.body)}</p>
     </div>
@@ -269,9 +307,9 @@
   {/if}
 {/snippet}
 
-<!-- Only a changeset of a job takes a comment: its agent reads the comment in the next session. -->
+<!-- An agent or a local author takes a comment (decision D15). A job agent reads it in its next session; another author reads it with the request. -->
 {#snippet comments()}
-  {#if c.author.job}<Comments changeset={c} agent={who} refused={refresh} />{/if}
+  {#if c.author.kind === "agent" || c.author.kind === "local"}<Comments changeset={c} agent={who} job={!!c.author.job} refused={refresh} />{/if}
 {/snippet}
 
 <!-- Withdraw ends the whole request, so it sits at the end of the decision row (option B, the owner's pick). -->
@@ -325,6 +363,13 @@
             {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}
             {#if !approves(a)}<p class="denied">Iris will deny this change.</p>{/if}
             {#if d}{@render draft(d)}{/if}
+            <!-- Issue 1104: the button shows only when the draft can change after this deny. -->
+            {#if a.verb === "send" && d?.readable && d.draft && d.change}
+              {@const id = d.draft}
+              <button type="button" class="quiet change" disabled={!ready} onclick={() => changeSend(a, id)}>Deny this send and change it yourself</button>
+            {:else if a.verb === "send" && d?.readable && d.newer_mail}
+              <p class="because">A new mail came into this thread after this reply was written. To answer it, deny this send and write a new reply.</p>
+            {/if}
             {@render lines(a)}
           </div>
         </li>
@@ -348,7 +393,7 @@
     {/if}
   {/if}
   {#if asking}{@render question()}{/if}
-  {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}
+  {#if c.state === "withdrawn" && !saved}<p class="saved">{withdrawn}</p>{/if}
   {#if problem}
     <p role="alert">
       {problem}

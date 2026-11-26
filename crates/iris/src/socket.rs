@@ -439,10 +439,17 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             })
             .map(Done::Value)
         }
-        Some("drafts") if session => Err(Failure::new(
-            code::DENIED,
-            "drafts is a host verb: a session cannot run it",
-        )),
+        // A session sees only the draft of its job: after a lost `add`
+        // answer, it finds the changeset again (issue #440).
+        Some("drafts") if session => {
+            only(&[])?;
+            let draft = store
+                .read(|c| Ok(session_draft(c, me)))
+                .map_err(|e| Failure::new(code::ERROR, format!("store: {e}")))?
+                .map_err(|e| failure(e, 0))?;
+            let ids: Vec<String> = draft.into_iter().map(format_changeset_id).collect();
+            Ok(Done::Value(json!({ "changesets": ids })))
+        }
         Some("drafts") => {
             only(&[])?;
             drafts(store).map(Done::Value)
@@ -730,7 +737,20 @@ fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
         None => page.max,
         Some(a) => page.notices.iter().map(|(r, _)| *r).max().unwrap_or(a),
     };
-    let notices: Vec<&iris_api::Notice> = page.notices.iter().map(|(_, n)| n).collect();
+    // The app shows `title: text` as a system notice: a job notice keeps
+    // the full goal in the web client, but a system notice has at most
+    // `JOB_TEXT_MAX` characters, so the cut is here, for each app version.
+    let notices: Vec<iris_api::Notice> = page
+        .notices
+        .into_iter()
+        .map(|(_, mut n)| {
+            if n.job.is_some() {
+                let room = crate::notify::JOB_TEXT_MAX.saturating_sub(n.title.chars().count() + 2);
+                n.text = n.text.chars().take(room).collect();
+            }
+            n
+        })
+        .collect();
     Ok(json!({
         "notices": notices,
         "last": last,

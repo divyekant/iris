@@ -25,8 +25,10 @@ each input.
 
 - The full CSS cascade, CSS layout and CSS selectors other than the subset in
   [Hidden HTML](#hidden-html).
-- PDF font encodings other than Windows-1252 and a `ToUnicode` map:
-  `/Differences`, `/MacRomanEncoding`, and the predefined CMaps of CID fonts.
+- PDF font encodings other than Windows-1252, `/StandardEncoding`,
+  `/MacRomanEncoding`, `/Differences` and a `ToUnicode` map: for example
+  the predefined CMaps of CID fonts and the built-in encoding of a symbol
+  font.
 - The model and the fixed rules (specification 1, sections 7.3 and 7.4).
 - The detection of hostile mail (specification 1, section 6.7).
 
@@ -36,7 +38,7 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool, pub attached_links: Vec<Link> }
 pub struct Link { pub text: String, pub href: String }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
@@ -71,7 +73,8 @@ Each budget only goes down. No step gives budget back.
   with `Content-Disposition: attachment` is one attachment too.
 - `multipart/alternative`: the walker reads the versions from the last one.
   It uses the first version with clean text that is not empty. A version that
-  it does not use adds no text, no attachment and no cut.
+  it does not use adds no text, no attachment and no cut. Its attached
+  messages still add their links to `attached_links` (issue #1140).
 - Each other multipart: each part, in order.
 - The `mail-parser` crate (1.0.1) reads the MIME tree, the headers and the
   transfer encodings (decision D3). Iris sets its limits: at most
@@ -204,7 +207,9 @@ not used makes no cut in either case.
   part that the walker reads adds its links. Each HTML version of a
   `multipart/alternative` adds its links too, also a version that the text
   does not use, because a mail client can show it. The walker reads these
-  versions for their links only: they add no text and no attachment.
+  versions for their links only: they add no text and no attachment. An
+  attached message in such a version adds its links to `attached_links`,
+  with no attachment and no part of the attachment text budget.
   A hidden link has no text, so it is not in the list. The texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
   true when a limit can skip a link: past `LINK_BYTES`; an HTML part past
   its output limit or past `PART_LIMIT`; a shown HTML element past the
@@ -223,7 +228,18 @@ not used makes no cut in either case.
   true when a limit can hide a boundary or a type: a `Content-Type` field
   past 8 KiB or with a line past 1,000 bytes, or more than 64 boundaries. The caller then sets `links_cut` too,
   because the rest can hold an HTML part that a mail client shows. The
-  links of an attached message are not in the list.
+  links of an attached message (at each depth) go in a second list,
+  `attached_links`, inside the same `LINK_BYTES` limit for that list. The
+  link check reads them with no sender proof (issue #372). An attached
+  message that Iris does not parse sets `links_cut`. An attached message
+  past `INNER_LIMIT` sets `links_cut` when an HTML part reaches the limit,
+  when the scan above finds an HTML part header in its bytes past the
+  limit, when it is not 7bit, 8bit or binary (Iris does not scan the rest
+  of another encoding), or when it holds an attached message that is not
+  read. When the raw message is a prefix (`clean_cut`), an attached message
+  that reaches the cut sets `links_cut`, and the scan of the rest counts a
+  part header with the type `message/rfc822` or `message/global` as an
+  HTML part.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.
@@ -284,12 +300,25 @@ The search reads the lines in order and stops at the first of these:
   Nachricht-----"), or an Outlook header block (`From:`, then `Sent:` or
   `Date:` in the 4 lines after `From:`, then `Subject:` or `To:` in the 5
   lines after that line). The history starts at this line.
-- An attribution line: a line, or two lines that start with `On `, that end
-  with `wrote:` or the same word in French, German, Spanish, Italian, Danish
-  or Norwegian or Swedish, Dutch or Polish. It is history only if the next
-  line that is not empty starts with `>`, or if the message is a reply and
-  the line starts with one of `On `, `Le `, `Am `, `El `, `Il `, `Op `,
-  `Den `, `W dniu `, `Em `.
+- An attribution line: a line, or two lines that start with one of the
+  first words below, that end with `wrote:` or the same word in French,
+  German, Spanish, Italian, Danish or Norwegian or Swedish, Dutch, Polish,
+  Portuguese, Czech, Finnish, Turkish, Russian or Chinese. The client form
+  in any language is an attribution line too: a line of less than 400 bytes
+  with a year (`19..` or `20..`, 4 digits) and a time (`10:00`) outside
+  `<>`, an address in `<>` and a `:` (or `：`) at the end.
+  Gmail writes "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:".
+  Two lines join into the client form only if the second line alone is not
+  the client form. Two lines never join if the first line ends with `.`,
+  `!` or `?`. An attribution line is history only if the next line that is
+  not empty starts with `>`, or if the message is a reply and the line
+  starts with one of `On `, `Le `, `Am `, `El `, `Il `, `Op `, `Den `,
+  `W dniu `, `Em ` and ends with one of the verbs. The client form alone
+  never starts the history without a `>` line after it, also with one of
+  these first words, because own lines can have a time and an address too.
+  An attribution line is never history when a `>` line after it has an own
+  line (not empty, not a `>` line) after it: that is an inline answer, and
+  the own lines stay.
 
 Before the history (or a forward marker):
 
@@ -392,9 +421,30 @@ its first 1 KiB holds `%PDF`.
   code length comes from the code space. Without a code space, it is the
   shortest code with an entry, else 2 bytes for a `/Type0` font and 1 byte
   for another font. A code without an entry gives no text in a `/Type0`
-  font and Windows-1252 in another font. A `/Type0` font without a map
-  gives no text. A font that the reader does not find, or a font that is
-  not `/Type0` and has no map, reads as Windows-1252.
+  font. In another font, it reads through the encoding of the font (see
+  the next item), and as Windows-1252 if the font has no encoding. A `/Type0` font without a map
+  gives no text. A font that the reader does not find reads as
+  Windows-1252.
+- Encoding of a simple font (not `/Type0`): its `/Encoding` name, or the
+  `/BaseEncoding` and `/Differences` of its encoding dictionary (direct or
+  a reference). The base is `/StandardEncoding`, `/MacRomanEncoding` (ISO
+  32000-1 Annex D), or else Windows-1252. A code that a named base does not
+  define gives no character. `/Differences` gives a glyph name
+  to each code from a start code. A glyph name reads through the names of
+  the Latin encodings of Annex D (Adobe Glyph List), `uniXXXX` or `uXXXX` to
+  `uXXXXXX`. Another name gives no character. A font with a `/ToUnicode`
+  map reads a code without an entry through its encoding. Each font object
+  gets one table of 1 KiB, at most 256 tables for each PDF. The fonts past
+  the limit read as Windows-1252.
+- Predictor: after the inflate, a stream with a `/DecodeParms` `/Predictor`
+  of 10 to 15 loses its PNG predictor. `/DecodeParms` is a dictionary, a
+  reference, or an array whose first item is one of these. The predictor
+  uses rows of `/Columns`, `/Colors` and `/BitsPerComponent`. A short last
+  row and the rows after a bad filter byte go out. A stream with another predictor is not read. If the
+  parameters are a reference to an object that comes later in the file,
+  an object stream waits for the end of the pass inside the object budget
+  (4 MiB), and its objects then do not replace objects that the pass kept.
+  Another stream with such a reference is not read.
 - The reader reads the names of a stream dictionary (`/Length`, `/Filter`
   and the names above) only outside its strings, comments and inner
   dictionaries.
@@ -429,32 +479,51 @@ client. They are not defects of this design:
   rule shows again stays hidden.
 - Rules inside `@media` do not apply, also for the screen of the person.
 - A reply in a language or a client that the lists above do not name keeps
-  its quoted history. A message that is not a reply keeps the quotes between
-  its own lines.
+  its quoted history, unless its attribution line has the client form and a
+  `>` line comes after it (issue #968). A message that is not a reply keeps
+  the quotes between its own lines.
 - A signature without a `--` line or a phone line stays, until
   `remove_repeated_end` finds it in a thread.
 - PDF: text hidden by a white fill, by clipping, by a position off the page,
   by a small font or by an object on top of it stays. A content stream that
   no page uses gives its text too. A form without its own `/Resources`
-  reads as Windows-1252. A font with another encoding than Windows-1252 or
-  a `ToUnicode` map (see Not in scope) can fail the quality check. An
-  object stream with a `/DecodeParms` predictor gives wrong objects. An
-  encrypted PDF gives no text.
+  reads through the encoding of its font, or as Windows-1252. A font with
+  an encoding that is not in scope (see Not in scope) can fail the quality
+  check. A stream with a TIFF predictor is not read. An encrypted PDF
+  gives text only when it opens with the empty user password (an owner
+  password only), through the standard handler: RC4 of 40 to 128 bits,
+  AES-128 and AES-256 (`/R 2` to `/R 6`, issue #52). A PDF that needs a
+  user password, or that has another handler, gives no text. Iris reads
+  the encryption only from the trailer that the last `startxref` (in the
+  last 1 KiB) names: a `trailer` dictionary or a cross-reference stream.
+  An `/Encrypt` reference resolves to the last object with the same number
+  and generation (`<n> <g> obj`, with any white space between the tokens).
+  `/Encrypt` text in other places does not count. Iris decrypts each
+  stream in place, so the decryption adds no copy of the file when the
+  file is base64 or quoted-printable (a 7bit, 8bit or binary attachment
+  is copied once).
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
 - A quoted-printable line of more than 64 KiB that has only white space,
   CR and `=` with white space splits at 64 KiB. Its white space can then
   differ from the decode of the whole body.
-- Addresses (`iris-people`, through `mail-parser` 1.0.1): these forms give no
-  address, so the person goes out of the profiles. A comment inside an
-  address (`john(work)@example.org`), a domain literal with a `:` outside
-  `<>` (`user@[IPv6:2001:db8::1]`), a quoted local part outside `<>` with an
-  escaped character (`"a\"b"@example.org`), and an `@` outside a quoted
-  local part (`a@b@example.org`). The same valid forms inside `<>` work.
-  `mail-parser` reads a bare quoted local part (`"a:b"@example.org`) as a
-  name and `@example.org`. `iris-people` joins the two again when the list
-  holds that exact text, so this form works. A comment after a bare address
-  (`a@example.org (Ana)`) is the display name.
+- Addresses (`iris-people`): `iris-people` reads address lists with the
+  address scanner of the sender axis (`iris_senders::head::addresses`), not
+  with `mail-parser`. A comment inside an address (`john(work)@example.org`)
+  gives `john@example.org`. A domain literal (`user@[IPv6:2001:db8::1]`) and
+  a quoted local part with an escaped character (`"a\"b"@example.org`) give
+  their address. A comment after a bare address (`a@example.org (Ana)`) is
+  the display name. These limits stay:
+  - An address with two `@` outside a quoted local part (`a@b@example.org`)
+    gives no address.
+  - In `<>`, a quoted local part counts only at the start of the address
+    (after white space and comments) and only when its closing `"` comes
+    right before an `@` inside 256 bytes. There, a `<`, `>`, `,` or `;` is
+    text (issue #980). A longer quoted local part, or one with no `@` right
+    after its closing quote, is read as before: its `<` and `>` count.
+  - Mail that Iris understood before the change to the scanner keeps the
+    recipients that `mail-parser` read, so a domain-literal recipient of
+    that mail is not in the profiles (issue #1003).
 
 ### Limits and the cut
 
@@ -511,8 +580,8 @@ input: no panic, bounded memory and time, and a `Clean` with less text (and
 - Dependencies: `encoding_rs` 0.8, `miniz_oxide` 0.9 and `mail-parser`
   1.0.1 (with `encodify` and `hashify`). `mail-parser` needs Rust 1.98 or
   newer, so `rust-toolchain.toml` pins Rust 1.100.0.
-- `iris-people` reads address lists with `mail-parser` too (see "Known
-  limits").
+- `iris-people` reads address lists with the address scanner of
+  `iris-senders`, not with `mail-parser` (see "Known limits").
 
 ## Assumptions
 

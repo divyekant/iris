@@ -20,6 +20,20 @@ test("each verb reads in the past tense, with what it changed", () => {
   assert.equal(words({ verb: "send" }), "Sent a mail");
 });
 
+test("a send and a draft name their subject and first recipient, so two sends differ (issue 490)", () => {
+  const words = (x) => `${l.did(e(x))} ${l.what(e(x))}`;
+  assert.equal(words({ verb: "send", mail: { subject: "Q4 plan", to: "priya@example.com", recipients: 1 } }), "Sent “Q4 plan” to priya@example.com");
+  assert.equal(words({ verb: "send", mail: { subject: "Q4 plan", to: "priya@example.com", recipients: 2 } }), "Sent “Q4 plan” to priya@example.com and 1 other");
+  assert.equal(words({ verb: "draft", mail: { subject: " ", to: "dana@example.com", recipients: 4 } }), "Wrote the draft of a mail with no subject to dana@example.com and 3 others");
+  // A change of a draft and its undo (draft change spec, section 6).
+  const q4 = { subject: "Q4 plan", to: "priya@example.com", recipients: 1 };
+  assert.equal(words({ verb: "draft", change: true, mail: q4 }), "Changed the draft of “Q4 plan” to priya@example.com");
+  assert.equal(words({ verb: "draft", change: true, undo_of: "l-4", mail: q4 }), "Restored the old text of “Q4 plan” to priya@example.com");
+  assert.equal(words({ verb: "draft", change: false, mail: q4 }), "Wrote the draft of “Q4 plan” to priya@example.com");
+  // A mail that Iris cannot read, or an engine from before the field: no name.
+  assert.equal(words({ verb: "send", mail: null }), "Sent a mail");
+});
+
 // Each verb that a changeset (and so the ledger) can hold has words: the list comes from the
 // schema, so that a new verb without words makes this test fail.
 test("each verb of the changeset schema has past-tense words", async () => {
@@ -54,6 +68,14 @@ test("a failed or a running entry says so; a done entry needs no words", () => {
   assert.equal(l.status(e({ state: "writing" })), "Iris makes this change now.");
   assert.equal(l.status(e({ state: "failed", messages: 40, changed: 12, error: "Gmail refused one call." })), "Failed. 12 of 40 messages changed. Gmail refused one call.");
   assert.equal(l.status(e({ state: "failed", messages: 0, items: 1, error: null })), "Failed.");
+  // Spec 2 section 7.3 (issue 216): the messages that the recovery cannot confirm.
+  assert.equal(
+    l.status(e({ state: "failed", messages: 3, changed: 1, unknown: 2, error: "Gmail did not answer." })),
+    "Failed. 1 of 3 messages changed. Iris could not confirm 2 messages: check them in your mailbox. Gmail did not answer.",
+  );
+  assert.equal(l.status(e({ state: "failed", messages: 1, changed: 0, unknown: 1, error: null })), "Failed. 0 of 1 message changed. Iris could not confirm 1 message: check it in your mailbox.");
+  // An undo restores only the confirmed messages: the others stay to check.
+  assert.equal(l.status(e({ state: "undone", messages: 3, changed: 1, unknown: 2 })), "Undone. Iris could not confirm 2 messages: check them in your mailbox.");
 });
 
 test("an undo that skipped messages says so, and the change keeps its Undo (D18)", () => {

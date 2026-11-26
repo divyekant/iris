@@ -33,7 +33,7 @@ function serve(answer) {
   globalThis.fetch = async (url, init = {}) => {
     const path = String(url).replace(/^\/api\//, "");
     const method = init.method ?? "GET";
-    const body = init.body ? JSON.parse(init.body) : undefined;
+    const body = typeof init.body?.arrayBuffer === "function" ? init.body : init.body ? JSON.parse(init.body) : undefined;
     asked.push({ method, path, body });
     const [status, out] = answer(path, method, body);
     return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
@@ -56,10 +56,10 @@ async function fill(app, to = "sam@okafor.example ") {
   app.flushSync();
 }
 
-test("generated hashes: #/write/<id> opens a reply only for one canonical thread ID and no other part", () => {
+test("generated hashes: #/write/<id> opens a reply or a change only for one canonical thread or draft ID and no other part", () => {
   let seed = 23;
   const rand = (n) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % n);
-  const pieces = ["#/write", "/", "t-", "m-", "0", "1", "9", "x", "%", "%2F", "-", "write", "#"];
+  const pieces = ["#/write", "/", "t-", "d-", "m-", "0", "1", "9", "x", "%", "%2F", "-", "write", "#"];
   let replies = 0;
   for (let i = 0; i < 5000; i++) {
     const start = ["#/write/t-", "#/write/", "#write/t-", ""][rand(4)];
@@ -67,7 +67,10 @@ test("generated hashes: #/write/<id> opens a reply only for one canonical thread
     const r = route.parse(hash);
     if (r.view !== "write") continue;
     const rest = hash.replace(/^#\/?/, "");
-    if (r.thread === null) assert.match(rest, /^write\/?$/, hash);
+    if (r.draft) {
+      assert.equal(rest, `write/${r.draft}`, hash);
+      assert.match(r.draft, route.DRAFT_ID, hash);
+    } else if (r.thread === null) assert.match(rest, /^write\/?$/, hash);
     else {
       assert.equal(rest, `write/${r.thread}`, hash);
       assert.match(r.thread, route.THREAD_ID, hash);
@@ -85,6 +88,10 @@ test("the routes of the write view", () => {
   assert.deepEqual(route.parse("#/write/m-4"), { view: "home" });
   assert.deepEqual(route.parse("#/write/t-4/x"), { view: "home" });
   assert.equal(route.href.reply("t-4"), "#/write/t-4");
+  assert.deepEqual(route.parse("#/write/d-9"), { view: "write", thread: null, draft: "d-9" });
+  assert.deepEqual(route.parse(route.href.change("d-9")), { view: "write", thread: null, draft: "d-9" });
+  assert.deepEqual(route.parse("#/write/d-0"), { view: "home" });
+  assert.deepEqual(route.parse("#/write/d-9/x"), { view: "home" });
   assert.ok(route.NAV.some(([link]) => link === "#/write"));
 });
 
@@ -111,6 +118,27 @@ test("a typed address becomes a chip, and Send waits for a valid one and for tex
     chips[1].querySelector("button").click();
     app.flushSync();
     assert.equal(send().disabled, true, "only an address that is not valid is left");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a send with Bcc says that it waits for the Bcc check, with no time line", async () => {
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-3" }];
+    if (path === "write/cs-3") return [200, { state: "waiting", draft: "d-7", sending: true, bcc_check: "gmail", leaves_at: new Date(Date.now() - 5_000).toISOString() }];
+    return [404, { error: "Not found." }];
+  });
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("On its way"));
+    app.flushSync();
+    assert.match(text(app.target), /Waits for the Bcc check of Gmail\./);
+    assert.doesNotMatch(text(app.target), /Leaves now/);
+    assert.equal(app.target.querySelector(".state .bar"), null);
   } finally {
     app.destroy();
     net.restore();
@@ -246,6 +274,50 @@ test("a reply opens under the conversation, names its recipients and names the p
     app.destroy();
     net.restore();
   }
+});
+
+test("Reply to all copies the other people of the parent, once, and only when the person asks (issue #455)", async () => {
+  const net = serve(() => [201, { write: "cs-5" }]);
+  const all = ["sam@okafor.example", "Ana@Example.com"];
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: { ...REPLY, all } }, every: 20 });
+  try {
+    const button = () => [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Reply to all");
+    assert.doesNotMatch(text(app.target.querySelector(".who")), /copy to/, "a reply goes to the sender only by default");
+    button().click();
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".who")), /Reply to Priya Shah, copy to sam@okafor\.example, Ana@Example\.com/);
+    assert.equal(button(), undefined, "each one is in the copy now");
+    // Change shows them as copy chips; a removed one brings the button back.
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+    app.flushSync();
+    [...app.target.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Remove sam@okafor.example").click();
+    app.flushSync();
+    button().click();
+    app.flushSync();
+    type(app.target.querySelector("textarea"), "Yes.\n");
+    app.flushSync();
+    press(app);
+    await until(() => net.posts().length > 0);
+    const [post] = net.posts();
+    assert.deepEqual(post.body.to, ["priya@example.com"]);
+    assert.deepEqual(post.body.cc, ["Ana@Example.com", "sam@okafor.example"]);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a reply with no other people shows no Reply to all", async () => {
+  const net = serve(() => [201, { write: "cs-5" }]);
+  for (const reply of [REPLY, { ...REPLY, all: [] }, { ...REPLY, all: ["PRIYA@example.com"] }]) {
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply }, every: 20 });
+    try {
+      assert.equal([...app.target.querySelectorAll("button")].find((b) => b.textContent === "Reply to all"), undefined);
+    } finally {
+      app.destroy();
+    }
+  }
+  net.restore();
 });
 
 test("Change opens the recipients of a reply as chips", async () => {
@@ -835,6 +907,36 @@ test("a saved form with a changed intent or recipient does not get the saved dra
   }
 });
 
+test("a saved form whose recipients changed order does not get the saved draft (issue 831)", async () => {
+  // The voice draft greets the first recipient: a form with the same people in another order is a form that the person changed.
+  const two = { ...REPLY, to: ["priya@example.com", "sam@example.com"] };
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, order, want] of [
+    ["the same order", (to) => to, saved.body],
+    ["another order", (to) => [...to].reverse(), ""],
+  ]) {
+    window.sessionStorage.clear();
+    let net = serve(() => [404, { error: "Not found." }]);
+    const first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: two }, every: 20 });
+    await new Promise((r) => setTimeout(r, 20));
+    first.flushSync();
+    first.destroy();
+    net.restore();
+    const form = JSON.parse(window.sessionStorage.getItem("iris.write.t-2"));
+    window.sessionStorage.setItem("iris.write.t-2", JSON.stringify({ ...form, to: order(form.to) }));
+    net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: two }, every: 20 });
+    try {
+      await new Promise((r) => setTimeout(r, 40));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, want, name);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
 test("a change to the intent or a recipient while the saved draft loads keeps the draft out (issue 743)", async () => {
   const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
   for (const [name, change] of [
@@ -873,5 +975,554 @@ test("a change to the intent or a recipient while the saved draft loads keeps th
       app.destroy();
       net.restore();
     }
+  }
+});
+
+test("Add Bcc opens the blind copy, a chosen file goes to the engine first, and Send sends both (send content spec)", async () => {
+  const net = serve((path, method) => {
+    if (path === "attachments") return [201, { sha256: "ab".repeat(32), size: 5 }];
+    if (path === "write" && method === "POST") return [201, { write: "cs-3" }];
+    return [200, { state: "saving" }];
+  });
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 60_000 });
+  try {
+    await fill(app);
+    assert.equal(app.target.querySelector("#write-bcc"), null, "the blind copy waits for its button");
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Add Bcc").click();
+    app.flushSync();
+    type(app.target.querySelector("#write-bcc"), "lee@example.org ");
+    app.flushSync();
+    const input = app.target.querySelector("input[type=file]");
+    const file = new window.File(["hello"], "notes.txt", { type: "text/plain;charset=utf-8" });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await until(() => app.target.querySelector(".files .chip"));
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".files")), /notes\.txt\s*5 B/);
+    const up = net.posts().find((a) => a.path === "attachments");
+    assert.equal(typeof up.body.arrayBuffer, "function", "the file goes as its bytes");
+    press(app);
+    await until(() => net.posts().some((a) => a.path === "write"));
+    const mail = net.posts().find((a) => a.path === "write").body;
+    assert.deepEqual(mail.bcc, ["lee@example.org"]);
+    assert.deepEqual(mail.attachments, [{ name: "notes.txt", type: "text/plain", size: 5, sha256: "ab".repeat(32) }]);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a file that the engine refuses names its reason and does not join the mail", async () => {
+  const net = serve((path) => (path === "attachments" ? [413, { error: "The file is too large." }] : [200, {}]));
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 60_000 });
+  try {
+    await fill(app);
+    const input = app.target.querySelector("input[type=file]");
+    Object.defineProperty(input, "files", { configurable: true, value: [new window.File(["x"], "big.bin")] });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await until(() => app.target.querySelector(".note"));
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".note")), /big\.bin: The file is too large\./);
+    assert.equal(app.target.querySelector(".files .chip"), null);
+    assert.equal(app.target.querySelector("button[type=submit]").disabled, false);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("Change and send opens the form with the draft and a new key; update sends the draft, new does not (draft change spec, section 5)", async () => {
+  for (const change of ["update", "new", null]) {
+    window.sessionStorage.clear();
+    let n = 0;
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: `cs-${++n}` }];
+      if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change }];
+      if (path === "write/cs-2") return [200, { state: "saving" }];
+      if (path === "drafts/d-1")
+        return [200, { draft: "d-1", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: ["kim@example.com"], bcc: [],
+                       subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    try {
+      await fill(app);
+      press(app);
+      await until(() => text(app.target).includes("This mail did not leave"));
+      const button = () => [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change and send");
+      if (change === null) {
+        assert.equal(button(), undefined, "no change: no button");
+        continue;
+      }
+      button().click();
+      await until(() => app.target.querySelector("form"));
+      app.flushSync();
+      assert.equal(app.target.querySelector("input.subject").value, "Dinner on Saturday?");
+      assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n\nAre you free?\n");
+      // The same content as the stopped write: the press is a new write, with a new key.
+      press(app);
+      await until(() => net.posts().filter((p) => p.path === "write").length === 2);
+      const [first, second] = net.posts().filter((p) => p.path === "write").map((p) => p.body);
+      assert.deepEqual(second.to, ["sam@okafor.example"]);
+      assert.deepEqual(second.cc, ["kim@example.com"]);
+      assert.equal(second.body, first.body);
+      assert.equal(second.draft, change === "update" ? "d-1" : undefined);
+      assert.notEqual(second.key, first.key, "a new write gets a new key");
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
+test("A stopped reply with a newer mail says why it cannot change (draft change spec, section 5, #1077)", async () => {
+  for (const newer of [true, undefined]) {
+    window.sessionStorage.clear();
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+      if (path === "write/cs-1")
+        return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change: null, newer_mail: newer }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    try {
+      await fill(app);
+      press(app);
+      await until(() => text(app.target).includes("This mail did not leave"));
+      const why = text(app.target).includes("A new mail came into this thread. Write a new reply.");
+      assert.equal(why, newer === true);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
+test("Write another waits while the draft loads, and a draft holds only for its own account", async () => {
+  const TWO = [...ACCOUNTS, { ...ACCOUNTS[0], id: 2, address: "dk@work.example" }];
+  let release;
+  const slow = new Promise((r) => (release = r));
+  let n = 0;
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: `cs-${++n}` }];
+    if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change: "update" }];
+    if (path === "write/cs-2") return [200, { state: "saving" }];
+    if (path === "drafts/d-1")
+      return [200, { draft: "d-1", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [],
+                     subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [] }];
+    return [404, { error: "Not found." }];
+  });
+  // The draft read waits until the test releases it.
+  const fast = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes("drafts/d-1") ? (await slow, fast(url, init)) : fast(url, init));
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: TWO }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => text(app.target).includes("This mail did not leave"));
+    const button = (t) => [...app.target.querySelectorAll("button")].find((b) => b.textContent === t);
+    button("Change and send").click();
+    app.flushSync();
+    assert.equal(button("Write another").disabled, true, "Write another waits for the draft");
+    release();
+    await until(() => app.target.querySelector("form"));
+    app.flushSync();
+    const from = app.target.querySelector("select");
+    // happy-dom has no `:checked` for an option, and Svelte reads the choice with it.
+    const query = from.querySelector.bind(from);
+    from.querySelector = (q) => (q === ":checked" ? from.options[1] : query(q));
+    from.value = "a-2";
+    from.dispatchEvent(new window.Event("change", { bubbles: true }));
+    app.flushSync();
+    press(app);
+    await until(() => net.posts().filter((p) => p.path === "write").length === 2);
+    const second = net.posts().filter((p) => p.path === "write")[1].body;
+    assert.equal(second.account, "a-2");
+    assert.equal(second.draft, undefined, "a draft of a-1 does not go with a mail from a-2");
+  } finally {
+    app.destroy();
+    globalThis.fetch = fast;
+    net.restore();
+  }
+});
+
+test("#/write/d-N opens the form with the draft; update sends the draft, new does not (issue 941)", async () => {
+  const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: ["kim@example.com"], bcc: [],
+                  subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] };
+  for (const change of ["update", "new"]) {
+    window.sessionStorage.clear();
+    // A write of the new-mail form does not show in the form of the draft.
+    window.sessionStorage.setItem("iris.write.new.taken", JSON.stringify({ write: "cs-9", to: ["x@example.com"], subject: "Old", body: "Old" }));
+    // An unfinished form of another mail: the draft link never shows it.
+    window.sessionStorage.setItem("iris.write.new", JSON.stringify({ key: "k-old", to: ["old@example.com"], cc: [], bcc: [], subject: "Other", body: "Other text" }));
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+      if (path === "write/cs-1") return [200, { state: "saving" }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...DRAFT, change } }, every: 20 });
+    try {
+      app.flushSync();
+      assert.match(text(app.target), /This is the draft that you cancelled\./);
+      assert.doesNotMatch(text(app.target), /old@example\.com/, "no address of the other mail");
+      assert.equal(app.target.querySelector("input.subject").value, "Dinner on Saturday?");
+      assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n\nAre you free?\n");
+      press(app);
+      await until(() => net.posts().length === 1);
+      const sent = net.posts()[0].body;
+      assert.deepEqual([sent.to, sent.cc, sent.subject], [["sam@okafor.example"], ["kim@example.com"], "Dinner on Saturday?"]);
+      assert.equal(sent.draft, change === "update" ? "d-7" : undefined);
+      assert.ok(sent.key, "a press has a key");
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
+test("a reply draft link keeps the draft text, not an automatic draft; a stopped write names a newer mail", async () => {
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+    if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-7", change: null, newer_mail: true }];
+    // An automatic draft for the parent of the thread: a draft link does not take it.
+    if (method === "GET" && path === "threads/t-2/draft") return [200, { body: "Hi Priya,\n\nYes.", based_on: "m-9", nudge: false }];
+    return [404, { error: "Not found." }];
+  });
+  const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["priya@example.com"], cc: [], bcc: [],
+                  subject: "Re: Q4", body: "", attachments: [], change: "update" };
+  let app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY, change: DRAFT }, every: 20 });
+  try {
+    await new Promise((r) => setTimeout(r, 60));
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "", "the text of the draft, not an automatic draft");
+  } finally {
+    app.destroy();
+  }
+  window.sessionStorage.clear();
+  app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    type(app.target.querySelector("textarea"), "Here they are.\n");
+    app.flushSync();
+    press(app);
+    await until(() => text(app.target).includes("This mail did not leave"));
+    assert.match(text(app.target), /A new mail came into this thread\. Write a new reply\./);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("loadChange: a draft that cannot change opens no form, and reads nothing more (issue 941)", async () => {
+  const api = await load("/src/api.ts");
+  const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["priya@example.com"], cc: [], bcc: [],
+                  subject: "Re: Q4", body: "Old.\n", attachments: [], newer_mail: true };
+  for (const change of [null, "update"]) {
+    const net = serve((path) => {
+      if (path === "drafts/d-7") return [200, { ...DRAFT, change }];
+      if (path === "threads/t-2/reply") return [409, { error: "This thread has no mail to reply to." }];
+      return [404, { error: "Not found." }];
+    });
+    try {
+      if (change === null) {
+        const start = await api.loadChange("d-7");
+        assert.deepEqual(start, { closed: { ...DRAFT, change: null } });
+        assert.deepEqual(net.asked.map((a) => a.path), ["drafts/d-7"]);
+      } else {
+        // A draft that can change needs its thread: the error shows.
+        await assert.rejects(api.loadChange("d-7"), /no mail to reply to/);
+      }
+    } finally {
+      net.restore();
+    }
+  }
+});
+
+test("a draft link keeps its own form: the unfinished new mail stays, a reload keeps the changes, and a write of the link is never hidden (issue 941)", async () => {
+  const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [],
+                  subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [], change: "update" };
+  let state = { state: "waiting", draft: "d-9", sending: true, leaves_at: null };
+  const net = serve((path, method) => (method === "POST" && path === "write" ? [201, { write: "cs-1" }] : path === "write/cs-1" ? [200, state] : [404, { error: "Not found." }]));
+  const form = (app) => app.target.querySelector("form");
+  try {
+    // An unfinished new mail.
+    let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    await fill(app, "kim@example.com ");
+    type(app.target.querySelector("textarea"), "My unfinished mail.\n");
+    app.flushSync();
+    app.destroy();
+    // The draft link: the person changes the text, then reloads.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: DRAFT }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n");
+    type(app.target.querySelector("textarea"), "Hi Sam, changed.\n");
+    app.flushSync();
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: DRAFT }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "Hi Sam, changed.\n", "a reload keeps the changes");
+    app.destroy();
+    // The draft can change now only as a new draft (Outlook): the kept form does not send the old draft.
+    const NEW = { ...DRAFT, change: "new" };
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "Hi Sam, changed.\n");
+    press(app);
+    await until(() => net.posts().length === 1);
+    assert.equal(net.posts()[0].body.draft, undefined, "a new draft");
+    await until(() => !form(app));
+    app.destroy();
+    // A reload while that send waits: the old draft can still change, but the view shows the write, not a form.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    try {
+      app.flushSync();
+      assert.equal(form(app), null, "no form while the write waits");
+      await until(() => /Cancel the send/.test(text(app.target)));
+      await new Promise((r) => setTimeout(r, 60));
+      assert.equal(form(app), null);
+      assert.equal(net.posts().length, 1, "no second send");
+    } finally {
+      app.destroy();
+    }
+    // The person cancels that send in the Outbox and follows the link again: the write ended, the form shows.
+    state = { state: "stopped", reason: "Cancelled in the outbox.", draft: "d-9", change: "new" };
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    try {
+      await until(() => form(app));
+      assert.match(text(app.target), /This is the draft that you cancelled\./);
+      await new Promise((r) => setTimeout(r, 60));
+      assert.ok(form(app), "the form stays");
+    } finally {
+      app.destroy();
+    }
+    // Back to the new mail: it is still there.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "My unfinished mail.\n");
+    assert.match(text(app.target), /kim@example\.com/);
+    app.destroy();
+  } finally {
+    net.restore();
+  }
+});
+
+// Issues 1098, 1101 and 1102: while a write of a draft link can still leave, each open of the link shows that write,
+// and the form of a link holds only the draft of the link.
+const D7 = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [], subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [] };
+const button = (app, words) => [...app.target.querySelectorAll("button")].find((b) => b.textContent.trim() === words);
+
+test("a reload of a draft link while its own send waits shows that send, and its end, not a closed draft (issue 1098)", async () => {
+  const api = await load("/src/api.ts");
+  let state = { state: "waiting", draft: "d-7", sending: true, leaves_at: null };
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+    if (path === "write/cs-1") return [200, state];
+    // The send of the press waits, so the draft cannot change now.
+    if (path === "drafts/d-7") return [200, { ...D7, change: null }];
+    if (path === "status") return [200, { accounts: ACCOUNTS }];
+    return [404, { error: "Not found." }];
+  });
+  globalThis.location = window.location;
+  try {
+    assert.deepEqual(await api.loadChange("d-7"), { closed: { ...D7, change: null } }, "no write of the link: closed");
+    let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...D7, change: "update" } }, every: 20 });
+    app.flushSync();
+    press(app);
+    await until(() => /Cancel the send/.test(text(app.target)));
+    app.destroy();
+    // The reload: the engine says that the draft cannot change, but the write of the link can still leave.
+    const start = await api.loadChange("d-7");
+    assert.ok(!("closed" in start), "the write of the link shows");
+    assert.equal(start.change.change, null);
+    app = await mount("/src/views/Write.svelte", { start, every: 20 });
+    try {
+      app.flushSync();
+      assert.equal(app.target.querySelector("form"), null);
+      await until(() => /Cancel the send/.test(text(app.target)));
+      // The send leaves: the view shows the end of the write, not a form of the sent draft.
+      state = { state: "sent", draft: "d-7" };
+      await until(() => /Sent to sam@okafor\.example/.test(text(app.target)));
+      await new Promise((r) => setTimeout(r, 60));
+      assert.equal(app.target.querySelector("form"), null, "no form of a draft that cannot change");
+      assert.equal(net.posts().length, 1);
+    } finally {
+      app.destroy();
+    }
+    assert.deepEqual(await api.loadChange("d-7"), { closed: { ...D7, change: null } }, "the write ended: closed again");
+  } finally {
+    net.restore();
+    delete globalThis.location;
+  }
+});
+
+test("Write another on a draft link keeps its waiting write, so the next open of the link shows it, not a form (issue 1101)", async () => {
+  const NEW = { ...D7, change: "new" };
+  let state = { state: "waiting", draft: "d-9", sending: true, leaves_at: null };
+  const net = serve((path, method) => (method === "POST" && path === "write" ? [201, { write: "cs-1" }] : path === "write/cs-1" ? [200, state] : [404, { error: "Not found." }]));
+  globalThis.location = window.location;
+  location.hash = "#/write/d-7";
+  try {
+    let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    app.flushSync();
+    press(app);
+    await until(() => button(app, "Write another"));
+    button(app, "Write another").click();
+    assert.equal(location.hash, "#/write");
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    try {
+      app.flushSync();
+      assert.equal(app.target.querySelector("form"), null, "the waiting write, not a form");
+      await until(() => /Cancel the send/.test(text(app.target)));
+      assert.equal(net.posts().length, 1, "no second mail from the same draft");
+      // The write ends (sent): its record ends, and the form of the old draft shows again.
+      state = { state: "sent", draft: "d-9" };
+      await until(() => app.target.querySelector("form"));
+    } finally {
+      app.destroy();
+    }
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    try {
+      app.flushSync();
+      assert.ok(app.target.querySelector("form"), "the write ended: the link opens the form");
+    } finally {
+      app.destroy();
+    }
+  } finally {
+    net.restore();
+    delete globalThis.location;
+  }
+});
+
+test("Change and send of another draft on a draft link opens the link of that draft (issue 1102)", async () => {
+  const NEW = { ...D7, change: "new" };
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+    if (path === "write/cs-1") return [200, { state: "stopped", reason: "Cancelled in the outbox.", draft: "d-9", change: "new" }];
+    return [404, { error: "Not found." }];
+  });
+  globalThis.location = window.location;
+  location.hash = "#/write/d-7";
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+  try {
+    app.flushSync();
+    type(app.target.querySelector("textarea"), "Hi Sam, changed.\n");
+    app.flushSync();
+    press(app);
+    await until(() => button(app, "Change and send"));
+    button(app, "Change and send").click();
+    assert.equal(location.hash, "#/write/d-9");
+    assert.ok(!net.asked.some((a) => a.path === "drafts/d-9"), "the form of d-7 does not load d-9");
+    assert.equal(window.sessionStorage.getItem("iris.write.d-7.taken"), null, "the stopped write ended");
+    app.flushSync();
+    assert.equal(app.target.querySelector("form"), null, "no form of d-9 under the place of d-7");
+  } finally {
+    app.destroy();
+    net.restore();
+    delete globalThis.location;
+  }
+});
+
+test("a kept write of a reply draft link shows also when its thread has no mail to reply to (issue 1098)", async () => {
+  const api = await load("/src/api.ts");
+  const R7 = { ...D7, thread: "t-2", subject: "Re: Q4" };
+  let busy = false;
+  let state = { state: "waiting", draft: "d-7", sending: true, leaves_at: null };
+  const net = serve((path) => {
+    if (path === "write/cs-1") return [200, state];
+    if (path === "threads/t-2/reply") return busy ? [503, { error: "The store is busy." }] : [409, { error: "This thread has no mail to reply to." }];
+    if (path.startsWith("drafts/d-7")) return [200, { ...R7, change: R7.change }];
+    return [404, { error: "Not found." }];
+  });
+  try {
+    for (const change of [null, "update"]) {
+      R7.change = change;
+      window.sessionStorage.clear();
+      // With no kept write: a closed draft says why, and a draft that can change needs its thread.
+      if (change === null) assert.deepEqual(await api.loadChange("d-7"), { closed: { ...R7, change: null } });
+      else await assert.rejects(api.loadChange("d-7"), /no mail to reply to/);
+      window.sessionStorage.setItem("iris.write.d-7.taken", JSON.stringify({ write: "cs-1", to: ["sam@okafor.example"], subject: "", body: "Hi Sam,\n" }));
+      // Another error of the reply start shows: the next open reads the reply again.
+      busy = true;
+      await assert.rejects(api.loadChange("d-7"), /The store is busy/);
+      busy = false;
+      const start = await api.loadChange("d-7");
+      assert.deepEqual(start, { accounts: [], change: { ...R7, change: null } });
+      state = { state: "waiting", draft: "d-7", sending: true, leaves_at: null };
+      const app = await mount("/src/views/Write.svelte", { start, every: 20 });
+      try {
+        await until(() => /Cancel the send/.test(text(app.target)));
+        assert.equal(app.target.querySelector("form"), null);
+        state = { state: "stopped", reason: "Cancelled in the outbox.", draft: "d-7", change: null };
+        await until(() => /This mail did not leave/.test(text(app.target)));
+        await new Promise((r) => setTimeout(r, 60));
+        assert.equal(app.target.querySelector("form"), null, "no form after the end");
+      } finally {
+        app.destroy();
+      }
+    }
+  } finally {
+    net.restore();
+  }
+});
+
+test("a kept write of a draft link shows also when the draft of the link is gone (issue 1098)", async () => {
+  const api = await load("/src/api.ts");
+  let answer = [404, { error: "Not found." }];
+  const net = serve((path) => {
+    if (path === "write/cs-1") return [200, { state: "waiting", draft: "d-9", sending: true, leaves_at: null }];
+    if (path === "drafts/d-7") return answer;
+    return [404, { error: "Not found." }];
+  });
+  try {
+    await assert.rejects(api.loadChange("d-7"), /Not found/, "no kept write: the error shows");
+    window.sessionStorage.setItem("iris.write.d-7.taken", JSON.stringify({ write: "cs-1", to: ["sam@okafor.example"], subject: "Dinner on Saturday?", body: "Hi Sam,\n" }));
+    // No definite answer: the error shows, and the next open reads again.
+    answer = [503, { error: "The store is busy." }];
+    await assert.rejects(api.loadChange("d-7"), /The store is busy/);
+    answer = [404, { error: "Not found." }];
+    const start = await api.loadChange("d-7");
+    assert.deepEqual(start.accounts, []);
+    assert.equal(start.change.draft, "d-7");
+    assert.equal(start.change.change, null);
+    const app = await mount("/src/views/Write.svelte", { start, every: 20 });
+    try {
+      await until(() => /Cancel the send/.test(text(app.target)));
+      assert.equal(app.target.querySelector("form"), null);
+      assert.match(text(app.target), /Hi Sam,/);
+    } finally {
+      app.destroy();
+    }
+  } finally {
+    net.restore();
+  }
+});
+
+test("a failed status read does not hide the kept write of a new-mail draft link (issue 1112)", async () => {
+  const api = await load("/src/api.ts");
+  const net = serve((path) => {
+    if (path === "write/cs-1") return [200, { state: "waiting", draft: "d-7", sending: true, leaves_at: null }];
+    if (path === "drafts/d-7") return [200, { ...D7, change: "update" }];
+    if (path === "status") return [503, { error: "The store is busy." }];
+    return [404, { error: "Not found." }];
+  });
+  try {
+    window.sessionStorage.removeItem("iris.write.d-7.taken");
+    // No kept write: the status is the account list of the form, and its error shows.
+    await assert.rejects(api.loadChange("d-7"), /The store is busy/);
+    window.sessionStorage.setItem("iris.write.d-7.taken", JSON.stringify({ write: "cs-1", to: ["sam@okafor.example"], subject: "Dinner on Saturday?", body: "Hi Sam,\n" }));
+    // A kept write: the write shows, with no form after it (no account list), as a start with no mail to reply to.
+    const start = await api.loadChange("d-7");
+    assert.deepEqual(start.accounts, []);
+    assert.equal(start.change.change, null);
+    const app = await mount("/src/views/Write.svelte", { start, every: 20 });
+    try {
+      await until(() => /Cancel the send/.test(text(app.target)));
+      assert.equal(app.target.querySelector("form"), null);
+    } finally {
+      app.destroy();
+    }
+  } finally {
+    window.sessionStorage.removeItem("iris.write.d-7.taken");
+    net.restore();
   }
 });

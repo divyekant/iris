@@ -150,7 +150,9 @@ impl Store {
                      OR EXISTS (SELECT 1 FROM action_item ai JOIN item i ON i.id = ai.item_id
                                 WHERE ai.action_id = changeset_action.id AND i.account_id = ?1)
                      OR EXISTS (SELECT 1 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
-                                WHERE ad.action_id = changeset_action.id AND d.account_id = ?1))",
+                                WHERE ad.action_id = changeset_action.id AND d.account_id = ?1)
+                     OR EXISTS (SELECT 1 FROM json_each(changeset_action.targets, '$.accounts')
+                                WHERE value = 'a-' || ?1))",
                 params![id, now],
             )?;
             // Before the items go: after that, no other row links a job to
@@ -299,8 +301,8 @@ impl Store {
                     "DELETE FROM message_label WHERE message_id = ?1",
                     "DELETE FROM use_open WHERE message_id = ?1",
                     "DELETE FROM notice WHERE message_id = ?1",
-                    // The cascades delete attention_due, link_check,
-                    // sender_evidence and reply_draft.
+                    // The cascades delete attention_due, fixed_due, link_check, link_recheck,
+                    // model_declined, sender_evidence and reply_draft.
                     "DELETE FROM message WHERE id = ?1",
                 ] {
                     tx.execute(sql, [id])?;
@@ -369,10 +371,22 @@ impl Store {
 fn end(c: &Connection, account: i64) -> Result<()> {
     // A thread that a draft refers to stays as a bare row: the draft is a
     // part of the record of actions.
-    c.execute(
-        "DELETE FROM talk_due WHERE thread_id IN (SELECT id FROM thread WHERE account_id = ?1)",
-        [account],
-    )?;
+    // The rows of a thread that hold mail data go also from a bare thread:
+    // a summary and the tries of a summary or a nudge (their keys name the
+    // messages and the commitments of the mail).
+    for table in [
+        "talk_due",
+        "thread_summary",
+        "thread_summary_try",
+        "nudge_try",
+    ] {
+        c.execute(
+            &format!(
+                "DELETE FROM {table} WHERE thread_id IN (SELECT id FROM thread WHERE account_id = ?1)"
+            ),
+            [account],
+        )?;
+    }
     c.execute(
         "DELETE FROM thread WHERE account_id = ?1
            AND NOT EXISTS (SELECT 1 FROM draft d WHERE d.thread_id = thread.id)",

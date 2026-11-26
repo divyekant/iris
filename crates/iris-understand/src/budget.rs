@@ -88,6 +88,15 @@ pub struct State {
     /// A reservation or a settle write failed: the counts of a call can be
     /// missing, so no later call goes out.
     pub store_failed: bool,
+    /// A call stopped for a waiter of the run lock ([`Budgeted::yielding`],
+    /// issue #1126). The result of the call is unknown: a priced call keeps
+    /// its worst case as unknown cost. It is no model error. No later call
+    /// goes out.
+    pub cancelled: bool,
+    /// A request of this run can have gone out: the inner model got a call.
+    /// False after a refusal or a cancel before the first request (issue
+    /// #1175).
+    pub sent: bool,
 }
 
 /// The model that `store::understand` gets from the runner (spec
@@ -99,6 +108,8 @@ pub struct Budgeted<'a> {
     run: i64,
     price: Option<Price>,
     max_tokens: u64,
+    /// Stop the wait for an answer when a caller of `batch::lock_wait` waits.
+    yields: bool,
     state: Cell<State>,
     /// A store error of a reservation or a settle write: the run stops.
     error: RefCell<Option<iris_store::Error>>,
@@ -133,8 +144,30 @@ impl<'a> Budgeted<'a> {
             run,
             price: row.and_then(|r| r.price),
             max_tokens: row.map_or(0, |r| r.max_tokens as u64),
+            yields: false,
             state: Cell::default(),
             error: RefCell::new(None),
+        }
+    }
+
+    /// The model for a holder of the run lock that took it with
+    /// `batch::lock` (a run, the matter step, the nudge and summary steps):
+    /// the wait for an answer stops when a draft or a question waits for the
+    /// run lock (`batch::wanted`, issue #1126).
+    pub fn yielding(mut self) -> Self {
+        self.yields = true;
+        self
+    }
+
+    /// Calls the inner model, with the cancel of [`Budgeted::yielding`].
+    fn call(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        self.set(|s| s.sent = true);
+        if self.yields {
+            let store = self.store;
+            self.inner
+                .ask_cancel(instruction, data, &|| crate::batch::wanted(store))
+        } else {
+            self.inner.ask(instruction, data)
         }
     }
 
@@ -207,9 +240,14 @@ impl<'a> Budgeted<'a> {
         instruction: &str,
         data: &str,
     ) -> Result<iris_model::Reply, iris_model::Error> {
-        let r = self.inner.ask(instruction, data);
+        let r = self.call(instruction, data);
         let mut n = Counts::default();
         match &r {
+            // The request can have gone out: one call with unknown tokens.
+            Err(iris_model::Error::Cancelled) => {
+                n.unknown_calls = 1;
+                self.set(|s| s.cancelled = true);
+            }
             Ok(reply) if reply.usage.known => {
                 n.calls = 1;
                 n.input = i64_of(reply.usage.input_tokens);
@@ -255,6 +293,18 @@ impl Model for Budgeted<'_> {
         // After a failed store write, the runner must stop: no call.
         if self.state.get().store_failed {
             return Err(refuse("a store write of this run failed"));
+        }
+        // After a cancel, the holder stops: no refusal (it is no budget
+        // cause, so no mail gets a mark), the same cancel again.
+        if self.state.get().cancelled {
+            return Err(iris_model::Error::Cancelled);
+        }
+        // A waiter that came before the request (for example during the
+        // call before a retry) gets the lock now: no request starts, so no
+        // cost counts (issue #1126).
+        if self.yields && crate::batch::wanted(self.store) {
+            self.set(|s| s.cancelled = true);
+            return Err(iris_model::Error::Cancelled);
         }
         let Some(price) = self.price else {
             return self.ask_free(instruction, data);
@@ -307,7 +357,7 @@ impl Model for Budgeted<'_> {
             }
         }
         // Step 2.
-        let r = self.inner.ask(instruction, data);
+        let r = self.call(instruction, data);
         // Step 3: the real cost, or the worst case for unknown usage.
         let mut n = Counts::default();
         let spent = match &r {
@@ -333,6 +383,15 @@ impl Model for Budgeted<'_> {
             }
             // No request went out.
             Err(iris_model::Error::NoKey | iris_model::Error::Budget(_)) => 0,
+            // A cancel for a waiter (issue #1126): the provider can charge
+            // the request, so the worst case stays taken, as for an unknown
+            // result. It is no model error, so it starts no model wait.
+            Err(iris_model::Error::Cancelled) => {
+                n.unknown_calls = 1;
+                n.unknown_cost = worst;
+                self.set(|s| s.cancelled = true);
+                worst
+            }
             // Every other answer has no reliable usage: the provider can
             // charge. The worst case stays taken, and the run stops.
             _ => {

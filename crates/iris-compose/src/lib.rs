@@ -107,7 +107,34 @@ impl Attachment {
     pub fn is_file(&self, bytes: &[u8]) -> bool {
         bytes.len() as u64 == self.size && sha256(bytes) == self.sha256
     }
+
+    /// As [`Attachment::is_file`], for the bytes of `r`, read in parts of
+    /// [`FILE_CHUNK`] bytes: the memory holds one part, whatever the size
+    /// of the file. It stops at the first byte after [`Attachment::size`].
+    pub fn is_file_in(&self, mut r: impl std::io::Read) -> std::io::Result<bool> {
+        let mut hash = Sha256::new();
+        let mut buf = vec![0u8; FILE_CHUNK];
+        let mut len = 0u64;
+        loop {
+            let n = match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            len += n as u64;
+            if len > self.size {
+                return Ok(false);
+            }
+            hash.update(&buf[..n]);
+        }
+        let hex: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        Ok(len == self.size && hex == self.sha256)
+    }
 }
+
+/// The size of one read of [`Attachment::is_file_in`].
+pub const FILE_CHUNK: usize = 64 * 1024;
 
 /// The SHA-256 of `bytes` in lower case hexadecimal.
 pub fn sha256(bytes: &[u8]) -> String {
@@ -137,6 +164,8 @@ pub struct Read {
     /// True if the message has a `Bcc` header. A provider can remove it
     /// from a sent copy (send content spec, section 4).
     pub bcc_header: bool,
+    /// The `Date` header, in seconds since 1970, if the message has one.
+    pub date: Option<i64>,
 }
 
 impl Content {
@@ -298,7 +327,7 @@ fn line_ends(text: &str) -> String {
 
 /// An address `local@domain`: ASCII, printable, no space and none of the
 /// characters that have a meaning in an address header.
-fn check_address(a: &str) -> Result<(), String> {
+pub fn check_address(a: &str) -> Result<(), String> {
     let bad = || Err(format!("not an address of the form local@domain: {a:?}"));
     if a.len() > MAX_ADDRESS {
         return bad();
@@ -678,6 +707,7 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         reply,
         files,
         bcc_header: names.contains("bcc"),
+        date: m.date().map(|d| d.to_timestamp()),
     };
     // By construction: the message that Iris writes for this content has
     // the same recipient, subject and ID headers, as mail-parser reads them

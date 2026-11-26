@@ -82,8 +82,9 @@ const ATTACHMENT_WORDS: [&str; 21] = [
     "enclosing",
 ];
 
-/// The byte ranges of the words of a text, as the full-text index splits
-/// them: runs of letters and digits.
+/// The byte ranges of the words of a text for the word rules (money, date,
+/// attachment): runs of letters and digits. This is not the split of the
+/// full-text index: the copied-run check uses `iris_store::index_tokens`.
 fn word_spans(text: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = None;
@@ -103,8 +104,8 @@ fn word_spans(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// The words of a text, as the full-text index splits them: runs of
-/// letters and digits, in lower case.
+/// The words of a text for the word rules: runs of letters and digits, in
+/// lower case ([`word_spans`]).
 pub fn words(text: &str) -> Vec<String> {
     word_spans(text)
         .into_iter()
@@ -341,8 +342,31 @@ pub enum Field {
     To(usize),
     /// The address with this index in `cc`.
     Cc(usize),
+    /// The address with this index in `bcc`.
+    Bcc(usize),
     Subject,
     Body,
+}
+
+/// Each recipient of `content`, in `to`, `cc` and `bcc`, with its field.
+/// Each recipient check reads this list, so no check misses a field.
+pub fn recipients(content: &iris_compose::Content) -> impl Iterator<Item = (Field, &String)> {
+    let to = content
+        .to
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::To(i), a));
+    let cc = content
+        .cc
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::Cc(i), a));
+    let bcc = content
+        .bcc
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::Bcc(i), a));
+    to.chain(cc).chain(bcc)
 }
 
 /// One part of a draft that gave a draft flag (card R4-07): the review
@@ -390,18 +414,7 @@ fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<V
         range,
         source,
     };
-    let addresses = content
-        .to
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::To(i), a))
-        .chain(
-            content
-                .cc
-                .iter()
-                .enumerate()
-                .map(|(i, a)| (Field::Cc(i), a)),
-        );
+    let addresses = recipients(content);
     for (field, a) in addresses {
         if a.eq_ignore_ascii_case(account) {
             continue;
@@ -417,11 +430,17 @@ fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<V
         (Field::Subject, content.subject.as_str()),
         (Field::Body, content.body.as_str()),
     ];
+    // "No file attached" only when the draft has no file (send content
+    // spec, section 6).
+    let no_file = content.attachments.is_empty();
     for (flag, find) in [
         ("money", money_spans as fn(&str) -> Vec<Range<usize>>),
         ("date", date_spans),
         ("attachment", attachment_spans),
     ] {
+        if flag == "attachment" && !no_file {
+            continue;
+        }
         for (field, text) in texts {
             marks.extend(find(text).into_iter().map(|r| mark(flag, field, r, None)));
         }
@@ -469,7 +488,12 @@ fn merge(mut marks: Vec<Mark>) -> Vec<Mark> {
 /// start. Gives the byte range of the run and one such message. With
 /// `all` false, it stops at the first run.
 fn copied(c: &Connection, text: &str, all: bool) -> Result<Vec<(Range<usize>, i64)>> {
-    let (w, spans) = spanned(text);
+    // The words of the index, not of `word_spans`: the phrase must hold the
+    // tokens that `message_fts` holds (issue #756).
+    let (w, spans): (Vec<String>, Vec<Range<usize>>) = iris_store::index_tokens(c, text)?
+        .into_iter()
+        .map(|t| (t.word, t.range))
+        .unzip();
     let mut st = c.prepare_cached(
         "SELECT f.rowid FROM message_fts f
          WHERE message_fts MATCH ?1
@@ -481,7 +505,7 @@ fn copied(c: &Connection, text: &str, all: bool) -> Result<Vec<(Range<usize>, i6
     )?;
     let mut out = Vec::new();
     for (k, run) in w.as_chunks::<RUN>().0.iter().enumerate() {
-        // The words are letters and digits only: no FTS5 syntax inside.
+        // The tokens of the index hold no `"`: no FTS5 syntax inside.
         let phrase = format!("text : \"{}\"", run.join(" "));
         if let Some(id) = st.query_row([phrase], |r| r.get::<_, i64>(0)).optional()? {
             out.push((spans[k * RUN].start..spans[k * RUN + RUN - 1].end, id));
@@ -530,6 +554,9 @@ pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Con
                     "SELECT a.address FROM account a WHERE 'a-' || a.id IN
                        (SELECT value FROM json_each(?2, '$.accounts'))
                      UNION ALL
+                     SELECT a.address FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+                       JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1
+                     UNION ALL
                      SELECT a.address FROM action_message am JOIN message m ON m.id = am.message_id
                        JOIN account a ON a.id = m.account_id WHERE am.action_id = ?1
                      LIMIT 1",
@@ -543,9 +570,13 @@ pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Con
             let Ok(mut content) = serde_json::from_str::<Content>(&args) else {
                 return Ok(None);
             };
-            // The subject from the mirror. The apply sets the subject from
-            // Gmail and checks the flags of the final content again.
-            if let Some(p) = crate::parent(c, action)? {
+            // A change of a reply keeps the subject of its draft (change
+            // spec, section 1). Else the subject from the mirror: the apply
+            // sets the subject from Gmail and checks the flags of the final
+            // content again.
+            if let Some(subject) = crate::change_reply_subject(c, action)? {
+                content.subject = subject;
+            } else if let Some(p) = crate::parent(c, action)? {
                 content.subject = iris_compose::reply_subject(&p.subject);
             }
             Ok(content.check().ok().map(|c| (address, c)))

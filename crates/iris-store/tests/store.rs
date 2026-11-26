@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 51);
+            assert_eq!(iris_store::schema_version(c)?, 72);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -138,6 +138,42 @@ fn refuses_an_unknown_schema() {
     conn.pragma_update(None, "user_version", -1).unwrap();
     drop(conn);
     assert!(matches!(Store::open(&dir.0), Err(Error::UnknownSchema(-1))));
+}
+
+/// `label:` folds the case of each letter, not only ASCII (issue #965).
+#[test]
+fn a_label_filter_folds_unicode_case() {
+    let dir = TempDir::new("label-fold");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[
+                ("Label_2", "Entwürfe", "user"),
+                ("Label_3", "ΣΧΈΔΙΑ", "user"),
+            ],
+        )
+        .unwrap();
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["Label_2"], "One", "x"),
+                msg("b", "t2", 2, &["Label_3"], "Two", "y"),
+            ],
+        )
+        .unwrap();
+    let s = |q: &str| store.search(q, 10).unwrap();
+    for q in [
+        "label:Entwürfe",
+        "label:ENTWÜRFE",
+        "label:entwürfe",
+        "label:Label_2",
+    ] {
+        assert_eq!(s(q), [ids[0]], "{q}");
+    }
+    assert_eq!(s("label:σχέδια"), [ids[1]]);
+    assert_eq!(s("label:Entwurfe"), Vec::<i64>::new(), "a letter differs");
 }
 
 #[test]
@@ -747,6 +783,49 @@ fn dry_write_gives_the_result_and_writes_nothing() {
     assert_eq!(after, 0);
 }
 
+/// A signal expires at its `expires` time in the status column and the
+/// document (issue #927). A signal with no time, and a gone one, stay.
+#[test]
+fn a_signal_expires_at_its_time() {
+    let dir = TempDir::new("signal-expiry");
+    let (store, acc) = setup(&dir);
+    let add = |status: &str, doc: &str| -> i64 {
+        store
+            .write(|tx| {
+                Ok(tx.query_row(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     VALUES ('signal', ?1, ?2, ?3, 0, 0) RETURNING id",
+                    rusqlite::params![acc, status, doc],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    // 2026-11-16T00:00:00Z
+    let t = 1_794_787_200_000;
+    let at = r#"{"status":"active","expires":"2026-11-16T00:00:00.000Z"}"#;
+    let timed = add("active", at);
+    let none = add("active", r#"{"status":"active"}"#);
+    let gone = add("gone", at);
+    assert_eq!(store.expire_signals(t - 1).unwrap(), 0);
+    assert_eq!(store.expire_signals(t).unwrap(), 1);
+    let row = |id: i64| -> (String, String, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT status, json_extract(doc, '$.status'), updated_at FROM item WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(row(timed), ("expired".into(), "expired".into(), t));
+    assert_eq!(row(none).0, "active");
+    assert_eq!(row(gone).0, "gone");
+    assert_eq!(store.expire_signals(t + 1).unwrap(), 0);
+}
+
 #[test]
 fn a_deferred_commitment_opens_at_midnight_of_the_owner() {
     let dir = TempDir::new("deferred-zone");
@@ -913,6 +992,32 @@ fn a_sender_lookup_without_case_uses_an_index() {
     assert!(
         plan.iter()
             .any(|p| p.contains("USING INDEX sender_address_nocase")),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn the_known_name_of_a_gate_sender_uses_an_index() {
+    // Invariant (issue #1026): the `known_as` lookup of the gate
+    // (`iris_api::gate`) is an index search, not a scan of the sender table.
+    let dir = std::env::temp_dir().join(format!("iris-store-gate-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let plan: Vec<String> = store
+        .read(|c| {
+            Ok(c.prepare(
+                "EXPLAIN QUERY PLAN SELECT k.address FROM sender k
+                  WHERE k.kind = 'person' AND k.id != ?1
+                    AND k.name = ?2 COLLATE NOCASE ORDER BY k.id LIMIT 1",
+            )?
+            .query_map(rusqlite::params![1, "Ann"], |r| r.get(3))?
+            .collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        plan.iter()
+            .any(|p| p.contains("USING INDEX sender_person_name_nocase")),
         "{plan:?}"
     );
 }
@@ -1136,4 +1241,427 @@ fn read_to_limits_the_open_spools() {
         .unwrap();
         assert_eq!(refused_at.get(), Some(iris_store::MAX_SPOOLS + 1));
     }
+}
+
+#[test]
+fn the_mail_under_one_name_uses_an_index() {
+    // Issue 812: the name triggers of migration 54 find the mail under a
+    // known person name with `h.from_name = name COLLATE NOCASE`. The
+    // lookup is an index search, not a scan of the header table.
+    let dir = std::env::temp_dir().join(format!("iris-store-from-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    for sql in [
+        "EXPLAIN QUERY PLAN SELECT h.message_id FROM header h WHERE h.from_name = ?1 COLLATE NOCASE",
+        "EXPLAIN QUERY PLAN SELECT h.message_id FROM header h JOIN message m ON m.id = h.message_id
+          WHERE m.gone_at IS NULL AND h.from_name = ?1 COLLATE NOCASE",
+    ] {
+        let plan: Vec<String> = store
+            .read(|c| {
+                Ok(c.prepare(sql)?
+                    .query_map(["Ana Lee"], |r| r.get(3))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("INDEX header_from_name_nocase")),
+            "{sql}: {plan:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rebind of a move (IMAP moves spec, section 3): the row keeps its ID,
+/// a fallback thread ID follows the message, a thread of other messages
+/// keeps its ID, and an ID that another row has is refused.
+#[test]
+fn rebind_refuses_a_taken_id() {
+    let dir = TempDir::new("rebind");
+    let (store, acc) = setup(&dir);
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                // A message with no thread headers: its thread ID is its own ID.
+                msg("1:1:INBOX", "1:1:INBOX", 1, &["INBOX"], "a", "a"),
+                msg("1:2:INBOX", "<t@example.com>", 2, &["INBOX"], "b", "b"),
+                msg("1:3:INBOX", "<t@example.com>", 3, &["INBOX"], "c", "c"),
+            ],
+        )
+        .unwrap();
+    let thread = |m: i64| -> String {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT t.provider_id FROM message m JOIN thread t ON t.id = m.thread_id
+                     WHERE m.id = ?1",
+                    [m],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let provider = |m: i64| -> String {
+        store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT provider_id FROM message WHERE id = ?1", [m], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    store
+        .write(|tx| iris_store::rebind(tx, ids[0], "2:1:Archive"))
+        .unwrap();
+    assert_eq!(provider(ids[0]), "2:1:Archive");
+    assert_eq!(thread(ids[0]), "2:1:Archive");
+    store
+        .write(|tx| iris_store::rebind(tx, ids[1], "2:2:Archive"))
+        .unwrap();
+    assert_eq!(provider(ids[1]), "2:2:Archive");
+    assert_eq!(thread(ids[1]), "<t@example.com>");
+    // The ID of another row: refused, and nothing changes.
+    let r = store.write(|tx| iris_store::rebind(tx, ids[2], "2:2:Archive"));
+    assert!(matches!(r, Err(Error::Taken(_))), "{r:?}");
+    assert_eq!(provider(ids[2]), "1:3:INBOX");
+}
+
+/// Issue #110: a change that needs the understanding again (here SPAM,
+/// and new content) gives the message a new try budget and puts its thread
+/// in `talk_due`. A failed try keeps its count.
+#[test]
+fn a_reset_gives_a_new_try_budget() {
+    let dir = TempDir::new("reset-tries");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let mut m = msg("a", "t1", 1, &["INBOX"], "Hi", "x");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let id = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    let state = || -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let set = |sql: &str| {
+        store.write(|tx| Ok(tx.execute(sql, [id])?)).unwrap();
+    };
+    set("DELETE FROM talk_due WHERE ?1 > 0");
+    // An understood message, with old failed tries.
+    set("UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?1");
+    // A failed try keeps its count.
+    set("UPDATE message SET understood_at = NULL, tries = tries + 1 WHERE id = ?1");
+    assert_eq!(state(), (None, 3, Some(9), 0));
+    // SPAM comes: the understanding runs again, with a new budget.
+    set("UPDATE message SET understood_at = 5 WHERE id = ?1");
+    m.labels = vec!["INBOX".into(), "SPAM".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(state(), (None, 0, None, 1));
+    // SPAM goes: the same.
+    set("DELETE FROM talk_due WHERE ?1 > 0");
+    set("UPDATE message SET understood_at = 5, tries = 3, retry_at = 9 WHERE id = ?1");
+    m.labels = vec!["INBOX".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(state(), (None, 0, None, 1));
+    // New content of a message that never got understood: a new budget.
+    set("UPDATE message SET tries = 3, retry_at = 9 WHERE id = ?1");
+    m.content_sha256 = Some(store.put_content(b"raw b").unwrap());
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(state().1, 0);
+    assert_eq!(state().2, None);
+}
+
+/// Issue #110, the invariant for each start state: after each change that
+/// needs the understanding again, `tries` is 0 and `retry_at` is NULL. This
+/// holds also for mail that failed the model 3 times (`understood_at` is
+/// NULL already). A label that is not a reset label changes nothing.
+#[test]
+fn each_reset_change_gives_each_state_a_new_budget() {
+    let dir = TempDir::new("reset-each");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[
+                ("SPAM", "SPAM", "system"),
+                ("SENT", "SENT", "system"),
+                ("Work", "Work", "user"),
+            ],
+        )
+        .unwrap();
+    let mut m = msg("a", "t1", 1, &["INBOX"], "Hi", "x");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let id = store.put_messages(acc, &[m]).unwrap()[0];
+    let set = |sql: &str| {
+        store
+            .write(|tx| Ok(tx.execute_batch(&sql.replace("?id", &id.to_string()))?))
+            .unwrap();
+    };
+    let state = || -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let label = |name: &str, on: bool| {
+        if on {
+            format!(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?id, id FROM label WHERE provider_id = '{name}';"
+            )
+        } else {
+            format!(
+                "DELETE FROM message_label WHERE message_id = ?id
+                   AND label_id = (SELECT id FROM label WHERE provider_id = '{name}');"
+            )
+        }
+    };
+    let content = |raw: &[u8]| {
+        format!(
+            "UPDATE message SET content_sha256 = '{}' WHERE id = ?id;",
+            store.put_content(raw).unwrap()
+        )
+    };
+    // Each change, with the SQL that makes the state before it.
+    let changes: Vec<(&str, String, String)> = vec![
+        ("SPAM comes", String::new(), label("SPAM", true)),
+        ("SPAM goes", label("SPAM", true), label("SPAM", false)),
+        ("SENT comes", String::new(), label("SENT", true)),
+        ("SENT goes", label("SENT", true), label("SENT", false)),
+        (
+            "comes back",
+            "UPDATE message SET gone_at = 1 WHERE id = ?id;".into(),
+            "UPDATE message SET gone_at = NULL WHERE id = ?id;".into(),
+        ),
+        ("new content", content(b"raw a"), content(b"raw b")),
+    ];
+    // The start states: failed 3 times, and understood after 2 failures.
+    let starts = [
+        (
+            "failed",
+            "UPDATE message SET understood_at = NULL, tries = 3, retry_at = 9 WHERE id = ?id;",
+        ),
+        (
+            "understood",
+            "UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?id;",
+        ),
+    ];
+    for (change, before, sql) in &changes {
+        for (start, start_sql) in starts {
+            set("DELETE FROM message_label WHERE message_id = ?id
+                   AND label_id IN (SELECT id FROM label WHERE provider_id IN ('SPAM', 'SENT'));
+                 UPDATE message SET gone_at = NULL WHERE id = ?id;");
+            set(before);
+            set(start_sql);
+            set("DELETE FROM talk_due;");
+            set(sql);
+            assert_eq!(state(), (None, 0, None, 1), "{change} from {start}");
+        }
+    }
+    // A user label is not a reset: the failed state stays.
+    set(starts[0].1);
+    set("DELETE FROM talk_due;");
+    set(&label("Work", true));
+    set(&label("Work", false));
+    assert_eq!(state(), (None, 3, Some(9), 0));
+}
+
+/// Issue #110: when SPAM comes, the droppable items of the message go at
+/// once. So when SPAM goes before the next run, no old item shows again;
+/// the next run makes the items. A conversation item stays.
+#[test]
+fn spam_drops_the_items_of_its_message() {
+    let dir = TempDir::new("spam-drops");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let id = store
+        .put_messages(acc, &[msg("a", "t1", 1, &["INBOX"], "Hi", "x")])
+        .unwrap()[0];
+    let items = |sql: &str| -> i64 {
+        store
+            .read(|c| Ok(c.query_row(sql, [id], |r| r.get(0))?))
+            .unwrap()
+    };
+    store
+        .write(|tx| {
+            for form in ["commitment", "conversation"] {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at, derived_by)
+                     VALUES (?1, ?2, 'open', '{}', 0, 0, 'model')",
+                    rusqlite::params![form, acc],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     VALUES (last_insert_rowid(), ?1, 'origin')",
+                    [id],
+                )?;
+            }
+            tx.execute("UPDATE message SET understood_at = 5 WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .unwrap();
+    let count = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                 WHERE s.message_id = ?1 AND i.form = 'commitment'";
+    let talk = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                WHERE s.message_id = ?1 AND i.form = 'conversation'";
+    assert_eq!(items(count), 1);
+    let mut m = msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x");
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(items(count), 0);
+    m.labels = vec!["INBOX".into()];
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(items(count), 0);
+    assert_eq!(items(talk), 1);
+    assert_eq!(
+        items("SELECT understood_at IS NULL FROM message WHERE id = ?1"),
+        1
+    );
+}
+
+/// Issue #110, the invariant for each path: a message that is not gone and
+/// has SPAM has no droppable item. The paths: a gone message that comes back
+/// with SPAM, and a SPAM message of an older store at the upgrade.
+#[test]
+fn no_spam_message_keeps_a_droppable_item() {
+    let dir = TempDir::new("spam-paths");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let id = store
+        .put_messages(acc, &[msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x")])
+        .unwrap()[0];
+    let add_item = |store: &Store| {
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at, derived_by)
+                     VALUES ('commitment', ?1, 'open', '{}', 0, 0, 'model')",
+                    [acc],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     VALUES (last_insert_rowid(), ?1, 'origin')",
+                    [id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let items = |store: &Store| -> i64 {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM item_source WHERE message_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    // A gone message keeps its items. It comes back with SPAM: they go.
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [id])?))
+        .unwrap();
+    add_item(&store);
+    assert_eq!(items(&store), 1);
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = NULL WHERE id = ?1", [id])?))
+        .unwrap();
+    assert_eq!(items(&store), 0);
+    // An older store (version 64): a SPAM message with an item. The
+    // upgrade deletes the item and puts the thread in talk_due.
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; ALTER TABLE header DROP COLUMN content_sha256; DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
+                 DELETE FROM talk_due; PRAGMA user_version = 64;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_item(&store);
+    assert_eq!(items(&store), 1);
+    drop(store);
+    let store = Store::open(&dir.0).unwrap();
+    assert_eq!(items(&store), 0);
+    let due: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM talk_due", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(due, 1);
+}
+
+/// Issue #110, the upgrade: a live message of an older store can have SPAM
+/// and an understanding from before the label, also with no droppable
+/// item. The upgrade resets it and puts its thread in talk_due. A gone
+/// message waits for its come-back.
+#[test]
+fn the_upgrade_resets_each_live_spam_message() {
+    let dir = TempDir::new("spam-upgrade");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x"),
+                msg("b", "t2", 1, &["INBOX", "SPAM"], "Hi", "x"),
+                msg("c", "t3", 1, &["INBOX"], "Hi", "x"),
+            ],
+        )
+        .unwrap();
+    // Understood before the label in version 64: a, b and c understood,
+    // b gone. No message has an item.
+    store
+        .write(|tx| {
+            tx.execute_batch(&format!(
+                "UPDATE message SET understood_at = 5, tries = 1, retry_at = 9;
+                 UPDATE message SET gone_at = 1 WHERE id = {};
+                 DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; ALTER TABLE header DROP COLUMN content_sha256;
+                 DELETE FROM talk_due; PRAGMA user_version = 64;",
+                ids[1]
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    let store = Store::open(&dir.0).unwrap();
+    let state = |id: i64| -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(state(ids[0]), (None, 0, None, 1), "live SPAM");
+    assert_eq!(state(ids[1]), (Some(5), 1, Some(9), 0), "gone SPAM");
+    assert_eq!(state(ids[2]), (Some(5), 1, Some(9), 0), "no SPAM");
 }

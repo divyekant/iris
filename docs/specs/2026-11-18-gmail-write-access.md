@@ -95,8 +95,16 @@ The person sees a raw provider error and no next step.
     decide. A mailbox call that never started does not start: its row stays
     in `writing` until a write sign-in, and then continues. So Iris makes no Gmail write for the account. Approved
     actions stay `approved` and held sends stay `held`.
-  - Known limit (issue #683): a read-only sign-in that another process saves
-    while a step runs does not stop that step. The next step makes no write.
+  - A read-only sign-in that another process saves while a step runs
+    (issue #683): `save_sign_in` first waits for the apply lock
+    (`iris_apply::wait_lock`, at most `OFF_WAIT`, 20 seconds), then writes
+    the token and the state `read_only` in one write. An apply holds the
+    lock from its first gate to the end of its write calls, also from the
+    recheck to the label create. So no write call with the old grant runs
+    after the state changes. If the lock stays busy, the sign-in is not
+    saved and the person runs it again. The gate of each claim and of each
+    recheck reads the state in its transaction, so each later apply gives
+    `Outcome::ReadOnly`.
   - The 14-day expiry of spec 2 does not change: the engine tick calls
     `iris_changeset::expire` for all accounts, with no apply step. So an
     approved action or a held send of a read-only account expires 14 days

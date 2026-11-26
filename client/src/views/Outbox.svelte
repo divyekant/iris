@@ -7,8 +7,10 @@
 -->
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { loadOutbox, own, post, type Outbox, type OutboxSend } from "../api";
+  import { get, loadOutbox, own, post, type DraftContent, type Outbox, type OutboxSend } from "../api";
   import { FLAGS } from "../review";
+  import { fileLine, PROVIDER } from "../format";
+  import { href } from "../route";
 
   // `every`: the ms between two reads of the outbox (a prop for the tests).
   let { first, every = 5000 }: { first: Outbox; every?: number } = $props();
@@ -24,7 +26,22 @@
   let pending = $state<{ draft: string; after: number }[]>([]);
   // What each cancel did, as lines above the cards. The cards show only the
   // sends that the engine gives, so a new send of the same draft shows too.
-  let notes = $state<string[]>([]);
+  // `change`: the draft that a cancelled line offers to change (issue 941).
+  // `check`: the draft whose read of `change` did not answer yet. Each poll tries again.
+  let notes = $state<{ text: string; change?: string; check?: string }[]>([]);
+  const checking = new Set<number>();
+  // "Change and send" shows only when the engine says that the draft can change now.
+  function check(at: number) {
+    const d = notes[at]?.check;
+    if (!d || checking.has(at)) return;
+    checking.add(at);
+    get<DraftContent>(`drafts/${encodeURIComponent(d)}`).then(
+      // The engine answered: the note has no `check` any more, so no poll reads it again.
+      (v) => (notes = notes.map((n, i) => (i === at ? (v.change ? { text: n.text, change: d } : { text: n.text }) : n))),
+      // No answer: `check` stays, and the next poll tries again.
+      () => {},
+    ).finally(() => checking.delete(at));
+  }
 
   // Each read of the outbox gets a number when it starts. A read applies
   // only if no read that started later applied first, so an older answer
@@ -39,6 +56,7 @@
       applied = mine;
       box = v;
       pending = pending.filter((p) => p.after >= mine);
+      notes.forEach((_, i) => check(i));
     } catch {
       // The engine can restart. The next read tries again.
     }
@@ -82,6 +100,8 @@
 
   function when(s: OutboxSend): string {
     if (!box.sending.on) return "Waits until sending is on";
+    // The Bcc gate of the provider is closed (send content spec, section 6.2).
+    if (s.bcc_check) return `Waits for the Bcc check of ${PROVIDER[s.bcc_check] ?? s.bcc_check}`;
     const t = left(s);
     return t ? `Leaves in ${t}` : "Leaves now";
   }
@@ -95,11 +115,12 @@
     posting = s.draft;
     try {
       await post(`outbox/${encodeURIComponent(s.draft)}/cancel`, {});
-      notes = [...notes, `${name(s)} is cancelled. It does not leave.`];
+      notes = [...notes, { text: `${name(s)} is cancelled. It does not leave.`, check: s.draft }];
+      check(notes.length - 1);
     } catch (e) {
       // A 409: the release claimed the send. The note stays after its card goes.
       const started409 = (e as { status?: number }).status === 409;
-      notes = [...notes, started409 ? `${name(s)} started to send. It cannot be cancelled.` : `${name(s)}: ${own(e)}`];
+      notes = [...notes, { text: started409 ? `${name(s)} started to send. It cannot be cancelled.` : `${name(s)}: ${own(e)}` }];
     }
     pending = [...pending, { draft: s.draft, after: started }];
     posting = "";
@@ -115,7 +136,7 @@
 {/if}
 
 {#if notes.length > 0}
-  <ul class="notes" role="status">{#each notes as note, i (i)}<li>{note}</li>{/each}</ul>
+  <ul class="notes" role="status">{#each notes as note, i (i)}<li>{note.text}{#if note.change}{" "}<a href={href.change(note.change)}>Change and send</a>{/if}</li>{/each}</ul>
 {/if}
 
 {#if box.sends.length === 0}
@@ -125,14 +146,16 @@
     {#each box.sends as s (s.draft)}
       <li class="card">
         <p class="to">To {s.readable ? to(s).join(", ") : "recipients that Iris cannot read"}</p>
+        {#if s.readable && s.bcc?.length}<p class="to">Bcc {s.bcc.join(", ")}</p>{/if}
         <p class="subject">{s.readable ? s.subject || "(no subject)" : "Iris cannot read this draft"}</p>
+        {#if s.readable && s.attachments?.length}<p class="files">{fileLine(s.attachments)}</p>{/if}
         {#if s.flags.length > 0}
           <ul class="flags">{#each s.flags as f (f)}<li>{FLAGS[f] ?? f}</li>{/each}</ul>
         {/if}
         <div class="foot">
           <div class="time">
-            <span class="left" class:paused={!box.sending.on}>{when(s)}</span>
-            {#if box.sending.on}<span class="bar" aria-hidden="true"><span style:width="{gone(s) * 100}%"></span></span>{/if}
+            <span class="left" class:paused={!box.sending.on || !!s.bcc_check}>{when(s)}</span>
+            {#if box.sending.on && !s.bcc_check}<span class="bar" aria-hidden="true"><span style:width="{gone(s) * 100}%"></span></span>{/if}
           </div>
           <button type="button" class="pill" onclick={() => cancel(s)} disabled={off(s)}>{posting === s.draft || pending.some((p) => p.draft === s.draft) ? "Cancelling" : "Cancel"}</button>
         </div>
@@ -185,7 +208,8 @@
   p {
     margin: 0;
   }
-  .to {
+  .to,
+  .files {
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
     overflow-wrap: anywhere;

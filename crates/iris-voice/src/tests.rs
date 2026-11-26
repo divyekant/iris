@@ -8,7 +8,8 @@ use super::*;
 /// A model that records each call and gives a fixed answer. `during` runs
 /// inside the call, as a sync would.
 struct Fake<'a> {
-    answer: String,
+    /// The answer of each call in turn. The last answer repeats.
+    answers: Vec<String>,
     stop: Stop,
     calls: RefCell<Vec<(String, String)>>,
     during: Option<Box<dyn Fn() + 'a>>,
@@ -17,7 +18,7 @@ struct Fake<'a> {
 impl<'a> Fake<'a> {
     fn new(answer: &str) -> Self {
         Fake {
-            answer: answer.into(),
+            answers: vec![answer.into()],
             stop: Stop::End,
             calls: RefCell::new(Vec::new()),
             during: None,
@@ -31,14 +32,16 @@ impl Model for Fake<'_> {
     }
 
     fn ask(&self, instruction: &str, data: &str) -> std::result::Result<Reply, iris_model::Error> {
-        self.calls
-            .borrow_mut()
-            .push((instruction.to_string(), data.to_string()));
+        let n = {
+            let mut calls = self.calls.borrow_mut();
+            calls.push((instruction.to_string(), data.to_string()));
+            calls.len() - 1
+        };
         if let Some(f) = &self.during {
             f();
         }
         Ok(Reply {
-            text: self.answer.clone(),
+            text: self.answers[n.min(self.answers.len() - 1)].clone(),
             usage: Usage::default(),
             stop: self.stop,
         })
@@ -453,8 +456,39 @@ fn invalid_answers_save_nothing() {
             write(&b.store, t, None, &fake, 1),
             Err(Error::BadAnswer(_))
         ));
+        // A refusal gets no second call (decision D7, issue #278).
+        let calls = if stop == Stop::Refused { 1 } else { 2 };
+        assert_eq!(fake.calls.borrow().len(), calls, "{stop:?}");
     }
     assert_eq!(saved(&b.store, t), None);
+}
+
+#[test]
+fn an_invalid_answer_gets_one_more_call_with_the_same_data() {
+    let (b, t) = mailbox("retry");
+    for (first, then, ok) in [
+        ("not json", r#"{"body": "Second try."}"#, true),
+        (r#"{"text": "x"}"#, "still not json", false),
+    ] {
+        let mut fake = Fake::new(first);
+        fake.answers.push(then.into());
+        let r = write(&b.store, t, None, &fake, 1);
+        assert_eq!(r.is_ok(), ok, "{first} then {then}: {r:?}");
+        let calls = fake.calls.borrow();
+        assert_eq!(calls.len(), 2, "one retry only");
+        assert_eq!(
+            calls[0], calls[1],
+            "the retry sends the same instruction and data"
+        );
+    }
+    assert_eq!(
+        saved(&b.store, t).map(|s| s.0).as_deref(),
+        Some("Second try.")
+    );
+    // A valid first answer makes one call only.
+    let fake = Fake::new(r#"{"body": "Fine."}"#);
+    write(&b.store, t, None, &fake, 2).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
 }
 
 #[test]
@@ -551,7 +585,7 @@ fn read_answer_accepts_only_a_valid_body() {
                 })
             })
             .filter(|b| !b.is_empty() && b.chars().count() <= MAX_BODY);
-        match read_answer(&reply) {
+        match read_answer(&reply, 0) {
             Ok(body) => {
                 accepted += 1;
                 assert_eq!(Some(body), expect, "{text:?}");
@@ -561,6 +595,67 @@ fn read_answer_accepts_only_a_valid_body() {
         }
     }
     assert!(accepted > 100, "too few valid answers: {accepted}");
+}
+
+/// Issue #950: for any count of commitments and any "named" value, an
+/// answer is accepted only when "named" is an array that holds each number
+/// from 1 to the count. Other entries do not matter.
+#[test]
+fn read_answer_needs_each_commitment_number() {
+    const PIECES: [&str; 9] = ["0", "1", "2", "3", "4", "-1", "1.5", "\"1\"", "null"];
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let (mut accepted, mut refused) = (0, 0);
+    for i in 0..20_000 {
+        let need = (next() % 5) as usize;
+        let entries: Vec<&str> = (0..next() % 6)
+            .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+            .collect();
+        let named = match i % 10 {
+            0 => String::new(),
+            1 => r#", "named": 1"#.to_string(),
+            2 => r#", "named": null"#.to_string(),
+            _ => format!(r#", "named": [{}]"#, entries.join(", ")),
+        };
+        let text = format!(r#"{{"body": "Hi Ana"{named}}}"#);
+        let reply = Reply {
+            text: text.clone(),
+            usage: Usage::default(),
+            stop: Stop::End,
+        };
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let has: Vec<u64> = v["named"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
+        let expect = (1..=need as u64).all(|n| has.contains(&n));
+        match read_answer(&reply, need) {
+            Ok(body) => {
+                accepted += 1;
+                assert!(expect, "{need} {text}");
+                assert_eq!(body, "Hi Ana");
+            }
+            Err(Error::BadAnswer(_)) => {
+                refused += 1;
+                assert!(!expect, "{need} {text}");
+            }
+            Err(e) => panic!("{text}: {e}"),
+        }
+    }
+    assert!(accepted > 1_000 && refused > 1_000, "{accepted} {refused}");
+    // A two-commitment answer that names only the first is refused.
+    let one = Reply {
+        text: r#"{"body": "Hi Ana", "named": [1]}"#.into(),
+        usage: Usage::default(),
+        stop: Stop::End,
+    };
+    assert!(matches!(read_answer(&one, 2), Err(Error::BadAnswer(_))));
+    assert!(read_answer(&one, 1).is_ok());
 }
 
 #[test]
@@ -1028,17 +1123,30 @@ fn a_sample_marked_spam_during_the_call_saves_nothing() {
     assert_eq!(saved(store, t), None);
 }
 
-/// What [`ready_sql`] says of thread `t`.
+/// What [`ready_sql`] says of thread `t`, at the time of its draft.
 fn ready(store: &Store, t: i64) -> bool {
     store
         .read(|c| {
-            Ok(
-                c.query_row(&format!("SELECT {}", ready_sql("SELECT ?1")), [t], |r| {
-                    r.get(0)
-                })?,
-            )
+            let now = saved_at(c, t)?;
+            Ok(c.query_row(
+                &format!("SELECT {}", ready_sql("SELECT ?1", ("?2", "?3"))),
+                params![t, now, iris_store::today(c, now)?],
+                |r| r.get(0),
+            )?)
         })
         .unwrap()
+}
+
+/// The time of the draft of thread `t`, or 0: the tests read a draft at
+/// the time it was saved.
+fn saved_at(c: &Connection, t: i64) -> rusqlite::Result<i64> {
+    Ok(c.query_row(
+        "SELECT created_at FROM reply_draft WHERE thread_id = ?1",
+        [t],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(0))
 }
 
 /// What the checks of [`write`] say of thread `t`: they pass, and the
@@ -1269,7 +1377,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a stale nudge with a key",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.5', 0, 1, '{}'
                FROM message",
             at,
             true,
@@ -1278,7 +1386,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a ready nudge of another commitment",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.5', 0, 1, '{}'
                FROM message WHERE thread_id = ?1",
             at,
             true,
@@ -1370,7 +1478,7 @@ fn evidence(store: &Store, provider: &str, to: &str) {
 /// The person of the ready nudge of thread `t`, or `None`.
 fn ready_to(store: &Store, t: i64) -> Option<String> {
     store
-        .read(|c| Ok(super::ready(c, t)?.and_then(|r| r.to)))
+        .read(|c| Ok(super::ready(c, t, saved_at(c, t)?)?.and_then(|r| r.to)))
         .unwrap()
 }
 
@@ -1386,7 +1494,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     let now = 1000 + LATE_AFTER_MS;
     // A nudge draft makes the thread not late until the thread changes.
     let (b, t) = asked("nudge-saved");
-    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
     // The ask went to Bo first and to Ana: the nudge goes to Ana, the
     // person of the commitment, not to the first recipient.
     b.store
@@ -1407,13 +1515,13 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(data["intent"], NUDGE_INTENT);
     assert_eq!(data["reply_to"], "ana@example.org");
     assert_eq!(
-        data["commitment"],
-        json!({"title": "Send the slides", "kind": null, "amount": null, "due": null,
-               "quote": "can you send the slides?"})
+        data["commitments"],
+        json!([{"n": 1, "title": "Send the slides", "kind": null, "amount": null, "due": null,
+                "quote": "can you send the slides?"}])
     );
     assert!(fake.calls.borrow()[0]
         .0
-        .contains("\"commitment\": only in a reminder"));
+        .contains("\"commitments\": only in a reminder"));
     assert_eq!(saved(&b.store, t).unwrap().1.as_deref(), Some(NUDGE_INTENT));
     let prompt: String = b
         .store
@@ -1422,6 +1530,18 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(prompt, NUDGE_PROMPT);
     let to = ready_to(&b.store, t);
     assert_eq!(to.as_deref(), Some("ana@example.org"));
+    // A nudge of an older build (#1075: its body did not have to name the
+    // commitment) is not ready, and the thread is late again.
+    let set_prompt = |p: &str| {
+        b.store
+            .write(|tx| Ok(tx.execute("UPDATE reply_draft SET prompt = ?1", [p])?))
+            .unwrap()
+    };
+    set_prompt("nudge/0.3");
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(late_threads(&b.store, now), [t]);
+    set_prompt(NUDGE_PROMPT);
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
 
     // A correction of the commitment after the save: the nudge is stale,
     // and the thread is late again for the new commitment. A close: stale.
@@ -1471,16 +1591,16 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
         evidence(&b.store, &format!("more{i}"), to);
     }
     understood(&b.store);
-    let fake = Fake::new(r#"{"body": "x"}"#);
+    let fake = Fake::new(r#"{"body": "x slides", "named": [1]}"#);
     let l = one_late(&b.store, 1008 + LATE_AFTER_MS);
     nudge(&b.store, &l, &fake, 1008 + LATE_AFTER_MS).unwrap();
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     assert_eq!(data["thread"].as_array().unwrap().len(), 6);
-    assert_eq!(data["commitment"]["quote"], "can you send the slides?");
+    assert_eq!(data["commitments"][0]["quote"], "can you send the slides?");
 
     // A thread that is not late gets no call.
     let (b, _) = asked("nudge-not-late");
-    let fake = Fake::new(r#"{"body": "x"}"#);
+    let fake = Fake::new(r#"{"body": "x slides", "named": [1]}"#);
     let l = one_late(&b.store, now);
     assert!(matches!(
         nudge(&b.store, &l, &fake, now - 1),
@@ -1498,7 +1618,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     ] {
         let (b, t) = asked(&format!("nudge-during-{}", name.replace(' ', "-")));
         let store = &b.store;
-        let mut fake = Fake::new(r#"{"body": "x"}"#);
+        let mut fake = Fake::new(r#"{"body": "x slides", "named": [1]}"#);
         fake.during = Some(Box::new(move || {
             store
                 .write(|tx| {
@@ -1516,7 +1636,50 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
 }
 
 #[test]
-fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
+fn a_saved_nudge_is_ready_while_a_later_commitment_is_not_due_yet() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-later");
+    // A second commitment of Ana, due on 5 January 1970: not late at `now` (3 January).
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT form, account_id, status,
+                        json_set(doc, '$.title', 'Send the notes', '$.due', json('{\"date\":\"1970-01-05\"}')),
+                        2, 2 FROM item WHERE id = 1",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT 2, message_id, role FROM item_source WHERE item_id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    let fake = Fake::new(r#"{"body": "Hi Ana, the slides?", "named": [1]}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
+    let ready_at = |at: i64| {
+        b.store
+            .read(|c| Ok(super::ready(c, t, at)?.map(|r| r.items)))
+            .unwrap()
+    };
+    // Ready at once, with only the late commitment, and no new call.
+    assert_eq!(ready_at(now), Some(vec![1]));
+    assert!(late_threads(&b.store, now).is_empty());
+    // After the due date, the key names both: the nudge is stale, and the
+    // next nudge names both commitments.
+    let after = 6 * 86_400_000;
+    assert_eq!(ready_at(after), None);
+    assert_eq!(late_threads(&b.store, after), [t]);
+    let key: Value = serde_json::from_str(&one_late(&b.store, after).key).unwrap();
+    assert_eq!(key["items"].as_array().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&b.dir);
+}
+
+#[test]
+fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits() {
     let now = 1000 + LATE_AFTER_MS;
     let (b, t) = asked("nudge-group");
     let set = |sql: &str| {
@@ -1531,7 +1694,13 @@ fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
     evidence(&b.store, "ask", "bo@example.org");
     set("INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person')");
     let l = one_late(&b.store, now);
-    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    nudge(
+        &b.store,
+        &l,
+        &Fake::new(r#"{"body": "Hi Ana, the slides?", "named": [1]}"#),
+        now,
+    )
+    .unwrap();
     assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
 
     // A second late commitment of the same thread, owed by Bo: the nudge
@@ -1548,6 +1717,41 @@ fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
 
     // The first is done: the nudge to Ana is stale, and the thread is late
     // for Bo.
+    // A third late commitment, owed by Ana again: the key changes, the
+    // nudge is stale, and the next nudge names both of Ana's (decision D8).
+    set(
+        "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+         SELECT form, account_id, status, json_set(doc, '$.title', 'Send the notes'), 3, 3
+           FROM item WHERE id = 1",
+    );
+    set("INSERT INTO item_source(item_id, message_id, role)
+         SELECT 3, message_id, role FROM item_source WHERE item_id = 1");
+    assert_eq!(ready_to(&b.store, t), None);
+    let l = one_late(&b.store, now);
+    assert_eq!(l.to(), "ana@example.org");
+    let fake = Fake::new(r#"{"body": "Hi Ana, the slides and the notes?", "named": [1, 2]}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
+    let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    let titles: Vec<&str> = data["commitments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Send the slides", "Send the notes"]);
+    assert!(
+        data["commitments"][0].get("item").is_none(),
+        "no row ID in the data"
+    );
+    let items = b
+        .store
+        .read(|c| Ok(super::ready(c, t, saved_at(c, t)?)?.unwrap().items))
+        .unwrap();
+    assert_eq!(items, [1, 3]);
+    // One of the two is done: the key changes, so the nudge is stale.
+    set("UPDATE item SET status = 'done' WHERE id = 3");
+    assert_eq!(ready_to(&b.store, t), None);
+
     set("UPDATE item SET status = 'done' WHERE id = 1");
     assert_eq!(ready_to(&b.store, t), None);
     assert_eq!(one_late(&b.store, now).to(), "bo@example.org");
@@ -1565,7 +1769,13 @@ fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
         })
         .unwrap();
     let l = one_late(&b.store, now);
-    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    nudge(
+        &b.store,
+        &l,
+        &Fake::new(r#"{"body": "Hi Ana, the slides?", "named": [1]}"#),
+        now,
+    )
+    .unwrap();
     b.store
         .write(|tx| {
             tx.execute(
@@ -1629,7 +1839,7 @@ fn a_promise_of_the_person_is_late_after_its_due_date() {
     assert!(late_threads(&b.store, 3 * 86_400_000 - 1).is_empty());
     let l = one_late(&b.store, 3 * 86_400_000);
     assert_eq!((l.thread, l.to()), (t, "ana@example.org".to_string()));
-    let fake = Fake::new(r#"{"body": "Hi Ana, any news? D"}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
     nudge(&b.store, &l, &fake, 3 * 86_400_000).unwrap();
     assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
     // Another sender wrote last in the thread: no nudge.
@@ -1834,4 +2044,585 @@ fn a_new_mail_that_understanding_did_not_read_gives_changed_not_not_ready() {
     ));
     assert!(fake.calls.borrow().is_empty());
     assert_eq!(saved(&b.store, t), None);
+}
+
+#[test]
+fn a_nudge_names_at_most_the_limit_of_commitments() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, _) = asked("nudge-cap");
+    b.store
+        .write(|tx| {
+            for i in 0..MAX_NUDGE_ITEMS + 2 {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     SELECT form, account_id, status, json_set(doc, '$.title', ?1), 5, 5
+                       FROM item WHERE id = 1",
+                    [format!("More {i}")],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     SELECT last_insert_rowid(), message_id, role FROM item_source WHERE item_id = 1",
+                    [],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let key: Value = serde_json::from_str(&one_late(&b.store, now).key).unwrap();
+    let items: Vec<i64> = key["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["item"].as_i64().unwrap())
+        .collect();
+    assert_eq!(items, (1..=MAX_NUDGE_ITEMS as i64).collect::<Vec<_>>());
+}
+
+/// Issue #950: a reminder that leaves out one of its late commitments gets
+/// one more call. Two such answers save no draft, so the brief never marks
+/// it "Nudge ready". The data numbers each commitment.
+#[test]
+fn a_nudge_that_leaves_out_a_commitment_is_not_saved() {
+    let now = 1000 + LATE_AFTER_MS;
+    for (answers, ok) in [
+        (
+            vec![
+                r#"{"body": "Hi Ana, the slides?"}"#,
+                r#"{"body": "Hi Ana, the slides?", "named": [2]}"#,
+            ],
+            false,
+        ),
+        (
+            vec![
+                r#"{"body": "Hi Ana, the slides?", "named": []}"#,
+                r#"{"body": "Hi Ana, the slides?", "named": [1]}"#,
+            ],
+            true,
+        ),
+        // Issue #1075: "named" lists the commitment, but the body says
+        // nothing of it.
+        (
+            vec![
+                r#"{"body": "Hi Ana, any news?", "named": [1]}"#,
+                r#"{"body": "Hi Ana, any news?", "named": [1]}"#,
+            ],
+            false,
+        ),
+    ] {
+        let (b, t) = asked(&format!("nudge-names-{ok}"));
+        let mut fake = Fake::new(answers[0]);
+        fake.answers = answers.iter().map(|a| a.to_string()).collect();
+        let l = one_late(&b.store, now);
+        let r = nudge(&b.store, &l, &fake, now);
+        assert_eq!(r.is_ok(), ok, "{r:?}");
+        assert!(matches!(r, Ok(_) | Err(Error::BadAnswer(_))), "{r:?}");
+        assert_eq!(fake.calls.borrow().len(), 2);
+        let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+        assert_eq!(data["commitments"][0]["n"], 1);
+        assert!(fake.calls.borrow()[0].0.contains("\"named\""));
+        assert_eq!(saved(&b.store, t).is_some(), ok);
+    }
+}
+
+/// A write between the statements of a snapshot does not show in it: the
+/// counts and the messages come from one state of the store (#841).
+#[test]
+fn a_snapshot_reads_one_state_of_the_thread() {
+    let (b, t) = mailbox("one-state");
+    let store = Store::open(&b.dir).unwrap();
+    crate::BETWEEN.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            let m = msg(
+                "late",
+                "t1",
+                9000,
+                "INBOX",
+                "ana@example.org",
+                "me@example.com",
+                Some("Late"),
+            );
+            store.put_messages(1, &[m]).unwrap();
+        }))
+    });
+    let s = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    crate::BETWEEN.with(|h| h.borrow_mut().take());
+    assert_eq!(s.count as usize, s.newest.len(), "{s:?}");
+    // The write is in the store for the next snapshot.
+    let next = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    assert_eq!(next.count, s.count + 1);
+}
+
+/// The set of messages that a reply can answer is the set of the save
+/// (#479). A late sync of an older message, a message that leaves the
+/// trash, a message that moves into the thread and a message that goes to
+/// the trash each make the draft stale, also with the same newest message
+/// and each message understood. A draft of an older build (no `seen`)
+/// is not ready (#1107).
+#[test]
+fn a_change_of_the_answerable_set_makes_the_draft_stale() {
+    let sql = |b: &Box_, q: &str| b.store.write(|tx| Ok(tx.execute_batch(q)?)).unwrap();
+    let add = |b: &Box_, id: &str, thread: &str, label: &str| {
+        let m = msg(
+            id,
+            thread,
+            150,
+            label,
+            "ana@example.org",
+            "me@example.com",
+            Some("Old"),
+        );
+        b.store.put_messages(1, &[m]).unwrap();
+        sql(b, "UPDATE message SET understood_at = 1");
+    };
+    let trash = |ids: &str| {
+        format!(
+            "INSERT INTO message_label(message_id, label_id)
+               SELECT m.id, l.id FROM message m, label l
+               WHERE m.provider_id IN ({ids}) AND l.provider_id = 'TRASH'"
+        )
+    };
+    let untrash = |ids: &str| {
+        format!(
+            "DELETE FROM message_label
+               WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'TRASH')
+                 AND message_id IN (SELECT id FROM message WHERE provider_id IN ({ids}))"
+        )
+    };
+    type Change<'a> = &'a dyn Fn(&Box_, i64);
+    let cases: &[(&str, Change)] = &[
+        ("late older", &|b, _| add(b, "late-old", "t1", "INBOX")),
+        ("out of the trash", &|b, _| {
+            sql(b, &untrash("'trashed-old'"))
+        }),
+        ("moved in", &|b, t| {
+            sql(
+                b,
+                &format!("UPDATE message SET thread_id = {t} WHERE provider_id = 'other'"),
+            )
+        }),
+        ("to the trash", &|b, _| sql(b, &trash("'older-in'"))),
+        // w1 and w4 leave the set, w2 and w3 come in: the count and the sum
+        // of the row IDs stay the same, the set does not.
+        ("same count and sum", &|b, _| {
+            sql(b, &trash("'w1', 'w4'"));
+            sql(b, &untrash("'w2', 'w3'"));
+        }),
+    ];
+    let setup = |name: &str| {
+        let (b, t) = mailbox(name);
+        // An older message in the trash, one in the inbox, and one in another thread.
+        add(&b, "trashed-old", "t1", "TRASH");
+        add(&b, "other", "t-other", "INBOX");
+        add(&b, "older-in", "t1", "INBOX");
+        for (w, label) in [
+            ("w1", "INBOX"),
+            ("w2", "TRASH"),
+            ("w3", "TRASH"),
+            ("w4", "INBOX"),
+        ] {
+            add(&b, w, "t1", label);
+        }
+        // Six newer messages: the changed ones are not in the six newest
+        // texts that go to the model.
+        for n in 0..6 {
+            let m = msg(
+                &format!("fill{n}"),
+                "t1",
+                160,
+                "INBOX",
+                "ana@example.org",
+                "me@example.com",
+                Some("Fill"),
+            );
+            b.store.put_messages(1, &[m]).unwrap();
+        }
+        sql(&b, "UPDATE message SET understood_at = 1");
+        (b, t)
+    };
+    for (name, change) in cases {
+        // A change after the save: the draft is not ready.
+        let (b, t) = setup(&format!("set-{}", name.replace(' ', "-")));
+        write(&b.store, t, None, &Fake::new(r#"{"body": "ok"}"#), 1).unwrap();
+        assert!(ready(&b.store, t), "{name}: a new draft");
+        change(&b, t);
+        assert!(
+            checks_pass_on(&b.store, t),
+            "{name}: the newest message is the same"
+        );
+        assert!(!ready(&b.store, t), "{name}");
+        // A draft of an older build (NULL) is not ready either (#1107).
+        sql(&b, "UPDATE reply_draft SET seen = NULL");
+        assert!(!ready(&b.store, t), "{name}: an older draft");
+
+        // A change during the model call: no draft.
+        let (b, t) = setup(&format!("call-{}", name.replace(' ', "-")));
+        let bb = &b;
+        let mut fake = Fake::new(r#"{"body": "ok"}"#);
+        fake.during = Some(Box::new(move || change(bb, t)));
+        assert!(
+            matches!(write(&b.store, t, None, &fake, 1), Err(Error::Changed)),
+            "{name}: during the call"
+        );
+        assert_eq!(saved(&b.store, t), None, "{name}: during the call");
+    }
+}
+
+/// Issue #1075: a body names a commitment when one of its words starts
+/// with the stem of a key word of the commitment.
+#[test]
+fn a_body_names_a_commitment_only_with_its_words() {
+    let none: &[String] = &[];
+    let ask = serde_json::json!({"title": "Send the invoice", "quote": "can you send it?", "amount": "$1,200"});
+    assert_eq!(
+        key_words(&ask, none),
+        (vec!["invoice".into(), "200".into()], true)
+    );
+    for (body, ok) in [
+        ("Hi Bo, any news on the invoices? D", true),
+        ("Hi Bo, the 1,200 dollars? D", true),
+        ("Hi Bo, INVOICE please. D", true),
+        ("Hi Bo, any news? D", false),
+        ("Hi Bo, can you send it? D", false),
+    ] {
+        assert_eq!(names(body, &ask, none), ok, "{body}");
+    }
+    // An amount is an object: its values are words, its field names are not.
+    let pay =
+        serde_json::json!({"title": "Pay it", "amount": {"value": 312.77, "currency": "USD"}});
+    assert!(!names(
+        "Can you confirm the value and the currency?",
+        &pay,
+        none
+    ));
+    assert!(names("Hi Bo, the 312.77? D", &pay, none));
+    // A commitment with no key word needs its title (issue #1157).
+    let it = serde_json::json!({"title": "Do it", "quote": null});
+    assert!(!names("Hi", &it, none));
+    assert!(names("Hi, can you do it? D", &it, none));
+}
+
+/// Issue #1154: a short commitment with no strong key word has weak key
+/// words (a 1-digit amount, a 3-letter word), and the body must hold one
+/// of them as a whole word.
+#[test]
+fn a_short_commitment_needs_its_short_words() {
+    let none: &[String] = &[];
+    let ask =
+        serde_json::json!({"title": "Pay $5", "quote": "I'll pay $5", "amount": {"value": 5}});
+    assert!(!key_words(&ask, none).1);
+    for (body, ok) in [
+        ("Hi", false),
+        ("Hi Bo, any news? D", false),
+        ("Hi Bo, the $50? D", false),
+        ("Hi Bo, can you pay the $5? D", true),
+        ("Hi Bo, the 5 dollars? D", true),
+    ] {
+        assert_eq!(names(body, &ask, none), ok, "{body}");
+    }
+    // A common word of 3 letters is no weak key word.
+    let ask = serde_json::json!({"title": "Can you pay?", "quote": "Can you pay it?"});
+    assert_eq!(key_words(&ask, none).0, ["pay", "pay"]);
+    assert!(!names("Can you update me?", &ask, none));
+}
+
+/// Issue #1146: a word of the name or the address of a person of the
+/// thread is no key word, so a greeting does not name the commitment.
+#[test]
+fn a_name_of_a_person_names_no_commitment() {
+    let people = people_words(&[
+        "dana@example.com".into(),
+        "Priya Raman".into(),
+        "priya@example.com".into(),
+    ]);
+    let ask = serde_json::json!({"title": "Priya to check", "quote": "Priya, can you check?"});
+    assert_eq!(
+        key_words(&ask, &people),
+        (vec!["check".into(), "check".into()], true)
+    );
+    assert!(!names("Hi Priya, how are you? Dana", &ask, &people));
+    assert!(names("Hi Priya, did you check it? Dana", &ask, &people));
+    // With no other word, a name leaves the commitment with no key word:
+    // the body needs its title (issue #1157).
+    let only = serde_json::json!({"title": "Raman", "quote": null});
+    assert!(!names("Hi", &only, &people));
+    assert!(names("Hi Raman. Dana", &only, &people));
+}
+
+/// Issue #1146: for any text of names and addresses, each of its words is a
+/// people word, so a commitment of only such words has no key word.
+#[test]
+fn each_word_of_a_name_is_a_people_word() {
+    let parts = [
+        "Priya",
+        "O'Brien",
+        "José",
+        "Ünal",
+        "李",
+        "bo",
+        "x1",
+        "dana@example.com",
+        ".",
+        " ",
+        ",",
+        "<",
+        ">",
+        "-",
+        "\"",
+        "Ⅷ",
+        "ß",
+    ];
+    let mut seed = 11u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    for _ in 0..2000 {
+        let text: String = (0..1 + next(8)).map(|_| parts[next(parts.len())]).collect();
+        let people = people_words(std::slice::from_ref(&text));
+        let ask = serde_json::json!({"title": text, "quote": text});
+        assert!(key_words(&ask, &people).0.is_empty(), "{text:?} {people:?}");
+        // Issue #1157: the body needs the words of the title.
+        assert!(names(&format!("Hi {text}"), &ask, &people), "{text:?}");
+    }
+}
+
+/// Issue #1146: the name of a recipient comes from the mail that the
+/// recipient sent, because the header keeps only bare `To` addresses. A
+/// body that names only the recipient does not pass.
+#[test]
+fn a_nudge_that_names_only_the_recipient_is_not_saved() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-recipient-name");
+    let mut other = msg(
+        "from-ana",
+        "t-other",
+        500,
+        "INBOX",
+        "ana@example.org",
+        "me@example.com",
+        Some("Hello"),
+    );
+    other.header.from_name = Some("Ana Priyanka".into());
+    b.store.put_messages(1, &[other]).unwrap();
+    understood(&b.store);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET doc = json_set(doc, '$.title', 'Priyanka to send the slides')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    let fake = Fake::new(r#"{"body": "Hi Priyanka, any news? D", "named": [1]}"#);
+    assert!(matches!(
+        nudge(&b.store, &l, &fake, now),
+        Err(Error::BadAnswer(_))
+    ));
+    assert_eq!(saved(&b.store, t), None);
+    let fake = Fake::new(r#"{"body": "Hi Priyanka, the slides? D", "named": [1]}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
+}
+
+/// Issue #1146: each stored name of an address of the thread is a people
+/// word: also more than 8 names of one address, and a name of a sender
+/// who is only in an older message of the thread, from another thread.
+#[test]
+fn every_stored_name_of_a_thread_address_is_a_people_word() {
+    let (b, t) = asked("people-all-names");
+    // An older message of the thread from Cy, and the newest six from me.
+    let mut older = msg(
+        "cy-1",
+        "t-ask",
+        10,
+        "INBOX",
+        "cy@example.org",
+        "me@example.com",
+        Some("Hi"),
+    );
+    older.header.from_name = Some("Cy".into());
+    let mut msgs = vec![older];
+    for i in 0..THREAD_MESSAGES {
+        msgs.push(msg(
+            &format!("me-{i}"),
+            "t-ask",
+            20 + i as i64,
+            "SENT",
+            "me@example.com",
+            "ana@example.org",
+            Some("x"),
+        ));
+    }
+    // Other threads: 12 names of Ana, and one other name of Cy.
+    for i in 0..12 {
+        let mut m = msg(
+            &format!("ana-{i}"),
+            &format!("t-a{i}"),
+            5,
+            "INBOX",
+            "ana@example.org",
+            "me@example.com",
+            Some("Hello"),
+        );
+        m.header.from_name = Some(format!("Annaname{i}"));
+        msgs.push(m);
+    }
+    let mut cy = msg(
+        "cy-2",
+        "t-cy",
+        5,
+        "INBOX",
+        "cy@example.org",
+        "me@example.com",
+        Some("Hello"),
+    );
+    cy.header.from_name = Some("Cyrillus".into());
+    msgs.push(cy);
+    b.store.put_messages(1, &msgs).unwrap();
+    let snap = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    assert!(snap
+        .newest
+        .iter()
+        .all(|m| m.from_addr.as_deref() != Some("cy@example.org")));
+    let texts = b
+        .store
+        .read(|c| {
+            Ok(people_texts(
+                c,
+                t,
+                "me@example.com",
+                Some("ana@example.org"),
+                &snap.newest,
+            )?)
+        })
+        .unwrap();
+    let people = people_words(&texts);
+    for w in ["cyrillus", "annaname0", "annaname11"] {
+        assert!(
+            people.binary_search(&w.to_string()).is_ok(),
+            "{w} {people:?}"
+        );
+    }
+}
+
+/// Issue #1146: the stored name of each entry of a `To` or `Cc` list is a
+/// people word, also for a quoted local part with a comma in it.
+#[test]
+fn the_stored_name_of_each_list_entry_is_a_people_word() {
+    let (b, t) = asked("people-list-entries");
+    let locals = ["\"a,b\"", "\"c, d\"", "plain", "\"x\\\"y,z\""];
+    let mut seed = 5u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    let mut msgs = vec![];
+    let mut addrs = vec![];
+    for (i, l) in locals.iter().enumerate() {
+        let addr = format!("{l}@ex{i}.org");
+        let mut m = msg(
+            &format!("q-{i}"),
+            &format!("t-q{i}"),
+            5,
+            "INBOX",
+            &addr,
+            "me@example.com",
+            Some("Hi"),
+        );
+        m.header.from_name = Some(format!("Quotedname{i}"));
+        msgs.push(m);
+        addrs.push(addr);
+    }
+    b.store.put_messages(1, &msgs).unwrap();
+    for _ in 0..50 {
+        let mut list: Vec<String> = addrs.clone();
+        for i in (1..list.len()).rev() {
+            list.swap(i, next(i + 1));
+        }
+        let mut snap = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+        snap.newest[0].cc_addrs = Some(list.join(", "));
+        let texts = b
+            .store
+            .read(|c| Ok(people_texts(c, t, "me@example.com", None, &snap.newest)?))
+            .unwrap();
+        let people = people_words(&texts);
+        for i in 0..locals.len() {
+            let w = format!("quotedname{i}");
+            assert!(people.binary_search(&w).is_ok(), "{w} {list:?}");
+        }
+    }
+}
+
+/// Issue #1075: for any commitment, a body that holds one of its key words
+/// names it, and a body of only common words names it only when it has no
+/// key word.
+#[test]
+fn a_body_with_a_key_word_names_its_commitment() {
+    let words = [
+        "slides", "deck", "the", "send", "report", "Q3", "2026", "ok", "contract", "you",
+    ];
+    let mut seed = 7u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    for _ in 0..2000 {
+        let title: Vec<&str> = (0..1 + next(4)).map(|_| words[next(words.len())]).collect();
+        let ask = serde_json::json!({"title": title.join(" "), "quote": null});
+        let (keys, _) = key_words(&ask, &[]);
+        assert!(keys
+            .iter()
+            .all(|k| title.iter().any(|w| w.to_lowercase() == *k)));
+        if let Some(k) = keys.first() {
+            assert!(names(
+                &format!("Hi, any news on the {}? D", k.to_uppercase()),
+                &ask,
+                &[]
+            ));
+            assert!(!names("Hi, any news? D", &ask, &[]), "{ask}");
+        } else {
+            // Issue #1157: no key word, so the body must hold the title.
+            let t = title.join(" ");
+            assert!(names(
+                &format!("Hi, any news? {}. D", t.to_uppercase()),
+                &ask,
+                &[]
+            ));
+            assert!(!names("Hi, any news? D", &ask, &[]), "{ask}");
+        }
+    }
+}
+
+/// Issue #1157: a commitment with no key word is named only by all the
+/// words of its title or quote, in order and next to each other. A
+/// commitment with no word at all passes.
+#[test]
+fn a_commitment_with_no_key_word_is_named_by_its_title_or_quote() {
+    let ask = serde_json::json!({"title": "Do it", "quote": "you ask Bo"});
+    let people = vec!["bo".to_string()];
+    assert!(key_words(&ask, &people).0.is_empty());
+    for (body, named) in [
+        ("Hi Bo, can you do it this week? D", true),
+        ("Hi, did you DO-IT? D", true),
+        ("Hi, you ask Bo, I think. D", true),
+        ("Hi Bo, any news? D", false),
+        ("Hi, it do? D", false),
+        ("Hi, do you have it? D", false),
+        ("Hi, you ask now. D", false),
+    ] {
+        assert_eq!(names(body, &ask, &people), named, "{body}");
+    }
+    for ask in [
+        serde_json::json!({"title": "", "quote": null}),
+        serde_json::json!({"title": "?!", "quote": " "}),
+    ] {
+        assert!(names("Hi", &ask, &[]), "{ask}");
+    }
 }

@@ -17,6 +17,7 @@ pub mod reply;
 pub mod session_socket;
 pub mod sessions;
 pub mod socket;
+pub mod summary;
 pub mod verbs;
 
 use std::io::BufRead;
@@ -173,9 +174,18 @@ pub enum Command {
     },
     /// Show the send switch, or turn it on or off. No send leaves while it
     /// is off. `on` needs a terminal and a typed "yes".
+    /// `bcc-test <gmail|outlook> <to> <bcc>` and `bcc <gmail|outlook>` are
+    /// the owner check of the Bcc gate of a provider (send content spec,
+    /// section 6.2). They need a terminal and a typed "yes" too.
     Sending {
         #[arg(value_enum)]
         state: Option<Switch>,
+        /// The provider of the Bcc gate: gmail or outlook.
+        provider: Option<String>,
+        /// The `To` address of the test send.
+        to: Option<String>,
+        /// The `Bcc` address of the test send.
+        bcc: Option<String>,
     },
     /// Stop all agent work: end each session of a job, and apply and send
     /// nothing until `iris resume`. `--show` only shows the state.
@@ -543,10 +553,12 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
     }))
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum Switch {
     On,
     Off,
+    BccTest,
+    Bcc,
 }
 
 #[derive(Subcommand)]
@@ -671,15 +683,20 @@ pub enum ServiceAction {
 
 /// Run `iris service install` or `iris service remove`. Return the message
 /// for the user.
-pub fn service(action: ServiceAction) -> std::io::Result<String> {
+/// The service runs with the data folder of this command (`--data`, else
+/// `IRIS_DATA`, else the folder of the system), as an absolute path
+/// (issue #243).
+pub fn service(action: ServiceAction, data: Option<PathBuf>) -> std::io::Result<String> {
     match action {
         ServiceAction::Install => {
             // The service file holds this path, so give the real file, not a link.
             let program = std::env::current_exe()?.canonicalize()?;
-            let file = iris_service::install(&program)?;
+            let data = std::path::absolute(engine::data_dir(data)?)?;
+            let file = iris_service::install(&program, &data)?;
             Ok(format!(
-                "iris: installed and started the service ({})",
-                file.display()
+                "iris: installed and started the service ({}) with the data folder {}",
+                file.display(),
+                data.display()
             ))
         }
         ServiceAction::Remove => Ok(match iris_service::remove()? {
@@ -756,10 +773,47 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         print!("{}", out.text);
         return out.failure.map_or(Ok(()), Err);
     }
+    if let Command::List {
+        form,
+        status,
+        kind,
+        before,
+        limit,
+        json,
+    } = &cli.command
+    {
+        let store = Store::open(&data?).map_err(|e| socket::Failure {
+            code: socket::code::ERROR,
+            error: format!("store: {e}"),
+        })?;
+        let filter = iris_api::Filter {
+            form: form.as_deref(),
+            status: status.as_deref(),
+            kind: kind.as_deref(),
+            before: before.as_deref(),
+        };
+        print!(
+            "{}",
+            verbs::list(&store, &filter, limit.unwrap_or(50), *json).map_err(list_failure)?
+        );
+        return Ok(());
+    }
     run_store(cli).map_err(|error| socket::Failure {
         code: socket::code::ERROR,
         error,
     })
+}
+
+/// The failure of `iris list` (CLI and MCP): a refused filter is a wrong
+/// argument, code 2 (specification 2, section 8.4); other errors are code 1.
+fn list_failure(e: iris_api::Error) -> socket::Failure {
+    socket::Failure {
+        code: match e {
+            iris_api::Error::Query(_) => socket::code::USAGE,
+            _ => socket::code::ERROR,
+        },
+        error: e.to_string(),
+    }
 }
 
 /// The request on the engine socket of a verb that changes changesets
@@ -823,6 +877,31 @@ pub fn session_socket() -> Option<PathBuf> {
     }
 }
 
+/// Why a session cannot add the action `verb`, or `None` if it can. Only a
+/// person sends (decision D2). A session drafts a reply in a granted
+/// thread: submit checks the grant (docs/specs/2026-11-17-job-verbs.md).
+fn session_refusal(verb: &str) -> Option<&'static str> {
+    match verb {
+        "send" => Some("a session cannot send or nudge: only a person sends mail"),
+        "skip" | "mute" | "dismiss" => Some(
+            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
+        ),
+        _ => None,
+    }
+}
+
+/// Only the write verbs of a session (R4-03). `drafts` gives only the draft
+/// of the job of the session, so a lost `add` answer can be found again.
+const SESSION_VERBS: [&str; 7] = [
+    "add",
+    "drafts",
+    "submit",
+    "show",
+    "withdraw",
+    "revise",
+    "matters.propose",
+];
+
 /// One command in session mode
 /// (docs/specs/2026-11-17-session-launcher.md, "The command"): each verb
 /// goes to the session socket at `path`, and the command never opens the
@@ -850,6 +929,13 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             error: String::new(),
         }));
     }
+    if let Command::Mcp = c {
+        // The tools of a session: the same paths as the commands below.
+        return mcp_session(path).map_err(|error| socket::Failure {
+            code: socket::code::ERROR,
+            error,
+        });
+    }
     if let Command::Status { json } = c {
         let r = socket::request_at(
             path,
@@ -862,20 +948,15 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_status_text(&r, *json));
         return Ok(());
     }
-    // Only a person sends (decision D2). A session drafts a reply in a
-    // granted thread: submit checks the grant (docs/specs/2026-11-17-job-verbs.md).
-    if matches!(c, Command::Send { .. }) {
-        return Err(denied(
-            "a session cannot send or nudge: only a person sends mail",
-        ));
-    }
-    if matches!(
-        c,
-        Command::Skip { .. } | Command::Mute { .. } | Command::Dismiss { .. }
-    ) {
-        return Err(denied(
-            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
-        ));
+    let action = match c {
+        Command::Send { .. } => Some("send"),
+        Command::Skip { .. } => Some("skip"),
+        Command::Mute { .. } => Some("mute"),
+        Command::Dismiss { .. } => Some("dismiss"),
+        _ => None,
+    };
+    if let Some(why) = action.and_then(session_refusal) {
+        return Err(denied(why));
     }
     if let Command::Wait { until, reply, why } = c {
         // The wait ends this session: after a lost answer, `iris status`
@@ -942,16 +1023,6 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_read_text(&r, json));
         return Ok(());
     }
-    // Only the write verbs of a session (R4-03): `drafts`, for example, is
-    // a host verb of the socket.
-    const SESSION_VERBS: [&str; 6] = [
-        "add",
-        "submit",
-        "show",
-        "withdraw",
-        "revise",
-        "matters.propose",
-    ];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
         return Err(denied("this verb is not a verb of a session"));
@@ -1346,7 +1417,13 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                     kind: kind.as_deref(),
                     before: before.as_deref(),
                 };
-                read(open().and_then(|s| verbs::list(&s, &filter, limit, true)))
+                match open() {
+                    Err(e) => Outcome::fail(socket::code::ERROR, e),
+                    Ok(s) => match verbs::list(&s, &filter, limit.unwrap_or(50), true) {
+                        Ok(text) => Outcome::ok(text),
+                        Err(e) => fail(list_failure(e)),
+                    },
+                }
             }
             Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
             Call::WatchList => watch(WatchCommand::List { json: true }),
@@ -1364,6 +1441,84 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
             ),
         }
     };
+    mcp_serve(run)
+}
+
+/// `iris mcp` in a job workspace (issue #440): each tool call takes the
+/// path of its command in session mode, on the session socket at `path`.
+/// The session limits apply: the grant of the job, and only the verbs of a
+/// session. The tools never open the store.
+fn mcp_session(path: &std::path::Path) -> Result<(), String> {
+    use iris_mcp::{Call, Outcome};
+    let path = path.to_path_buf();
+    let run = move |c: Call| -> Outcome {
+        let fail = |f: socket::Failure| Outcome::fail(f.code, f.error);
+        let read = |verb: &str, args: serde_json::Value, status: bool| {
+            // A read changes nothing: after a lost answer, run it again.
+            match socket::request_at(&path, verb, args, socket::ANSWER_WAIT, "the same call") {
+                Ok(r) if status => Outcome::ok(session_status_text(&r, true)),
+                Ok(r) => Outcome::ok(session_read_text(&r, true)),
+                Err(f) => fail(f),
+            }
+        };
+        let denied = || {
+            Outcome::fail(
+                socket::code::DENIED,
+                "this tool is not a tool of a session".into(),
+            )
+        };
+        match c {
+            Call::Socket { verb: "add", args }
+                if args["verb"].as_str().and_then(session_refusal).is_some() =>
+            {
+                let why = args["verb"]
+                    .as_str()
+                    .and_then(session_refusal)
+                    .unwrap_or_default();
+                Outcome::fail(socket::code::DENIED, why.into())
+            }
+            Call::Socket { verb, args } if SESSION_VERBS.contains(&verb) => {
+                match socket_verb_at(&path, verb, args, true) {
+                    Ok(p) => Outcome {
+                        text: p.text,
+                        failure: p.failure.map(|f| (f.code, f.error)),
+                    },
+                    Err(f) => fail(f),
+                }
+            }
+            Call::Status => read("status", serde_json::json!({}), true),
+            Call::Search { text, limit } => read(
+                "search",
+                serde_json::json!({ "text": text, "limit": limit }),
+                false,
+            ),
+            Call::Show { id } => read("show", serde_json::json!({ "id": id }), false),
+            Call::List {
+                form,
+                status: None,
+                kind: None,
+                before: None,
+                limit: None,
+            } => read("list", serde_json::json!({ "form": form }), false),
+            Call::List { .. } => Outcome::fail(
+                socket::code::USAGE,
+                "in a job workspace, list takes only a form".into(),
+            ),
+            Call::Socket { .. }
+            | Call::WatchAdd { .. }
+            | Call::WatchList
+            | Call::WatchRemove { .. }
+            | Call::MattersList
+            | Call::MattersShow { .. } => denied(),
+        }
+    };
+    mcp_serve(run)
+}
+
+/// Serve the MCP tools on standard input and output with `run`.
+fn mcp_serve(
+    run: impl Fn(iris_mcp::Call) -> iris_mcp::Outcome + Send + Sync + 'static,
+) -> Result<(), String> {
     // rmcp uses timers for its time limits. At most MCP_CALLS calls run at
     // the same time; the others wait in the queue of the runtime.
     tokio::runtime::Builder::new_current_thread()
@@ -1494,12 +1649,28 @@ fn run_store(cli: Cli) -> Result<(), String> {
         cli.command,
         Command::Mirror { .. } | Command::Understand { .. }
     ) {
+        // Each step runs, also when an earlier one fails (issue #1040).
         let attention = open().and_then(|s| {
-            iris_policy::refresh_attention(&s, engine::now_ms().div_euclid(1000))
-                .map_err(|e| format!("attention: {e}"))?;
-            // The measure "time to the first brief" ends at the first brief with content.
-            iris_api::measures::check_brief(&s, engine::now_ms())
-                .map_err(|e| format!("measures: {e}"))
+            let now = engine::now_ms();
+            let errors: Vec<String> = [
+                iris_policy::refresh_attention(&s, now.div_euclid(1000))
+                    .map(|_| ())
+                    .map_err(|e| format!("attention: {e}")),
+                // The measure "time to the first brief" ends at the first brief with content.
+                iris_api::measures::check_brief(&s, now).map_err(|e| format!("measures: {e}")),
+                // A watch matches with no engine too (issue #260).
+                s.check_watches(now)
+                    .map(|_| ())
+                    .map_err(|e| format!("watches: {e}")),
+            ]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("\n"))
+            }
         });
         if let Err(e) = attention {
             return Err(match result {
@@ -1576,23 +1747,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
-        Command::List {
-            form,
-            status,
-            kind,
-            before,
-            limit,
-            json,
-        } => {
-            let filter = iris_api::Filter {
-                form: form.as_deref(),
-                status: status.as_deref(),
-                kind: kind.as_deref(),
-                before: before.as_deref(),
-            };
-            print(verbs::list(&open()?, &filter, limit.unwrap_or(50), *json))
-        }
-        // `run` refuses it in host mode, before the store.
+        // `run` lists the items (the exit code of a bad filter), and
+        // refuses a verb of a session in host mode, before the store.
+        Command::List { .. } => Err("iris list runs in `run`".into()),
         Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } => {
             Err("this is a verb of a session".into())
         }
@@ -1662,8 +1819,12 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             Ok(())
         }
         Command::Backup { path } => {
-            let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
-            println!("iris: backup in {} ({files} content files)", path.display());
+            let done = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
+            println!(
+                "iris: backup in {} ({} content files)",
+                path.display(),
+                done.files
+            );
             Ok(())
         }
         Command::Export { path } => {
@@ -1678,7 +1839,10 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             Ok(())
         }
         Command::Service { action } => {
-            println!("{}", service(*action).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                service(*action, cli.data.clone()).map_err(|e| e.to_string())?
+            );
             Ok(())
         }
         Command::Model { command } => {
@@ -1699,8 +1863,29 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{}", zone_text(&store).map_err(|e| e.to_string())?);
             Ok(())
         }
-        Command::Sending { state } => {
+        Command::Sending {
+            state,
+            provider,
+            to,
+            bcc,
+        } => {
             let store = open()?;
+            if let Some(Switch::BccTest | Switch::Bcc) = state {
+                use std::io::IsTerminal;
+                let stdin = std::io::stdin();
+                let text = bcc_gate(
+                    &store,
+                    *state == Some(Switch::BccTest),
+                    [provider, to, bcc].map(|a| a.as_deref()),
+                    stdin.is_terminal(),
+                    &mut stdin.lock(),
+                )?;
+                println!("{text}");
+                return Ok(());
+            }
+            if provider.is_some() {
+                return Err("`iris sending on` and `off` take no address".into());
+            }
             match state {
                 Some(Switch::On) => {
                     {
@@ -1717,7 +1902,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     }
                     Err(e) => return Err(e.to_string()),
                 },
-                None => {}
+                _ => {}
             }
             println!(
                 "{}",
@@ -1923,16 +2108,25 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
             continue;
         }
-        // Another process runs the first copy: no full mirror exists to
-        // compare (issue #679). The check comes before any token or
-        // provider call, so their errors cannot hide it.
-        if matches!(command, MirrorCommand::Verify)
-            && !mirror_ready(&store, account)?
-            && iris_sync::other_sync_runs(&store, account).map_err(|e| e.to_string())?
-        {
-            println!("account {account}: {FIRST_COPY_RUNS}");
-            continue;
-        }
+        // Verify takes the sync lock before any token or provider call, and
+        // holds it to the end: a first copy cannot start after this check,
+        // and their errors cannot hide the line of a first copy in another
+        // process (issues #679, #836). No full mirror exists to compare then.
+        let held = match command {
+            MirrorCommand::Sync => None,
+            MirrorCommand::Verify => match iris_sync::lock(&store, account) {
+                Ok(l) => Some(l),
+                Err(iris_sync::Error::OtherSync) if !mirror_ready(&store, account)? => {
+                    println!("account {account}: {FIRST_COPY_RUNS}");
+                    continue;
+                }
+                Err(e) => {
+                    failed = true;
+                    say!("iris: account {account}: {e}");
+                    continue;
+                }
+            },
+        };
         let mail = match engine::provider_for(&store, account, &config) {
             Ok(m) => m,
             Err(e) => {
@@ -1958,32 +2152,28 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
                     if s.resync { ", full resync" } else { "" }
                 )
             }),
-            MirrorCommand::Verify => worker.verify().map(|r| {
-                let mut text = format!(
-                    "verified at history {}: {} differences, {} skipped{}",
-                    r.history_id,
-                    r.total,
-                    r.skipped,
-                    if r.resync {
-                        ", the next sync runs a full resync"
-                    } else {
-                        ""
+            MirrorCommand::Verify => worker
+                .verify_held(held.as_ref().expect("verify holds the sync lock"))
+                .map(|r| {
+                    let mut text = format!(
+                        "verified at history {}: {} differences, {} skipped{}",
+                        r.history_id,
+                        r.total,
+                        r.skipped,
+                        if r.resync {
+                            ", the next sync runs a full resync"
+                        } else {
+                            ""
+                        }
+                    );
+                    for d in &r.differences {
+                        text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
                     }
-                );
-                for d in &r.differences {
-                    text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
-                }
-                text
-            }),
+                    text
+                }),
         };
         match line {
             Ok(text) => println!("account {account}: {text}"),
-            // A first copy that started after the check above.
-            Err(engine::Error::Sync(iris_sync::Error::OtherSync))
-                if matches!(command, MirrorCommand::Verify) && !mirror_ready(&store, account)? =>
-            {
-                println!("account {account}: {FIRST_COPY_RUNS}")
-            }
             Err(e) => {
                 failed = true;
                 say!("iris: account {account}: {e}");
@@ -2350,9 +2540,12 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
 
     // One thread: the lightest memory footprint has priority.
     // The time driver: the socket waits at most READ_WAIT for a request.
+    // The blocking threads: the API and its stream writers, and one for each
+    // connection of the command socket (#814).
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
+        .max_blocking_threads(iris_api::BLOCKING_THREADS + socket::MAX_CONNECTIONS)
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -2546,7 +2739,9 @@ fn stop_text(s: &iris_apply::Stopped) -> String {
 /// What stays after a removal. The question says it before the removal,
 /// and the result says it again.
 const REMOVE_KEEPS: &str = "A backup copy that you made, the copies iris.db.v*.bak in the \
-     data folder and the notes of jobs still hold this mail.";
+     data folder and the notes of jobs still hold this mail. The record of what Iris and you \
+     did stays: drafts, the reasons of changes, job events and the titles of matters that you \
+     decided can hold text from this mail.";
 
 /// The question of `iris account remove`, before the removal.
 fn remove_question(address: &str) -> String {
@@ -2615,6 +2810,72 @@ fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), St
         return Err("Sending stays off.".into());
     }
     Ok(())
+}
+
+/// `iris sending bcc-test` (`test` true) and `iris sending bcc`: the owner
+/// check of the Bcc gate of a provider (send content spec, section 6.2).
+/// `args` are the provider, the `To` address and the `Bcc` address.
+fn bcc_gate(
+    store: &Store,
+    test: bool,
+    args: [Option<&str>; 3],
+    terminal: bool,
+    input: &mut impl BufRead,
+) -> Result<&'static str, String> {
+    let usage = if test {
+        "usage: iris sending bcc-test <gmail|outlook> <to> <bcc>"
+    } else {
+        "usage: iris sending bcc <gmail|outlook>"
+    };
+    let [Some(provider @ ("gmail" | "outlook")), to, bcc] = args else {
+        return Err(usage.into());
+    };
+    if test != (to.is_some() && bcc.is_some()) || (!test && (to.is_some() || bcc.is_some())) {
+        return Err(usage.into());
+    }
+    if !terminal {
+        return Err("the Bcc check needs a terminal: standard input is not a TTY".into());
+    }
+    if test {
+        let (to, bcc) = (to.unwrap_or_default(), bcc.unwrap_or_default());
+        for a in [to, bcc] {
+            iris_compose::check_address(&a.to_ascii_lowercase())?;
+        }
+        if to.eq_ignore_ascii_case(bcc) {
+            return Err("use two different addresses".into());
+        }
+        eprint!(
+            "Only a send with exactly To {to}, no Cc and Bcc {bcc} passes the Bcc gate of \
+             {provider} until you run `iris sending bcc {provider}`. Type yes to continue: "
+        );
+    } else {
+        eprint!(
+            "Confirm that the Bcc mailbox got the test mail, and that the To copy does not \
+             show the Bcc address. Then each send with Bcc of {provider} can leave. \
+             Type yes to open the Bcc gate: "
+        );
+    }
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != "yes" {
+        return Err("Nothing changed.".into());
+    }
+    if test {
+        let (to, bcc) = (to.unwrap_or_default(), bcc.unwrap_or_default());
+        if !iris_apply::bcc_test(store, provider, to, bcc).map_err(|e| e.to_string())? {
+            return Err(format!(
+                "The Bcc gate of {provider} is open. Nothing changed."
+            ));
+        }
+        Ok("The test is ready. Write and approve the test send in Iris.")
+    } else {
+        if !iris_apply::bcc_open(store, provider).map_err(|e| e.to_string())? {
+            return Err(format!(
+                "Run `iris sending bcc-test {provider} <to> <bcc>` first."
+            ));
+        }
+        Ok("The Bcc gate is open.")
+    }
 }
 
 /// `iris cancel d-4`: cancel the open send of the draft.
@@ -2700,6 +2961,52 @@ mod outbox_tests {
         assert!(r.unwrap_err().contains("needs a terminal"));
     }
 
+    /// The Bcc gate commands need the right arguments, a terminal and a
+    /// typed "yes", and open the gate only after a test.
+    #[test]
+    fn the_bcc_gate_needs_a_test_a_terminal_and_yes() {
+        let dir = std::env::temp_dir().join(format!("iris-bcc-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let gate = |test, args, terminal, answer: &str| {
+            bcc_gate(&store, test, args, terminal, &mut answer.as_bytes())
+        };
+        let (to, bcc) = (Some("a@example.org"), Some("b@example.org"));
+        for args in [
+            [Some("imap"), to, bcc],
+            [Some("gmail"), to, None],
+            [None, None, None],
+        ] {
+            assert!(gate(true, args, true, "yes\n")
+                .unwrap_err()
+                .starts_with("usage"));
+        }
+        assert!(gate(false, [Some("gmail"), to, None], true, "yes\n")
+            .unwrap_err()
+            .starts_with("usage"));
+        assert!(gate(true, [Some("gmail"), to, to], true, "yes\n").is_err());
+        assert!(gate(true, [Some("gmail"), Some("a b@x"), bcc], true, "yes\n").is_err());
+        assert!(gate(true, [Some("gmail"), to, bcc], false, "yes\n")
+            .unwrap_err()
+            .contains("terminal"));
+        assert_eq!(
+            gate(true, [Some("gmail"), to, bcc], true, "no\n"),
+            Err("Nothing changed.".into())
+        );
+        assert!(gate(false, [Some("gmail"), None, None], true, "yes\n")
+            .unwrap_err()
+            .contains("bcc-test"));
+        assert!(gate(true, [Some("gmail"), to, bcc], true, "yes\n").is_ok());
+        assert_eq!(
+            gate(false, [Some("gmail"), None, None], true, "yes\n"),
+            Ok("The Bcc gate is open.")
+        );
+        assert!(gate(true, [Some("gmail"), to, bcc], true, "yes\n")
+            .unwrap_err()
+            .contains("is open"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn only_the_address_removes_an_account() {
         let a = "a@example.org";
@@ -2719,6 +3026,8 @@ mod outbox_tests {
             "notes of jobs",
             "files of agents",
             "provider does not change",
+            "record of what Iris and you did stays",
+            "titles of matters",
         ] {
             assert!(q.contains(word), "{word}: {q}");
         }

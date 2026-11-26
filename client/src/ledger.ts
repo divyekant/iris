@@ -42,6 +42,8 @@ export function did(e: LedgerEntry): string {
     case "send":
       return "Sent";
     case "draft":
+      // A change of a draft, and its undo (draft change spec, section 6). An older engine leaves `change` out.
+      if (e.change) return e.undo_of ? "Restored the old text of" : "Changed the draft of";
       return "Wrote the draft of";
     default:
       // A verb that the changeset schema does not have yet: test/ledger.test.mjs checks each one.
@@ -51,11 +53,24 @@ export function did(e: LedgerEntry): string {
 
 /** What the entry changed: its messages, its item, or its mail. */
 export function what(e: LedgerEntry): string {
-  if (e.verb === "send" || e.verb === "draft") return "a mail";
+  if (e.verb === "send" || e.verb === "draft") return mail(e);
   if (e.items === 1 && e.title) return `“${e.title}”`;
   if (e.items > 0) return count(e.items, "item", "items");
   // An undo counts each message that the change it undoes changed, also a gone one (decision D18).
   return count(e.undo_of && e.tried > 0 ? e.tried : e.messages, "message", "messages");
+}
+
+/**
+ * The mail of a send or a draft (issue 490): its subject and its first recipient, so that two sends
+ * differ. The engine gives them only when it can read the content of the draft: else "a mail".
+ */
+function mail(e: LedgerEntry): string {
+  const m = e.mail;
+  if (!m) return "a mail";
+  const what = m.subject.trim() ? `“${m.subject.trim()}”` : "a mail with no subject";
+  if (!m.to) return what;
+  const more = m.recipients - 1;
+  return `${what} to ${m.to}${more > 0 ? ` and ${count(more, "other", "others")}` : ""}`;
 }
 
 /**
@@ -71,13 +86,22 @@ export function who(e: LedgerEntry): string {
   return a.kind !== "person" && e.decided_by === "person" ? `${author}, approved by you` : author;
 }
 
+/** Spec 2 section 7.3: the messages that the recovery cannot confirm, with a leading space, or "".
+ * The person checks them in the mailbox. */
+function unconfirmed(e: LedgerEntry): string {
+  const unknown = e.unknown ?? 0;
+  return unknown > 0 ? ` Iris could not confirm ${count(unknown, "message", "messages")}: check ${unknown === 1 ? "it" : "them"} in your mailbox.` : "";
+}
+
 /** The state of an entry that is not plainly done, or "". */
 export function status(e: LedgerEntry): string {
   if (e.state === "writing") return "Iris makes this change now.";
   if (e.state === "failed") {
     const part = e.messages > 0 ? ` ${e.changed.toLocaleString("en-US")} of ${count(e.messages, "message", "messages")} changed.` : "";
-    return `Failed.${part}${e.error ? ` ${e.error}` : ""}`;
+    return `Failed.${part}${unconfirmed(e)}${e.error ? ` ${e.error}` : ""}`;
   }
+  // An undo restores only the confirmed messages: the others stay to check.
+  if (e.state === "undone" && (e.unknown ?? 0) > 0) return `Undone.${unconfirmed(e)}`;
   // An undo that skipped messages or items: an earlier undo restored them, they changed again
   // after the change, or they are gone (decision D18).
   if (e.undo_of && e.state === "applied" && e.skipped > 0) {

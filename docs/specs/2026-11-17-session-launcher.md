@@ -170,8 +170,10 @@ the engine has them: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 adapters pass `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` (a token
 of `claude setup-token`, for a Claude subscription) (`claude-code`), and
 `OPENAI_API_KEY` and `CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
-mailbox. The Linux sandbox shows no host folder other than the workspace
-and the program files: `HOME` is an empty private folder, and a
+mailbox. The Linux sandbox shows no host folder other than the workspace,
+the program files and the read paths of an `agents.toml` adapter
+(`docs/specs/2026-11-25-agents-read-paths-local-port.md`; the built-in
+adapters have none): `HOME` is an empty private folder, and a
 `CODEX_HOME` outside the view is not visible. So the agent tool reads no
 settings or login files of the person, and authenticates only with a key
 variable (sandbox spec, "Files"; known limit with an issue). A session with an egress port also gets `HTTPS_PROXY` and
@@ -214,7 +216,8 @@ not the agent:
    The helper calls `system(<data dir>)` with it. The data folder is an
    argument of the helper only: the helper does not pass it to the agent,
    whose arguments are the adapter arguments of `command()` and whose
-   environment has no variable of Iris.
+   environment has no variable of Iris, other than `IRIS_LOCAL_PORT` for
+   an adapter with `allow_local` (`docs/specs/2026-11-25-agents-read-paths-local-port.md`).
 2. The helper reads one line from the pipe. It runs no code of the agent
    before the line.
    - `start`: the helper starts the agent as its child, in the isolation,
@@ -387,8 +390,9 @@ proxy started):
    takes no new request (exit code 3).
 2. Close the egress proxy of the session (`Proxy::close`, see "Model
    egress"). This comes before each wait: no step below keeps a tunnel
-   open. The proxy keeps its port bound. The engine stops the proxy
-   (`Proxy::stop`, which frees the port) only after the reap check of the
+   open. The proxy keeps its port bound (macOS) or its end of the socket
+   pair open (Linux). The engine stops the proxy (`Proxy::stop`, which
+   frees the port or closes the pair) only after the reap check of the
    session passes. A launch that fails before the helper starts closes
    and keeps its proxy in the same way, and the supervisor stops it after
    the reap check.
@@ -495,19 +499,25 @@ machine.
 
 An isolation runs the agent so that it cannot reach the data folder, the
 engine socket `iris.sock`, the socket of another session, or the network.
-The one exception is the egress port of the session (see
-[Model egress](#model-egress)).
+The exceptions are the egress port of the session (see
+[Model egress](#model-egress)) and the local port that the person lists in
+`allow_local` of an `agents.toml` adapter
+(`docs/specs/2026-11-25-agents-read-paths-local-port.md`).
 It shows the agent only the workspace (read and write), a private empty
 home and `/tmp` (read and write), and the programs and system files of the
-sandbox spec (read only). It shows no settings or credential file of the
-person. It ends each process in it when the session ends: on Linux by the
+sandbox spec (read only), and the read paths that the person lists for an
+`agents.toml` adapter (read only;
+`docs/specs/2026-11-25-agents-read-paths-local-port.md`). It shows no
+settings or credential file of the person, other than a file that the
+person puts in a read path. It ends each process in it when the session ends: on Linux by the
 lifetime rule, on macOS by `stop` before the reap (the macOS exception
 below).
 
 `iris_session::Isolation` is the interface. It gives:
 
 - the program and the arguments that run the adapter command inside the
-  isolation, with the egress port as the only network that it permits;
+  isolation, with the egress port and the local port as the only network
+  that it permits;
 - a check that the isolation works on this system;
 - `name(session)`: the durable identity of the isolation of one session,
   for example a cgroup path on Linux. It depends only on the session ID,
@@ -561,15 +571,16 @@ The built-in agent tools call their model over HTTPS: `claude-code` needs
 `api.anthropic.com`, and `codex` needs `api.openai.com`. An isolation with
 no network stops them. The engine gives each session one narrow path out:
 
-- The engine listens on one TCP port of `127.0.0.1` for each running
-  session, the egress port. The isolation permits a connection to this
-  port only. It blocks each other address, also DNS.
-- On Linux, the proxy takes a client only from the session address of
-  its session (`127.128.0.0` plus the session ID). The relay of the
-  sandbox connects from that address (sandbox spec, "Egress on Linux"). A
-  client from each other address gets `403` and the log word
-  `not_session`. The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and
-  the same value in `https_proxy`.
+- The engine runs one proxy for each running session. The agent reaches
+  it on one TCP port of `127.0.0.1`, the egress port. The isolation
+  permits a connection to this port only. It blocks each other address,
+  also DNS.
+- On Linux, the proxy has no port on the host (issue 507). It takes its
+  clients only from a socket pair of its session: the helper listens on
+  the egress port in the namespace of the session, and sends each
+  connection to the proxy as a file descriptor (sandbox spec, "Egress on
+  Linux"). The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and the
+  same value in `https_proxy`.
 - On macOS, the proxy takes a client only from `127.0.0.1`, and only with
   the token of its session in `Proxy-Authorization: Basic` (user `iris`).
   A client from another address gets `403`, and a `CONNECT` with no
@@ -598,14 +609,23 @@ no network stops them. The engine gives each session one narrow path out:
   connection with the reason `sni_not_allowed`, or `not_tls` for bytes
   that are not a ClientHello. The proxy sends the ClientHello on to the
   host, then relays the bytes and does not read them. TLS runs from the
-  agent to the model host, so the engine sees no key and no text. A site
-  of the same CDN that serves a request with another name inside TLS
-  (domain fronting), or a client that hides the name with Encrypted
-  Client Hello, is a known limit (issue).
+  agent to the model host, so the engine sees no key and no text.
+- A ClientHello with the extension `encrypted_client_hello` (Encrypted
+  Client Hello, ECH) or `encrypted_server_name` (the older ESNI draft)
+  hides the true server name: its SNI is only the outer name, and the
+  CDN can serve another site from the encrypted inner name. The proxy
+  closes such a connection with the reason `ech` before any byte reaches
+  the host (issue 426). The proxy reads the extension list itself, over
+  each TLS record of the ClientHello; `rustls` gives no list. The agent
+  tools send no such extension (checked on 2026-11-26: Claude Code and
+  `codex` exec). A site of the same CDN that serves a request with
+  another name inside TLS (domain fronting) stays a known limit (issue
+  426): a check inside TLS needs a man-in-the-middle certificate.
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
   starts one proxy for each session that it registers, after the bind and
-  before the helper, with the log and the peer address of that session.
+  before the helper, with the log of that session: on macOS with the
+  peer address `127.0.0.1` and a new token, on Linux on a new socket pair.
   A revoke retry registers a second session, so it gets its own proxy. If
   the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
@@ -615,9 +635,9 @@ no network stops them. The engine gives each session one narrow path out:
   `port_not_allowed`, `address_not_public`, `too_long`, `too_many` for a
   ninth open connection or a resolver worker past the bound, `timeout`
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
-  `sni_not_allowed`, `no_resources` when the engine has no file
-  descriptor or thread for the connection, `not_session` for a client
-  that is not at the session address) and no text of the request. For a connection that closes, or
+  `sni_not_allowed`, `ech`, `no_resources` when the engine has no file
+  descriptor or thread for the connection, `not_session` on macOS for a
+  client that is not from `127.0.0.1` or has no token of the session) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
   Only the proxy writes this file,
@@ -641,8 +661,9 @@ no network stops them. The engine gives each session one narrow path out:
   `iris job stop` or a revoke through the engine also wakes it. The close
   ends each open tunnel and each resolve in progress, and from then on
   the proxy answers each new connection with a close and the log line
-  `ended reason=stopped`. The close keeps the port bound, and the engine
-  stops the proxy (`Proxy::stop`, which frees the port) only when the
+  `ended reason=stopped`. The close keeps the port bound (macOS) or the
+  engine end of the pair open (Linux), and the engine stops the proxy
+  (`Proxy::stop`, which frees the port or closes the pair) only when the
   reap check of the session passes.
 - Known limit (issue): an end that a store trigger or another process
   writes is not in step with the proxy. Between the commit of `ended_at`
@@ -653,12 +674,17 @@ no network stops them. The engine gives each session one narrow path out:
   reads `ended_at` in its transaction). It does not call back what the
   agent sent before. A gate in each tunnel that reads the store for each
   byte costs more than this window is worth.
-  The relay of the Linux sandbox (`docs/specs/2026-11-17-session-sandbox.md`)
-  connects to the port while the helper lives, and the reap check
-  confirms that the helper ended. So the port number cannot go to the
-  proxy of another session while a process of this session can reach it.
+  On macOS, the agent connects to the port while the helper lives, and
+  the reap check confirms that the helper ended. So, while the engine
+  runs, the port number cannot go to the proxy of another session while a
+  process of this session can reach it (after an engine crash: issue
+  #1159). On Linux, the proxy has no host port: the helper sends each
+  connection on the socket pair of the session, and the engine closes its
+  end of the pair only after the reap check
+  (`docs/specs/2026-11-17-session-sandbox.md`, "Egress on Linux").
 
-The engine knows the session from the port, never from the request. An
+The engine knows the session from the port (macOS) or from the pair
+(Linux), never from the request. An
 adapter with no allowed host gets no egress port and no `HTTPS_PROXY`.
 
 The agent sends the files of the workspace, which hold granted mail, to
@@ -768,9 +794,12 @@ exit code 3.
   each verb that is not a session verb with exit code 3, and sends
   nothing. The session verbs are `status`, the read verbs `search`,
   `show` and `list` (R4-04f), the write verbs `add`, `submit`, `show`
-  of a changeset, `withdraw` and `revise` (R4-03), and the job verbs
-  `wait` (R5-04), `ask` (R5-05) and `done` (#356). So
-  `iris changeset --drafts` gets code 3. In host mode, `iris list` lists
+  of a changeset, `withdraw` and `revise` (R4-03), `drafts`, and the job
+  verbs `wait` (R5-04), `ask` (R5-05) and `done` (#356). In a session,
+  `iris changeset --drafts` gives only the draft of the job of the session
+  (issue #440), so after a lost `add` answer the session finds its
+  changeset again. It gives no draft of the host or of another job
+  (issue #522). In host mode, `iris list` lists
   all items with filters (issue #523).
 
 ## Options not chosen
@@ -847,6 +876,7 @@ is refused before a row is written.
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
 | A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line with a fixed reason and no request text | Proxy test: `CONNECT <marker>:443` leaves no marker in the log |
 | A `CONNECT` to an allowed host, then a ClientHello with another server name (a site that shares the address) | Closed before any byte reaches the host; `sni_not_allowed` in the egress log | Proxy test with two names on one test server |
+| A ClientHello with the SNI of the allowed host and an ECH or ESNI extension, in one or more TLS records | Closed before any byte reaches the host; `ech` in the egress log (or `not_tls` if `rustls` cannot read the ECH body) | Proxy test; property test of the extension reader over random extension lists, places and record sizes, and over cut and changed bytes |
 | A revoke right after the gate commits, before the agent reads a file | The agent exists at the commit (the gate waited for `started`), so the revoke ends a running session and the supervisor stops it | Launch test: revoke hook right after the commit; the session ends with `revoke` and its group stops |
 | The helper does not confirm the spawn in 2 seconds | Roll back; `launch_failed`; the helper stops a late agent | Launch test with a helper that waits 3 seconds |
 | The agent and its children exit before the helper signals the group | The agent stays a zombie until after the last signal, so its group ID is not reused | Helper test: the agent exits at once, and the helper sends the signals before the reap (test hook that records the order) |
@@ -860,7 +890,7 @@ is refused before a row is written.
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process on Linux; on macOS the new engine calls `stop` at its start and on each turn, and reaps the session only when `ended` is true | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
-| A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
+| A connection to the egress port of another session | The other session is not reached. Linux: each listener exists only in the namespace of its session, and sends its connections only on the pair of its session. macOS: the isolation permits only its own port, and the proxy takes only the token of its session | R4-05 test; Linux handoff test; macOS token test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
 | An allowed host that resolves to a loopback, private or other reserved address | `403` with `address_not_public`; no connection | Proxy property test over the reserved ranges, with a test resolver |
 | A `pass_env` with a proxy name, in any case | Refused with the line | Parser test |

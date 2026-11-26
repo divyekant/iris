@@ -1022,7 +1022,7 @@ fn session_mode_uses_only_the_session_socket() {
     let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
     let server = std::thread::spawn(move || {
         let mut verbs = Vec::new();
-        for _ in 0..7 {
+        for _ in 0..8 {
             let (s, _) = listener.accept().unwrap();
             let mut line = String::new();
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
@@ -1035,6 +1035,7 @@ fn session_mode_uses_only_the_session_socket() {
                     "date": "2025-11-16T08:57:02Z", "from": "dana@example.com",
                     "from_name": "Dana", "subject": "Contract"}]}),
                 "list" => json!({"items": [item]}),
+                "drafts" => json!({"changesets": []}),
                 "show" => json!({"item": item}),
                 "wait" => json!({"job": "j-4", "state": "waiting",
                     "until": "2030-01-02T00:00:00Z", "reply": "t-5"}),
@@ -1054,11 +1055,14 @@ fn session_mode_uses_only_the_session_socket() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("j-4 (working)"));
     // A store verb and a host verb of the socket: code 3, and nothing
     // reaches the socket.
-    for args in [&["export", "out"][..], &["changeset", "--drafts"], &draft] {
+    for args in [&["export", "out"][..], &draft] {
         let out = iris(args);
         assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
     }
     let out = iris(&["status", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // `changeset --drafts` asks the socket for the draft of the job (issue #440).
+    let out = iris(&["changeset", "--drafts"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     // The read verbs of a session go to the socket (card R4-04f).
     let out = iris(&["search", "contract", "--limit", "5"]);
@@ -1119,6 +1123,7 @@ fn session_mode_uses_only_the_session_socket() {
         [
             "status {}",
             "status {}",
+            "drafts {}",
             r#"search {"limit":5,"text":"contract"}"#,
             r#"show {"id":"c-1"}"#,
             r#"list {"form":"commitment"}"#,
@@ -1447,4 +1452,56 @@ fn the_end_of_a_wait_is_a_day_or_an_rfc3339_time() {
             .collect();
         let _ = socket::until_ms(&s);
     }
+}
+
+/// Job notices (`docs/specs/2026-11-25-job-notices.md`): `app.notices`
+/// gives a `Job due` row with its `job` and no `rule`, and counts a
+/// `Job question` row in `open` with no system notice for it.
+#[test]
+fn app_notices_give_due_jobs_and_count_questions() {
+    let d = dir("app-job-notices");
+    let store = Store::open(&d).unwrap();
+    let now = iris::engine::now_ms();
+    let asked = iris_job::create(&store, "Book the flight.", None, now).unwrap();
+    iris_job::ask(&store, asked, "Which day?", None, now + 1).unwrap();
+    let due = iris_job::create(&store, "Renew the passport.", Some(now + 2), now).unwrap();
+    iris_job::move_due(&store, now + 3).unwrap();
+    let ask = |args: Value| {
+        answer_as(
+            &store,
+            &socket::local(),
+            json!({ "v": 1, "verb": "app.notices", "args": args }),
+        )
+    };
+    // The first call of an app gives no notice: it makes the app live.
+    ask(json!({}));
+    let r = ask(json!({ "after": 0 }));
+    let list = r["result"]["notices"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{r}");
+    assert_eq!(list[0]["job"], json!(format!("j-{due}")));
+    assert_eq!(list[0]["rule"], Value::Null);
+    assert_eq!(list[0]["rule_name"], json!("Job due"));
+    assert_eq!(list[0]["text"], json!("Renew the passport."));
+    assert_eq!(list[0]["message"], Value::Null);
+    assert_eq!(r["result"]["open"], json!(2));
+
+    // A long goal: the system notice of the app (`title: text`) has at most
+    // 200 characters.
+    let long = "é".repeat(1500);
+    let l = iris_job::create(&store, &long, Some(now + 4), now).unwrap();
+    iris_job::move_due(&store, now + 5).unwrap();
+    let r = ask(json!({ "after": 0 }));
+    let n = r["result"]["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["job"] == json!(format!("j-{l}")))
+        .unwrap()
+        .clone();
+    let body = format!(
+        "{}: {}",
+        n["title"].as_str().unwrap(),
+        n["text"].as_str().unwrap()
+    );
+    assert_eq!(body.chars().count(), iris::notify::JOB_TEXT_MAX);
 }

@@ -49,6 +49,9 @@ pub const RETRY_NOTE: &str =
 /// items, attachment text, then the earlier messages of the thread, newest
 /// first, fill the rest.
 pub const MAX_DATA: usize = 96_000;
+/// The budget of the one more call after a refusal for size (HTTP 400 or
+/// 413, #101): about 6,000 tokens, for a local model with a small window.
+pub const SMALL_DATA: usize = 24_000;
 /// The most known parties in the data.
 pub const MAX_KNOWN: usize = 50;
 /// The most bytes of one header value in the data.
@@ -59,6 +62,58 @@ const CUT_MARK: &str = "\n[cut]";
 /// The data block text: the headers that the model needs, the sender kind,
 /// the clean text and the attachment names, in at most about `MAX_DATA` bytes.
 pub fn data(a: &Analysis, cx: &Context) -> String {
+    data_in(a, cx, MAX_DATA)
+}
+
+/// [`data`] in at most about `budget` bytes.
+pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
+    data_kept(a, cx, budget).0
+}
+
+/// [`data_in`], and for each earlier message of the thread that the budget
+/// left in (the newest first), the count of bytes of its escaped text
+/// ([`escape`] of the entry of `Context::thread`) that the data holds.
+/// The parts of the context that the data of [`data_kept`] held (issue 1049).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// For each earlier message of the thread, newest first, the bytes of
+    /// its escaped text that the data held.
+    pub thread: Vec<usize>,
+    /// The bytes of the budget left for the known parties, when the data
+    /// left out a party. `None` when the data held each party.
+    pub parties_room: Option<usize>,
+}
+
+/// The line of one known party in the data.
+pub(crate) fn party_line(p: &str) -> String {
+    format!("Known party: {}\n", party_text(p))
+}
+
+/// The text of one known party that the data holds: the party cut to
+/// `MAX_FIELD` bytes and escaped. The context record hashes this text, so a
+/// change after the cut does not change the record (issue 1144).
+pub(crate) fn party_text(p: &str) -> String {
+    let mut text = String::new();
+    push_cut(&mut text, p, MAX_FIELD);
+    text
+}
+
+/// The count of the first `parties` whose lines fit in `room` bytes: the
+/// data takes them in order and stops at the first one that does not fit.
+pub(crate) fn parties_in(parties: &[&str], mut room: usize) -> usize {
+    let mut n = 0;
+    for p in parties.iter().take(MAX_KNOWN) {
+        let len = party_line(p).len();
+        if len > room {
+            break;
+        }
+        room -= len;
+        n += 1;
+    }
+    n
+}
+
+pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Kept) {
     let h = &a.head;
     let mut d = String::new();
     let from = match (&h.from_name, &h.from_addr) {
@@ -66,10 +121,16 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         (None, Some(ad)) => ad.clone(),
         _ => String::new(),
     };
+    // The headers take at most half of the budget, so the current message
+    // text always has room (#101). The full budget never reaches the limit.
+    let room = budget / 2;
     let mut field = |name: &str, value: &str| {
+        let Some(max) = room.checked_sub(d.len() + name.len() + 3) else {
+            return;
+        };
         d.push_str(name);
         d.push_str(": ");
-        push_cut(&mut d, value, MAX_FIELD);
+        push_cut(&mut d, value, max.min(MAX_FIELD));
         d.push('\n');
     };
     field("From", &from);
@@ -95,13 +156,14 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     for (name, mime, size) in a.text.attachments.iter().take(MAX_ATTACHMENTS) {
         field("Attachment", &format!("{name} ({mime}, {size} bytes)"));
     }
-    // The headers take at most about 30,000 bytes. The clean text takes the
-    // rest if it needs it: 32,000 characters can be 128,000 bytes.
+    // With the full budget, the headers take at most about 30,000 bytes. The
+    // clean text takes the rest if it needs it: 32,000 characters can be
+    // 128,000 bytes.
     let mut current = String::from("\nThe current message:\n");
     // The budget holds the whole block that the client sends: the
     // delimiter lines and their line breaks too.
     let wrap = iris_model::DATA_START.len() + iris_model::DATA_END.len() + 2;
-    let mut left = MAX_DATA.saturating_sub(wrap + d.len() + current.len());
+    let mut left = budget.saturating_sub(wrap + d.len() + current.len());
     left -= push_cut(&mut current, &a.text.text, left);
     // An existing item that does not fit is left out: the model can then
     // find it again, and the store keeps the pinned item (section 7.5).
@@ -113,14 +175,17 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         }
     }
     // Known persons that the mail can name with no address (section 7.4).
+    // The first party that does not fit ends the list (`parties_in`).
+    let room = left;
+    let mut parties_room = None;
     for p in cx.known.iter().take(MAX_KNOWN) {
-        let mut line = String::from("Known party: ");
-        push_cut(&mut line, p, MAX_FIELD);
-        line.push('\n');
-        if line.len() <= left {
-            left -= line.len();
-            d.push_str(&line);
+        let line = party_line(p);
+        if line.len() > left {
+            parties_room = Some(room);
+            break;
         }
+        left -= line.len();
+        d.push_str(&line);
     }
     for (name, text) in &a.text.attachment_text {
         let head = format!("\n\nText of the attachment {}:\n", escape(name));
@@ -133,6 +198,7 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     }
     // The newest earlier messages are the most useful context.
     let mut earlier: Vec<String> = Vec::new();
+    let mut held: Vec<usize> = Vec::new();
     for e in cx.thread.iter().rev() {
         let head = "\nEarlier message in the thread:\n";
         if left <= head.len() + 1 + CUT_MARK.len() {
@@ -140,7 +206,14 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         }
         let mut block = head.to_string();
         left -= head.len() + 1;
-        left -= push_cut(&mut block, e, left);
+        let n = push_cut(&mut block, e, left);
+        left -= n;
+        // The bytes of the text, without the cut mark.
+        held.push(if n == escape(e).len() {
+            n
+        } else {
+            n.saturating_sub(CUT_MARK.len())
+        });
         block.push('\n');
         earlier.push(block);
     }
@@ -151,7 +224,13 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     // Each text from the mail went through the escape: the client escape
     // adds nothing, so the block stays in the budget.
     debug_assert!(!d.contains("<<<"));
-    d
+    (
+        d,
+        Kept {
+            thread: held,
+            parties_room,
+        },
+    )
 }
 
 /// Push `text` to `out`, escaped as `iris_model::data_block` does and cut
@@ -181,7 +260,7 @@ fn push_cut(out: &mut String, text: &str, max: usize) -> usize {
 }
 
 /// `<<<` as `‹‹‹`, the escape of `iris_model::data_block`.
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace("<<<", "‹‹‹")
 }
 
@@ -387,7 +466,7 @@ fn in_mail(quote: &str, a: &Analysis) -> bool {
 
 /// `s` in lowercase, with each run of white space as one space, and the
 /// typographic forms of a quote mark, an apostrophe, a dash and an ellipsis
-/// as their plain forms. Models often change these forms (#102). The fold
+/// as their plain forms, in the composed Unicode form (NFC). Models often change these forms (#102). The fold
 /// is the same on both sides and changes no letter or digit, so a made-up
 /// quote still fails.
 pub(crate) fn squash(s: &str) -> String {
@@ -402,7 +481,11 @@ pub(crate) fn squash(s: &str) -> String {
 pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
     // Lowercase the whole text first, as before the fold: a final sigma
     // needs the context of the word. The marks and white space have no case.
-    let s = s.to_lowercase();
+    // The composed form (NFC) on both sides: a model often writes "é" as
+    // one character where the mail has "e" and a combining mark (#102).
+    // NFC changes no letter: canonical forms show the same text.
+    let s: String =
+        unicode_normalization::UnicodeNormalization::nfc(s.to_lowercase().as_str()).collect();
     let mut out = String::with_capacity(s.len());
     let mut from = Vec::new();
     let mut space = false;

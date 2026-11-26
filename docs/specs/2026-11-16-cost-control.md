@@ -18,8 +18,9 @@ pay again for the same mail.
 1. A batch runner understands the pending messages of the store in the order
    of spec 1 section 7.1.
 2. A message that a run understood is never sent to the model again while
-   its mail does not change. A second run on the same store, with no change
-   of the mail, makes zero calls for these messages. A message that is not
+   its mail and the context of its last run (section "Resets") do not
+   change. A second run on the same store, with no change of the mail,
+   makes zero calls for these messages. A message that is not
    understood keeps the retries of spec 1 section 7.4 (`tries`,
    `retry_at`).
 3. The store keeps the calls, the tokens and the cost of each run.
@@ -31,6 +32,98 @@ pay again for the same mail.
 5. The person sets the model and its key with the `iris` command. The key is
    a secret (spec 1 section 5.4).
 
+## Resets (issue #110, migration 65)
+
+- A change of the label `SPAM` (it comes or goes) clears `understood_at`,
+  as a change of `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY` does. Mail that
+  leaves `SPAM` gets its items at the next run. Mail that gets `SPAM` drops
+  its droppable items at once (trigger `spam_drops_items`, as for
+  `DRAFT` in migration 42), so an old item does not show again when
+  `SPAM` goes before the next run. A pinned item stays. A gone message
+  that comes back with `SPAM`, and each message with `SPAM` at the
+  upgrade (migration 65), drop their droppable items too.
+- At the upgrade (migration 65), each message that is not gone and has
+  `SPAM` can hold an understanding from before the label. The upgrade
+  clears its `understood_at`, `tries` and `retry_at`, and puts its thread
+  in `talk_due`. `SPAM` mail makes no model call, so this reset costs no
+  call. A gone message gets the reset when it comes back.
+- Each reset of `understood_at` by a change (new content, a gone message
+  that comes back, a label of the list above, a new hostile mark) clears
+  `tries` and `retry_at`, and puts the thread in `talk_due`. A failed try
+  adds 1 to `tries` and keeps its count.
+- A change of the list above (new content, a gone message that comes
+  back, a label of the list above) clears `tries` and `retry_at` also for
+  a message that is not understood, for example one that failed the model
+  3 times. Triggers of the store do each reset, so each writer gets it.
+- Context (issue #1049, migration 69): each successful run records the
+  row IDs and a hash of the text of the earlier messages that shaped it
+  (`message.context`): the newest 3 earlier messages of the thread, with
+  a hash of the text that the model data held of each (sender, subject
+  and the first 2,000 characters of the clean text), and the newest 5
+  texts of the same sender, with a hash of the clean text, which shapes
+  the clean text of the message. When the budget of the data cut the
+  thread context, or no model call ran, the record holds a hash of only
+  the bytes that the data held, and if the text had more bytes (the data
+  had a cut mark). So a change of an earlier text that the run did not
+  read runs nothing again, and a text that shrinks to the held bytes (the
+  data then has no cut mark) runs the later message again. The record
+  also holds a hash of the known parties of the thread, which the model
+  gets: the known persons in the headers of the messages up to the
+  current one, in the order of the runs (date, then row ID). Later mail
+  does not change them. The list is in the order of the address (at most
+  50). When the budget left out some parties, the record holds the bytes
+  of the budget that were left for them, and a hash of the first parties
+  that fit in those bytes now, and "+" if the list has more. So a party
+  that starts to fit (a shorter name) changes the record. A new kind or name of a
+  sender puts the threads of that sender in `talk_due`.
+- The record ends with the thread and the date of the message itself
+  ("@thread:date"). An item of a run names its thread, so a message that
+  sync moves to another thread or date with the same content runs again.
+- A known person who is only in `To` or `Cc` of a thread (issue #1135):
+  a new, changed or removed `person` row puts its address in `party_due`
+  (migration 71). Before the "?" records of each batch run and queue
+  step, one read of the headers puts each thread with such an address in
+  `To` or `Cc` in `talk_due`, and clears the addresses. Migration 71 puts
+  each known person in `party_due`, so a change before the upgrade is
+  checked once. A check compares the
+  recorded context of an understood message with its context now, and
+  clears `understood_at` where they differ. So a later message runs again
+  only when the context that its last run used changed: an earlier
+  message got `SPAM` or a hostile mark, left `SPAM`, went away or came
+  back, got new content, or a run understood it (a late older message).
+- The check runs at two places. After each run that ends (a success, or
+  a failed try), two short walks check the later messages that can hold
+  the message in their context: they stop after 3 context messages of the
+  thread, and after 5 texts of the same sender. They read only rows to
+  check or to count (understood mail that is not hostile, and for the
+  sender walk mail with a text), so mail that waits for its first run
+  costs nothing. Each walk reads at most 64 rows: rows that do not count
+  (for example `SPAM` of the same sender) can make a walk longer, and then
+  the walk puts the thread in `talk_due`. Hostile mail records "-": a new run of it calls no model, also after
+  a `phishing` answer of the model, which stays until a rebuild (spec 1).
+  So no change of the context can change its result. And for each thread in
+  `talk_due` (a message that goes away, new content, a new or changed
+  clean text or sender address, a message that moves to another thread
+  or date, the start
+  or the end of a link check, a sender kind change), it checks each
+  understood message of the
+  thread, 200 rows at a time. A difference that is only a message that
+  waits for a run waits for the end of that run, so one change runs a
+  message once. A run reads only earlier messages, so a reset never comes
+  back to the message that caused it.
+- Upgrade: migration 69 gives each understood message the record "?":
+  its context is not known. Each batch run first records the context now
+  of each "?" message whose thread is not in `talk_due`, and the queue
+  step does the same. A change after the migration puts the thread in
+  `talk_due` before that, and the check runs each "?" message of the
+  thread again. So a change after the upgrade is never lost. A thread
+  that was in `talk_due` at the upgrade runs its old messages once.
+- Limit (issue #1119): a change before the upgrade is not seen, because
+  the first record of a message is its context at that time. The store
+  holds no reliable evidence of such a change (a fetch time also changes
+  for a fetch of the same content), and `iris rebuild` runs each message
+  again.
+
 ## Not in scope
 
 These subjects change when a message must be understood again. They belong
@@ -41,8 +134,6 @@ pending state that the store gives. Each one has an issue:
   resets after a change to or from `service`, conversations of other
   threads (#106), and kinds that a person sets (#111).
 - The visibility of pinned items of hostile mail (#112).
-- Resets after a `SPAM` label change, and the clear of `tries` and
-  `retry_at` when a message changes (#110).
 - The selection and the reset of `iris rebuild` (spec 1 section 7.5). This
   spec only says that rebuild runs through the runner.
 - The run after each sync in `iris serve` and `iris mirror sync` (R1-28). It
@@ -118,6 +209,14 @@ waits for the budget or for its `retry_at`. A message whose hostile state
 depends on its own headers (marks `dmarc`, `spoof`) is not known before
 write 1, so it waits like other mail.
 
+The same exception applies to a message whose `From` sender is a stranger
+that the person declined at the gate (decision D29, spec 1 section 6.7).
+Such mail never goes to a model either, so the model wait (`waits_model`,
+the try limit, `retry_at`) does not hold it: the pending condition reads
+the decline of the sender at each run. The estimate counts no call for it.
+Mail with no header row yet is not known as such mail, so it counts and
+waits like other mail until its first read.
+
 So a message gets the thread context of each older message that can still
 be understood (spec 1 sections 7.1 and 7.4). `store::understand` keeps its
 own check of the retry state.
@@ -158,6 +257,43 @@ in the data folder (`File::try_lock`, like the backup lock of `iris-store`).
 A second runner, in this process or in another, gets "a run is in progress"
 and makes no call. The OS releases the lock when the process ends, also
 after a crash. So two runners never pay for the same message.
+
+A draft (`iris_voice::draft`) and a question (`iris_understand::ask`) of
+the person take the lock with `batch::lock_wait` (#279). If another holder
+has the run lock, the waiter takes an OS file lock on `understand.want` and
+tries the run lock again each 50 ms, for up to `batch::WAIT` (60 seconds).
+Then it fails with "a run is in progress", as before.
+
+- While a waiter holds `understand.want`, `batch::lock` gives "a run is in
+  progress". `batch::lock` holds a shared lock on `understand.want` through
+  its take of the run lock, so a waiter cannot signal during a take. So the run after a sync, the nudge and summary steps of the
+  engine and `iris model set` do not take the lock before the waiter.
+- A holder that works in a loop probes `understand.want` (a shared lock
+  try) before each unit of work and stops: the batch runner before each
+  message and before each row of the link and fixed checks (`stop =
+  yield`), the nudge step before each thread. The summary step makes the
+  calls of one thread only, so it needs no probe. In the nudge and summary
+  steps, the model refuses each call while a waiter waits, also the retry
+  of an invalid answer: the run row says `yield`, and the thread is not
+  blocked.
+- The OS releases the want lock of a waiter that crashes, so no signal
+  stays. Waiters take the run lock in turn: only the holder of the want
+  lock tries the run lock, and it releases the want lock when it returns.
+- A scan that stops for a waiter says so (`store::Scan::yielded`), also
+  the fixed check at the end of a pass. The run then ends with `stop =
+  yield`, not `done`.
+- Each holder that takes the lock with `batch::lock` (the batch runner,
+  the matter step, the nudge and summary steps) calls the model through
+  `Budgeted::yielding` (issue #1126). Its wait for the answer of a call
+  stops within 50 ms (`iris_model::CANCEL_POLL`) after a waiter comes:
+  `Client::ask_cancel` gives `Error::Cancelled`. So a waiter does not wait
+  for the time limit of a call in flight (`timeout_s`).
+- A cancel ("Cancel" below) is no model error. The holder ends with `stop
+  = yield`. It does not start or end the wait after model errors
+  (`model_setting.retry_failures`, `retry_at`), so the model health signal
+  of the notices (`iris_store::model_can_read!`) does not change. The
+  message of the call gets no added try and no mark `waits_model`, and the
+  next run reads it again.
 
 ### Model and budget
 
@@ -229,6 +365,27 @@ larger than its reservation. So the second try of
 `Error::Model`, no try counts, and the message stays pending for the next
 run. The runner then stops with `stop = unknown`.
 
+Cancel (issue #1126): the request of a cancelled call can have gone out,
+so the provider can charge it. The cost record is the same as for an
+unknown result: a priced call keeps its whole worst case taken from the
+budget, and the run row counts one unknown call (`unknown_calls`) with that
+worst case (`unknown_cost_micro_usd`). A call to a model with no price
+counts one unknown call. The wrapper sets `State::cancelled` and gives
+`Error::Cancelled` to each later call of the holder, so no request goes
+out after the cancel and no mail gets a refusal mark.
+
+Before each request, the wrapper also reads the waiter test
+(`batch::wanted`). If a waiter came, for example while the answer of the
+call before a retry came in, the wrapper starts no request. It gives
+`Error::Cancelled` and sets `State::cancelled`, but counts no call and no
+cost, because no request went out. So a waiter never causes one more paid
+request.
+
+Limit (issue #1158): the call of a cancelled
+request is not stopped. Its thread ends with the answer, or at the time
+limit of the call, and drops the answer. So for that time one more HTTP
+connection and one thread stay open, and the real cost is not known.
+
 If a known usage is still larger than the reservation, the settle write
 takes the real cost, the budget can go below zero, and the run stops with
 `stop = budget`. The run row keeps the overrun, and the command shows it.
@@ -274,16 +431,32 @@ lose a rerun:
 
 `iris_understand::batch::run(store, connect, &Limits, now) -> Report`:
 
-1. Take the run lock. Insert the run row. Then the link check of each row
-   of `link_check` (spec 1, migration 20), with no model: a deceptive
+1. Take the run lock. Insert the run row. Then, with no model, the
+   recheck of each row of `link_recheck` (spec 1, migration 72): a message
+   with a deceptive link moves to `link_check`. Then the link check of each
+   row of `link_check` (spec 1, migration 20), with no model: a deceptive
    message is understood at once with no model call, and counts in
-   `messages` and toward `Limits::max_messages`.
+   `messages` and toward `Limits::max_messages`. Mail in `link_recheck` is
+   not hostile mail for the gates while it waits: it had its first check.
+   The recheck makes no model call. A newly marked old message can make
+   later messages of its thread get understood again, with model calls
+   (issue #1178).
 2. In one write: `iris_senders::refresh`, then `rerun_senders` for the rows
-   that became or stopped being hostile. No model call.
+   that became or stopped being hostile. No model call. Then the fixed
+   check of each row of `fixed_due` (spec 1, migration 54, decision D31),
+   with no model: a message whose fixed result changed is understood again
+   at once, and counts in `messages` and toward `Limits::max_messages`.
+   The check stops before the limit. The rest of the queue waits for a
+   later check. This step comes before step 3, so a model that cannot be
+   made does not hold it back.
 3. Read `model_setting` and make the `Budgeted` model.
 4. For each thread in order, and for each pending message of it: check the
    stop conditions, then call `store::understand`.
 5. After each `Limits::batch` (default 50) messages, run step 2 again.
+   After the last thread of each pass, run the fixed check again, for the
+   kind and name changes of that pass. A message that a sender rerun or the
+   fixed check of the main pass makes pending gets one more pass. The
+   resets of the second pass wait for the next run.
 6. At the end, write `ended_at` and `stop`. The run after a sync
    (`Limits::keep_idle` false, R1-28) deletes its row in the same write if
    it read no message, made no call and holds no reservation, so a run
@@ -311,6 +484,10 @@ Stop conditions, checked before each message:
   call counts in `unknown_calls` (tokens unknown) and the run goes on. A
   time-out or an error of a local server still stops the run with `stop =
   model`, because the next call would likely fail too.
+- A draft or a question waits for the run lock (`understand.want`, see
+  "Run lock"): `stop = yield`. The link and fixed checks probe it before
+  each row too, and leave the rest of their queues. The next run (the run
+  after the next sync) goes on with the mail and the rows that are left.
 - Another error: `stop = error`, and the error goes to the caller.
 
 ### Counts
@@ -540,6 +717,10 @@ The model call changes nothing outside the product, but it costs money.
 - A definite rejection: spec 1 section 7.4. The tokens count.
 - An unknown result: the worst case counts; the run stops; the message stays
   pending. A retry pays again, at most one message for each event.
+- A cancel for a waiter of the run lock (issue #1126): as an unknown
+  result, but the holder stops with `stop = yield` and no model wait. The
+  matter step keeps `matter_run.tried_at`, so its hourly gate counts the
+  call.
 - Retry: the next run.
 
 ## Open questions

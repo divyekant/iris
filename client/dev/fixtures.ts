@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, LedgerEntry, LedgerPage, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, ReplyStart, Rule, Status, Summary, Target } from "../src/api";
+import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, ItemSummary, LedgerEntry, LedgerPage, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, ReplyStart, Rule, Status, Summary, Target } from "../src/api";
 import type { Measures } from "../src/measures";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
@@ -25,6 +25,8 @@ const byForm = (form: string) => items.filter((i) => i.form === form);
 
 export const status: Status = {
   mode: "observe",
+  time_zone: "Europe/London",
+  time_zone_set: false,
   accounts: [
     {
       id: 1,
@@ -65,7 +67,7 @@ export const gate: GatePage = {
   count: 3,
   next: null,
   senders: [
-    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [strangers[1], strangers[0]] },
+    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [{ ...strangers[1], ready: ["draft"] }, strangers[0]] },
     { id: "p-72", name: "Leo Park", address: "leo@quartzlabs.example", count: 1, items: [strangers[2]] },
     { id: "p-73", name: null, address: "billing@vendorhub.example", count: 1, items: [strangers[3]] },
   ],
@@ -77,11 +79,14 @@ export const ignored: GatePage = {
   senders: [{ id: "p-74", name: "Dana Brooks", address: "dana@leadgen.example", count: 1, items: [ask("c-405", "Book a call about your Q1 plans", stranger("p-74", "Dana Brooks", "dana@leadgen.example"), null, "m-60001", "Do you have 15 minutes this week?")] }],
 };
 
+/** A second late promise of Alex in the same thread: the one nudge names it too (decision D8). */
+const alexNotes = { ...(owedToYou as unknown as Item), id: "c-208", title: "Release notes", model: "iris/1.1", account: "a-2", ready: ["draft"], sources: [{ message: "m-54001", thread: "t-8700", role: "origin", quote: "I will also send the release notes." }] } as unknown as Item;
+
 export const brief: Brief = {
-  // Iris prepared a reply for the first item (card R3-09).
-  you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
+  // Iris prepared a reply for the first item (card R3-09), and a summary of its long thread (issue 478).
+  you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft", "summary"] }))),
   // Alex is late: Iris prepared a nudge (card R3-07).
-  owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
+  owed_to_you: of([...byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n): Item => (n ? i : { ...i, ready: ["draft"] })), alexNotes]),
   conversations: of(byForm("conversation")),
   records: { receipt: 1, booking: 1 },
   // The feed example is bundled by rule 3 ("Bundle the feed"), so it is only in its bundle.
@@ -159,6 +164,7 @@ const entry = (id: number, at: string, rest: Partial<LedgerEntry>): LedgerEntry 
   skipped: 0,
   tried: 0,
   retry: false,
+  mail: null,
   ...rest,
 });
 export const ledger: LedgerPage = {
@@ -174,6 +180,8 @@ export const ledger: LedgerPage = {
     // An undo that changed nothing (decision D18): each message changed again after l-23, so l-23 keeps its Undo.
     entry(24, "2026-11-15T10:20:00Z", { verb: "inbox", skipped: 4, tried: 4, retry: true, why: "Undo of l-23", undo_of: "l-23" }),
     entry(23, "2026-11-15T10:05:00Z", { messages: 4, changed: 4, why: "Shipping notices that arrived.", can_undo: true }),
+    // A send names its mail (issue 490): two sends of a day differ by subject and recipient.
+    entry(22, "2026-11-14T16:40:00Z", { verb: "send", messages: 1, changed: 1, author: { kind: "agent", name: "Claude Code", job: "j-150", goal: "Renew the Acme contract" }, why: "Dana waits for the terms since Monday.", mail: { subject: "Re: Renewal for 2027", to: "dana@acme.example", recipients: 2 } }),
   ],
 };
 
@@ -328,12 +336,12 @@ function askMail(id: string): Message | undefined {
 
 /** POST /api/ask: a fixed answer for each kind of question, with no model. */
 export function askAnswer(question: string): AskAnswer {
-  const source = (n: number, id: string, quote: string | null) => ({ n, quote, message: summaryOf(id) as Summary });
+  const source = (n: number, id: string, quote: string | null, stranger = false) => ({ n, quote, message: summaryOf(id) as Summary, stranger });
   if (/weather|lottery/i.test(question)) return { answer: null, sources: [], read: 0, cost_micro_usd: null };
   if (/flight|tokyo|trip/i.test(question)) {
     return {
       answer: "Your flight to Tokyo leaves on 10 December at 11:05 [1]. The booking reference is QX7K2P [1].",
-      sources: [source(1, "m-53500", "Booking reference QX7K2P")],
+      sources: [source(1, "m-53500", "Booking reference QX7K2P", true)],
       read: 6,
       cost_micro_usd: 3_120,
     };
@@ -430,6 +438,7 @@ export const drafts: Record<string, DraftView[]> = {
       draft: "d-21",
       thread: "t-9001",
       readable: true,
+      change: "update",
       to: [{ address: "dana@acme.example" }],
       cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient", "outside_thread"] }],
       subject: [{ text: "Re: Renewal for 2027" }],
@@ -465,6 +474,7 @@ export function withdraw(id: string): Changeset | undefined {
   const c = changesets.find((x) => x.id === id);
   if (!c) return undefined;
   c.state = "withdrawn";
+  c.withdrawn_by = "person";
   for (const a of c.actions) {
     if (a.decision && ["proposed", "in_review", "approved"].includes(a.decision.state)) a.decision = { state: "cancelled", by: "author" };
   }
@@ -490,6 +500,15 @@ export const notices = [
   { id: "n-1", rule: 9, rule_name: "Bank security codes", title: "First Harbor Bank", text: "Your sign-in code", created: "2026-11-16T09:00:00Z",
     message: { id: "m-3", thread: "t-3", date: "2026-11-16T09:00:00Z", from: { name: "First Harbor Bank", address: "alerts@bank.example" }, subject: "Your sign-in code", labels: ["INBOX"] } },
 ];
+
+/** The time zone of the owner (issue 891): sets it in the status. An empty name or a name that the computer does not know is a 400. */
+export function zonePost(body: { zone?: string | null }): [number, unknown] {
+  const zone = body.zone ?? null;
+  if (zone !== null && zone !== "UTC" && !Intl.supportedValuesOf("timeZone").includes(zone)) return [400, { error: `not a time zone: "${zone}"` }];
+  status.time_zone = zone ?? "Europe/London";
+  status.time_zone_set = zone !== null;
+  return [200, { time_zone: status.time_zone, time_zone_set: status.time_zone_set }];
+}
 
 export function noticePost(path: string): [number, unknown] | undefined {
   const done = path.match(/^\/notices\/([^/?]+)\/done$/);
@@ -546,6 +565,7 @@ export const jobs: Record<string, Job> = {
     question: "The invoice says 2,400 EUR, but the quote said 2,150 EUR. Pay the full amount, or ask Brightline about the difference first?",
   },
   "j-15": { id: "j-15", goal: "Book a dentist appointment for next week, in the morning.", created: at(16, 11), updated: at(16, 11), state: "working" },
+  "j-16": { id: "j-16", goal: "Renew the passport before the trip.", due: at(16, 0), created: at(10, 9), updated: at(16, 0), state: "needs_you", question: "The due date passed. Answer to go on, or end the job." },
   "j-9": { id: "j-9", goal: "Cancel the gym membership.", created: at(12, 9), updated: at(13, 15), state: "done", end: "complete" },
 };
 export const jobDetails: Record<string, JobDetail> = {
@@ -566,11 +586,19 @@ export const jobDetails: Record<string, JobDetail> = {
       { id: "cs-34", at: at(16, 18, 38), state: "open", why: "Reply to Dana: accept clause 7 and ask for the signature.", actions: { in_review: 1 } },
     ],
     threads: { "t-8841": { id: "m-90211", thread: "t-8841", date: at(16, 16, 2), from: dana, subject: "Re: Northwind contract, final version", labels: ["INBOX"], gone: false } },
+    scope: [{ id: "t-8841", kind: "thread", label: "Northwind contract, final version", messages: 4 }],
   },
   "j-14": {
     job: { ...jobs["j-14"], events: [{ at: at(16, 8), state: "working", by: "person" }, { at: at(16, 10, 2), state: "needs_you", by: "agent", question: jobs["j-14"].question, why: "The amounts do not agree." }] },
     changesets: [],
     threads: {},
+  },
+  // The engine moved the job on its due date (decision D24).
+  "j-16": {
+    job: { ...jobs["j-16"], events: [{ at: at(10, 9), state: "working", by: "person" }, { at: at(16, 0), state: "needs_you", by: "engine", question: jobs["j-16"].question, why: "due" }] },
+    changesets: [],
+    threads: {},
+    scope: [],
   },
   // A working job whose session ended with an error: no agent works on it (issue #742).
   "j-15": {
@@ -584,7 +612,9 @@ const jobPage = (state: string | null) => {
   const list = Object.values(jobs)
     .filter((j) => (state && state !== "open" ? j.state === state : j.state !== "done"))
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
-  return { jobs: list, next: null };
+  // The newest session of each working job (issue 791), as the API gives it.
+  const sessions = Object.fromEntries(list.filter((j) => j.state === "working").map((j) => [j.id, jobDetails[j.id]?.session ?? null]));
+  return { jobs: list, next: null, sessions };
 };
 
 /** The stop switch of the fixtures (docs/specs/2026-11-17-stop.md). */
@@ -626,6 +656,7 @@ export function answer(path: string): unknown {
   }
   if (name === "brief") return briefNow();
   if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
+  if (name === "items" && id && url.pathname.endsWith("/summary")) return summaries[id];
   if (name === "items" && id && url.pathname.endsWith("/joinable")) {
     const item = items.find((i) => i.id === id);
     return { joinable: !!item && !item.matter && ["commitment", "conversation", "record", "signal"].includes(item.form) };
@@ -640,7 +671,8 @@ export function answer(path: string): unknown {
   if (name === "changesets" && id && url.pathname.endsWith("/drafts")) return drafts[id] ? { drafts: drafts[id] } : undefined;
   if (name === "changesets" && id) return changesets.find((c) => c.id === id);
   if (name === "changesets") return { changesets };
-  if (name === "search") return { messages: [] };
+  if (name === "search") return { messages: q.get("q") ? ["m-55210", "m-55211", "m-55380"].map(summaryOf) : [] };
+  if (name === "jobs" && id && url.pathname.includes("/scope/")) return jobDetails[id] && scopePreview(decodeURIComponent(url.pathname.split("/").pop()!));
   if (name === "policy") return policy;
   if (name === "watches") return watches;
   if (name === "matters" && id) return matterViews[id];
@@ -654,12 +686,23 @@ export function answer(path: string): unknown {
   return undefined;
 }
 
+/** GET /api/items/{id}/summary: the summary of the long thread of an item (issue 478). */
+export const summaries: Record<string, ItemSummary> = {
+  "c-311": {
+    text: "Dana sent version 3 of the contract and asked you to review section 4 by Tuesday. Legal changed the notice period from 30 to 60 days. Dana waits for your answer before she signs.",
+    based_on: "m-55210",
+    created: "2026-11-16T09:30:00Z",
+    model: "example-model-1",
+  },
+};
+
 /** GET /api/threads/t-8841/reply: the start values of a reply, with the conversation (R3-04). */
 const replyStart: ReplyStart = {
   account: "a-1",
   parent: { id: "m-55212", from: { name: "Priya Raman", address: "priya@northwind.example" }, date: "2026-11-17T09:12:00Z", text: "Thanks. Could you also add the Q3 numbers next to them?" },
   to: ["priya@northwind.example"],
   cc: [],
+  all: ["sam@northwind.example", "lena@northwind.example"],
   subject: "Re: Q4 numbers for the board",
   topic: "Re: Q4 numbers for the board",
   conversation: [
@@ -745,6 +788,31 @@ export function answerJob(id: string, body: { answer?: unknown; question?: unkno
   jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {}, session };
   return [200, jobDetails[id]];
 }
+/** GET /api/jobs/<id>/scope/<thread>: the messages of a fixture thread, with one that the agent cannot read yet. */
+function scopePreview(thread: string) {
+  const ids = Object.values(START).flat().filter(([m]) => (summaryOf(m) as Summary).thread === thread);
+  return ids.length ? { messages: ids.map(([m, readable], i) => ({ ...(summaryOf(m) as Summary), date: at(15, 9 + 3 * i, 12), readable })) } : undefined;
+}
+/** POST /api/jobs/<id>/edit, /scope and /scope/remove (decision D25), on the fixture jobs. */
+export function jobPost(path: string, body: { goal?: string; due?: string | null; thread?: string; messages?: string[]; ref?: string }): [number, unknown] {
+  const [, , id, verb, sub] = path.split("/");
+  const d = jobDetails[id];
+  if (!d) return [404, { error: "Not found." }];
+  if (d.job.state === "done") return [409, { error: "the job is done" }];
+  if (verb === "edit") {
+    jobs[id] = { ...jobs[id], goal: body.goal ?? jobs[id].goal, due: body.due ?? undefined };
+    d.job = { ...d.job, goal: jobs[id].goal, due: jobs[id].due };
+    return [200, jobs[id]];
+  }
+  if (verb === "scope" && sub === "remove") d.scope = (d.scope ?? []).filter((r) => r.id !== body.ref);
+  else if (verb === "scope" && body.thread) {
+    const preview = scopePreview(body.thread);
+    if (!preview) return [404, { error: "Not found." }];
+    const subject = preview.messages[0].subject;
+    d.scope = [...(d.scope ?? []).filter((r) => r.id !== body.thread), { id: body.thread, kind: "thread", label: subject, messages: preview.messages.filter((m) => m.readable).length }];
+  } else return [404, { error: "Not found." }];
+  return [200, d];
+}
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
 export function startJob(): [number, unknown] {
   return [201, jobs["j-12"]];
@@ -797,6 +865,7 @@ export const measures: Measures = {
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },
+  sends: { sent: 0, unreviewed_after_hostile: 0 },
 };
 
 /** GET /api/threads/t-8700/draft: the nudge to Alex, who is late with the SDK examples (R3-07). */
@@ -805,7 +874,7 @@ export const nudgeDraft = {
   based_on: "m-54001",
   nudge: true,
   to: "alex@example.com",
-  item: "c-207",
+  items: ["c-207", "c-208"],
   body: "Hi Alex,\n\nA quick check on the SDK examples. When can you send them?\n\nThanks",
 };
 

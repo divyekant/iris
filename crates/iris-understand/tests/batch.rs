@@ -52,6 +52,12 @@ struct Script {
     /// Runs in the next call, before the answer: a write of another
     /// writer during the call.
     during: RefCell<Option<std::boxed::Box<dyn FnOnce()>>>,
+    /// The next `ask_cancel` sends on it and gives no answer until its
+    /// cancel test gives true (issue #1126).
+    hang: RefCell<Option<std::sync::mpsc::Sender<()>>>,
+    /// As `hang`, but the call then gives its scripted answer: an answer
+    /// that comes after a waiter came (issue #1126).
+    late: RefCell<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl Script {
@@ -91,6 +97,29 @@ impl Model for Fake {
             text,
             usage,
         })
+    }
+
+    fn ask_cancel(&self, i: &str, d: &str, cancel: &dyn Fn() -> bool) -> Result<Reply, ModelError> {
+        if let Some(started) = self.0.late.borrow_mut().take() {
+            started.send(()).unwrap();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !cancel() {
+                assert!(std::time::Instant::now() < end, "no waiter");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            return self.ask(i, d);
+        }
+        let Some(started) = self.0.hang.borrow_mut().take() else {
+            return self.ask(i, d);
+        };
+        *self.0.calls.borrow_mut() += 1;
+        started.send(()).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !cancel() {
+            assert!(std::time::Instant::now() < end, "no cancel");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Err(ModelError::Cancelled)
     }
 }
 
@@ -337,8 +366,8 @@ fn migration_40_marks_each_understood_thread() {
         .write(|tx| {
             tx.execute_batch(
                 "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
-                 DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 39;",
+                 DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; ALTER TABLE header DROP COLUMN content_sha256; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP TRIGGER IF EXISTS understand_reset; DROP TRIGGER IF EXISTS understand_new_content; DROP TRIGGER IF EXISTS understand_come_back; DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove; CREATE TRIGGER understand_owner_label_add AFTER INSERT ON message_label WHEN (SELECT provider_id FROM label WHERE id = NEW.label_id) IN ('SENT', 'DRAFT') BEGIN UPDATE message SET understood_at = NULL WHERE id = NEW.message_id AND understood_at IS NOT NULL; END; CREATE TRIGGER understand_owner_label_remove AFTER DELETE ON message_label WHEN (SELECT provider_id FROM label WHERE id = OLD.label_id) IN ('SENT', 'DRAFT') BEGIN UPDATE message SET understood_at = NULL WHERE id = OLD.message_id AND understood_at IS NOT NULL; END; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 39;",
             )?;
             Ok(())
         })
@@ -469,6 +498,37 @@ fn a_refused_key_gives_the_reservation_back() {
     assert!(!b.understood(m));
 }
 
+/// A priced model stops the run after a refusal for size (the charge is
+/// not known), so the call with the small data budget (#101) cannot go
+/// out. The refusal then counts as a failed try, as before: the message
+/// does not wait for a model change.
+#[test]
+fn a_priced_refusal_for_size_of_large_data_counts_a_failed_try() {
+    let b = store("size");
+    b.model(true, Some(10_000));
+    b.script.push(Err(ModelError::Rejected {
+        status: 413,
+        message: "too large".into(),
+    }));
+    let big = format!(
+        "From: Ana Lee <ana@example.org>\nTo: owner@example.com\nSubject: Big\n\
+         Message-ID: <big@example.org>\nDate: Tue, 30 Dec 2025 08:00:00 +0000\n\
+         Content-Type: text/plain\n\nCan you send the slides?\n{}\n",
+        "Notes. ".repeat(5000)
+    );
+    let m = b.add_raw("big", "a", 1, &big, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!(
+        b.col(&format!("SELECT tries FROM message WHERE id = {m}")),
+        Some(1)
+    );
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
 #[test]
 fn a_cost_over_the_reservation_stops_the_run() {
     let b = store("overrun");
@@ -518,6 +578,192 @@ fn a_second_runner_gets_busy() {
     assert_eq!(b.script.calls(), 0);
     drop(held);
     assert!(b.run(&Limits::default()).is_ok());
+}
+
+/// A draft or a question waits for the run lock (#279): the run stops
+/// before its next message, the waiter gets the lock, and the next run
+/// goes on with the mail that is left.
+#[test]
+fn a_run_yields_to_a_waiter_before_its_next_message() {
+    let b = store("yield");
+    b.model(false, None);
+    let first = b.add("1", "a", 2, &["INBOX"]);
+    let second = b.add("2", "b", 1, &["INBOX"]);
+    let dir = b.store.dir().to_path_buf();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let waiter = std::thread::spawn({
+        let dir = dir.clone();
+        move || {
+            let store = Store::open(&dir).unwrap();
+            wait.recv().unwrap();
+            batch::lock_wait(&store, std::time::Duration::from_secs(30)).is_ok()
+        }
+    });
+    // During the first call, the other caller starts to wait. The call
+    // ends only when the waiter holds the want lock.
+    let want = dir.join(batch::WANT_FILE);
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        go.send(()).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !matches!(
+            iris_store::FileLock::probe(&want),
+            Ok(iris_store::Probe::Held)
+        ) {
+            assert!(std::time::Instant::now() < end, "the waiter does not wait");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }));
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.messages), (Some("yield"), 1));
+    assert!(waiter.join().unwrap(), "the waiter gets the run lock");
+    assert!(b.understood(first) != b.understood(second), "one message");
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert!(
+        b.understood(first) && b.understood(second),
+        "the next run goes on"
+    );
+}
+
+/// While a caller waits (it holds the want lock), no new holder takes the
+/// run lock with `batch::lock`, and the link and fixed scans stop before
+/// their next row and leave the rest of the queue (#279).
+#[test]
+fn a_waiter_gets_the_lock_first_and_stops_the_scans() {
+    let b = store("want");
+    b.model(false, None);
+    let m = b.add("1", "a", 2, &["INBOX"]);
+    b.add("2", "b", 1, &["INBOX"]);
+    b.store
+        .write(|tx| Ok(tx.execute("INSERT INTO fixed_due(message_id) VALUES (?1)", [m])?))
+        .unwrap();
+    let links = b.col("SELECT count(*) FROM link_check").unwrap();
+    assert!(links > 0, "new mail waits for its link check");
+    let want = iris_store::FileLock::try_take(&b.store.dir().join(batch::WANT_FILE))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(batch::lock(&b.store), Err(Error::Busy)));
+    assert!(matches!(b.run(&Limits::default()), Err(Error::Busy)));
+    assert_eq!(b.script.calls(), 0);
+    assert_eq!(
+        iris_understand::store::recheck_links(&b.store, NOW, None).unwrap(),
+        0
+    );
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(links));
+    assert_eq!(
+        iris_understand::store::recheck_fixed(&b.store, NOW, None).unwrap(),
+        0
+    );
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(1));
+    drop(want);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(0));
+}
+
+/// A waiter that comes after the last message stops the fixed check at the
+/// end of the pass: the run says `yield`, not `done`, and the queued row
+/// waits for the next run (#279).
+#[test]
+fn a_waiter_stops_the_last_fixed_check_and_the_run_says_yield() {
+    let b = store("wantfixed");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let want_path = b.store.dir().join(batch::WANT_FILE);
+    let held = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let during = {
+        let held = held.clone();
+        let dir = b.store.dir().to_path_buf();
+        move || {
+            // A sender change queues the message for a fixed check, and a
+            // draft starts to wait, during the only call of the pass.
+            let s = Store::open(&dir).unwrap();
+            s.write(|tx| Ok(tx.execute("INSERT INTO fixed_due(message_id) VALUES (?1)", [m])?))
+                .unwrap();
+            *held.borrow_mut() = iris_store::FileLock::try_take(&want_path).unwrap();
+        }
+    };
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(during));
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.messages), (Some("yield"), 1));
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(1));
+    drop(held.borrow_mut().take());
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(0));
+}
+
+/// Two waiters take the run lock in turn: the one that waits first (it
+/// holds the want lock) gets the lock first, and the second one gets it
+/// after the first lets go (#279).
+#[test]
+fn two_waiters_take_the_lock_in_turn() {
+    let b = store("twowait");
+    let dir = b.store.dir().to_path_buf();
+    let held = batch::lock(&b.store).unwrap();
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let waiter = |name: &'static str| {
+        let (dir, order) = (dir.clone(), order.clone());
+        std::thread::spawn(move || {
+            let s = Store::open(&dir).unwrap();
+            let l = batch::lock_wait(&s, std::time::Duration::from_secs(30)).unwrap();
+            order.lock().unwrap().push(name);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(l);
+        })
+    };
+    let first = waiter("first");
+    let want = dir.join(batch::WANT_FILE);
+    while !matches!(
+        iris_store::FileLock::probe(&want),
+        Ok(iris_store::Probe::Held)
+    ) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let second = waiter("second");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    drop(held);
+    first.join().unwrap();
+    second.join().unwrap();
+    assert_eq!(*order.lock().unwrap(), ["first", "second"]);
+}
+
+/// A take of `batch::lock` holds a shared lock on the want file until it
+/// ends. A waiter cannot signal during that time, so the two never take
+/// the run lock in an order that the waiter cannot see (#279).
+#[test]
+fn a_take_in_progress_holds_back_a_waiter() {
+    let b = store("inflight");
+    drop(batch::lock(&b.store).unwrap());
+    let want = b.store.dir().join(batch::WANT_FILE);
+    let Ok(iris_store::Probe::Free(shared)) = iris_store::FileLock::probe(&want) else {
+        panic!("the want file exists and is free");
+    };
+    assert!(matches!(
+        batch::lock_wait(&b.store, std::time::Duration::from_millis(200)),
+        Err(Error::Busy)
+    ));
+    // A second take of `batch::lock` goes on, as two shared locks agree.
+    drop(batch::lock(&b.store).unwrap());
+    drop(shared);
+    assert!(batch::lock_wait(&b.store, std::time::Duration::ZERO).is_ok());
+}
+
+/// With no run, [`batch::lock_wait`] takes the lock at once. A holder that
+/// does not let go gives `Busy` after the wait.
+#[test]
+fn lock_wait_takes_a_free_lock_and_ends_after_its_limit() {
+    let b = store("lockwait");
+    let held = batch::lock_wait(&b.store, std::time::Duration::ZERO).unwrap();
+    let t = std::time::Instant::now();
+    assert!(matches!(
+        batch::lock_wait(&b.store, std::time::Duration::from_millis(200)),
+        Err(Error::Busy)
+    ));
+    assert!(t.elapsed() >= std::time::Duration::from_millis(200));
+    drop(held);
+    assert!(batch::lock(&b.store).is_ok());
 }
 
 #[test]
@@ -1031,7 +1277,9 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                 rusqlite::params![stuck, sha],
             )?;
             tx.execute_batch(
-                "DROP TRIGGER link_check_insert; DROP TRIGGER link_check_update;
+                "DROP TRIGGER context_gone; DROP TRIGGER context_link_check_add;
+                 DROP TRIGGER context_link_check_end; DROP TRIGGER context_body_add; DROP TRIGGER context_body; DROP TRIGGER context_body_remove; DROP TRIGGER context_move; DROP TRIGGER context_header_add; DROP TRIGGER context_header; DROP TRIGGER context_header_remove; DROP TRIGGER context_sender_name; DROP TRIGGER context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context;
+                 DROP TRIGGER link_check_insert; DROP TRIGGER link_check_update;
                  DROP TRIGGER link_check_label; DROP TRIGGER link_check_attention_add;
                  DROP TRIGGER link_check_attention_end;
                  DROP TABLE link_check;
@@ -1042,7 +1290,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TABLE job_session; DROP TABLE send_switch;
                  DROP VIEW ledger_can_undo; DROP VIEW undo_pair;
                  DROP TRIGGER ledger_undo_action; DROP TRIGGER ledger_undone_by;
-                 DROP TABLE ledger_undo; DROP TABLE reply_draft;
+                 DROP TABLE ledger_undo; DROP TABLE reply_draft; ALTER TABLE header DROP COLUMN reply_to; ALTER TABLE header DROP COLUMN content_sha256;
                  DROP TRIGGER measure_connect; DROP TRIGGER measure_time_update;
                  DROP TRIGGER person_decision; DROP TABLE person_decision;
                  DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
@@ -1050,13 +1298,14 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TABLE changeset_comment; DROP TABLE nudge_try;
                  DROP TRIGGER job_notes_end; DROP TABLE job_notes;
                  DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
+                 DROP TRIGGER removed_account_update; DROP TRIGGER removed_account_sync_log; DROP TRIGGER removed_account_sync_seen; DROP TRIGGER removed_account_sync_log_update; DROP TRIGGER removed_account_sync_seen_update;
                  ALTER TABLE account DROP COLUMN imap_host;
                  ALTER TABLE account DROP COLUMN imap_port;
                  ALTER TABLE account DROP COLUMN imap_user;
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
-                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 19;",
+                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP TRIGGER IF EXISTS understand_reset; DROP TRIGGER IF EXISTS understand_new_content; DROP TRIGGER IF EXISTS understand_come_back; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 19;",
             )?;
             Ok(())
         })
@@ -1078,6 +1327,15 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
         b.col("SELECT count(*) FROM link_check"),
         Some(pages as i64 + 3)
     );
+    // The rewind runs migrations 20 to 69 again, and they put each thread
+    // in `talk_due`: a real upgrade from 68 does not. So the old messages
+    // here have no "?" of migration 69 (issue 1049).
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET context = NULL WHERE context = '?'", [])?;
+            Ok(())
+        })
+        .unwrap();
     // One run, with a model that Iris cannot make: the check needs none.
     let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
     let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
@@ -1386,6 +1644,116 @@ fn a_change_during_a_refused_call_leaves_no_mark() {
     assert_eq!(marks, Some(0), "the changed message has no mark");
 }
 
+/// A decline of the sender during a refused call (decision D29): the mark
+/// of the refusal does not hold the mail of a declined stranger, so the next
+/// run understands it with no model call.
+#[test]
+fn a_decline_during_a_refused_call_does_not_hold_the_mail() {
+    let b = store("refusal-decline");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('ana@example.org', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'stranger'",
+                [],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1, "no second call");
+    assert!(b.understood(m));
+}
+
+/// A decline and a reopen around a refused call (#934): each change of
+/// the gate during the call is a changed input, also a decline and a
+/// reopen that both end before the call returns. The refusal writes no
+/// mark, and the next run calls the model.
+#[test]
+fn a_decline_and_a_reopen_around_a_refused_call_leave_no_mark() {
+    for reopen_in_call in [false, true] {
+        let b = store(if reopen_in_call {
+            "refusal-reopen-in"
+        } else {
+            "refusal-reopen-after"
+        });
+        b.model(false, None);
+        let m = b.add("1", "a", 1, &["INBOX"]);
+        let db = b._dir.0.join("iris.db");
+        b.script.push(Err(ModelError::Budget("refused".into())));
+        *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('ana@example.org', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'stranger'",
+                [],
+            )
+            .unwrap();
+            if reopen_in_call {
+                c.execute("UPDATE sender SET declined_at = NULL", [])
+                    .unwrap();
+            }
+        }));
+        b.run(&Limits::default()).unwrap();
+        assert_eq!(b.script.calls(), 1);
+        assert_eq!(
+            b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+            Some(0),
+            "the gate changed during the call (reopen in call: {reopen_in_call})"
+        );
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE sender SET declined_at = NULL", [])?;
+                Ok(())
+            })
+            .unwrap();
+        b.run(&Limits::default()).unwrap();
+        assert_eq!(b.script.calls(), 2, "after the reopen the model reads it");
+    }
+}
+
+/// A kind change and its undo during a refused call, for a sender with a
+/// decline (#934): the decline applied for a moment, so the gate changed.
+/// The refusal writes no mark.
+#[test]
+fn a_kind_change_and_its_undo_around_a_refused_call_leave_no_mark() {
+    let b = store("refusal-kind-flip");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO sender(address, kind, decided_by, declined_at)
+             VALUES ('ana@example.org', 'person', 'person', 1)
+             ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'person',
+               decided_by = 'person'",
+            [],
+        )
+        .unwrap();
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute("UPDATE sender SET kind = 'stranger'", [])
+            .unwrap();
+        c.execute("UPDATE sender SET kind = 'person'", []).unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
 /// A change of the thread context during a refused call (a SPAM label on
 /// an earlier message) leaves no mark either (#153).
 #[test]
@@ -1442,6 +1810,494 @@ fn a_sender_rerun_clears_the_mark() {
         .unwrap();
     assert_eq!(
         b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
+/// Decision D29: the mail of a declined stranger makes no model call, so it
+/// waits for nothing that only the model needs: a budget refusal, the try
+/// limit, or an older message of the thread that waits for the model.
+#[test]
+fn the_mail_of_a_declined_stranger_does_not_wait_for_the_model() {
+    let b = store("declined-wait");
+    b.model(true, None);
+    let far = |n: &str| {
+        format!("From: Far <x@far.example>\nTo: owner@example.com\nSubject: Offer {n}\n\nCan you send the price list?\n")
+    };
+    // A message of the stranger that a budget refusal marked, and one at the
+    // try limit, before the decline.
+    let refused = b.add_raw("1", "b", 3, &far("1"), &["INBOX"]);
+    let limit = b.add_raw("2", "c", 3, &far("2"), &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), b.script.calls()), (Some("budget"), 0));
+    assert!(!b.understood(refused) && !b.understood(limit));
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET waits_model = 1 WHERE id = ?1 AND waits_model = 0",
+                [refused],
+            )?;
+            tx.execute("UPDATE message SET tries = 99 WHERE id = ?1", [limit])?;
+            Ok(())
+        })
+        .unwrap();
+    // New mail of the stranger behind an older message that waits.
+    let older = b.add("3", "a", 2, &["INBOX"]);
+    let behind = b.add_raw("4", "a", 1, &far("4"), &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('x@far.example', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // A model wait written after the decline (a store from before this
+    // rule, or a refusal that raced the decline) holds nothing either.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET waits_model = 1, retry_at = ?2 WHERE id = ?1",
+                rusqlite::params![limit, NOW + 86_400_000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // The estimate counts no call for the mail of a declined stranger with
+    // a header. Mail with no header yet (`behind`) counts as a call: the
+    // estimate is an upper bound.
+    let e = batch::estimate(&b.store, NOW).unwrap();
+    assert_eq!(
+        e.output_tokens,
+        2 * batch::OUTPUT_TOKENS,
+        "older and behind"
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 0);
+    assert!(!b.understood(older), "the older message still waits");
+    for m in [refused, limit, behind] {
+        assert!(b.understood(m), "message {m}");
+    }
+}
+
+/// Decision D31: a kind or name change that the sender refresh of a run
+/// makes gets its fixed check before the run ends. Here the refresh makes
+/// Bo Smith a known person, and the mail of another address under the same
+/// name gets the spoof mark in the same run.
+#[test]
+fn a_name_change_of_the_refresh_gets_the_fixed_check_in_the_same_run() {
+    let b = store("refresh-fixed");
+    b.model(false, None);
+    let bo = "From: Bo Smith <bo@example.org>\nTo: owner@example.com\nSubject: Hi\n\nCall me.\n";
+    b.add_raw("1", "x", 1, bo, &["INBOX"]);
+    let other =
+        "From: Bo Smith <bo@elsewhere.example>\nTo: owner@example.com\nSubject: Pay\n\nPay now.\n";
+    let spoof = b.add_raw("2", "y", 2, other, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    let marks = |b: &Box_| -> String {
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+                    [spoof],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(marks(&b), "[]", "no known name yet");
+    // Evidence that bo@example.org is a person, with no run since.
+    let raw = "From: owner@example.com\nTo: bo@example.org\nSubject: Re: Hi\n\nSure.\n"
+        .replace('\n', "\r\n");
+    let sent = b.add_raw("3", "x", 3, &raw, &["SENT"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT id, 'bo@example.org', 'sent', content_sha256 FROM message WHERE id = ?1",
+                [sent],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    b.run(&Limits::default()).unwrap();
+    assert!(
+        marks(&b).contains("spoof"),
+        "the run made the spoof mark: {:?}",
+        marks(&b)
+    );
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(0));
+}
+
+fn hostile_of(b: &Box_, m: i64) -> String {
+    b.store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+                [m],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+/// Decision D31: the fixed check runs before the model is made, so a model
+/// that cannot be made does not hold back a new spoof mark.
+#[test]
+fn the_fixed_check_runs_before_the_model_is_made() {
+    let b = store("fixed-first");
+    b.model(false, None);
+    let other =
+        "From: Bo Smith <bo@elsewhere.example>\nTo: owner@example.com\nSubject: Pay\n\nPay now.\n";
+    let spoof = b.add_raw("1", "y", 2, other, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile_of(&b, spoof), "[]");
+    // A known person of the same name, set by the person.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind, name, decided_by)
+                 VALUES ('bo@example.org', 'person', 'Bo Smith', 'person')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let r = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    assert!(matches!(r, Err(Error::Connect(_))));
+    assert!(
+        hostile_of(&b, spoof).contains("spoof"),
+        "{}",
+        hostile_of(&b, spoof)
+    );
+}
+
+/// Decision D31: a name change of the main pass (here a sent message that
+/// names a known person under a new name) clears the spoof mark of mail
+/// under the old name. That mail waits for the model, and the same run
+/// reads it.
+#[test]
+fn mail_that_the_fixed_check_of_the_main_pass_resets_gets_the_second_pass() {
+    let b = store("fixed-pass");
+    b.model(false, None);
+    let to = |n: &str| {
+        format!("From: owner@example.com\nTo: {n} <ana@example.org>\nSubject: Hi\n\nSee you.\n")
+    };
+    b.add_raw("1", "x", 10, &to("Ana Lee"), &["SENT"]);
+    let other =
+        "From: Ana Lee <ana@elsewhere.example>\nTo: owner@example.com\nSubject: Pay\n\nPay now.\n";
+    let spoof = b.add_raw("2", "y", 5, other, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert!(
+        hostile_of(&b, spoof).contains("spoof"),
+        "{}",
+        hostile_of(&b, spoof)
+    );
+    // A sent message renames Ana in the main pass of the next run.
+    let m = b.add_raw("3", "x", 1, &to("Ana Bo"), &["SENT"]);
+    b.run(&Limits::default()).unwrap();
+    assert!(b.understood(m));
+    let name = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT name FROM sender WHERE address = 'ana@example.org'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        name.as_deref(),
+        Some("Ana Bo"),
+        "the sent message renamed Ana"
+    );
+    assert_eq!(hostile_of(&b, spoof), "[]");
+    assert!(b.understood(spoof), "the same run read the reset mail");
+}
+
+/// Issues 369, 373 and 374: the person releases a message that the mark
+/// `link` holds in quarantine. The fixed check reads it again without the
+/// mark, the model reads it as new mail, and its items show. The end of the
+/// release gives the mark back, and the items go. New content ends the
+/// release. A mark that the person cannot release (`phishing`) stays.
+#[test]
+fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
+    use iris_understand::store::{release, unrelease, Release};
+    let b = store("release");
+    b.model(false, None);
+    let m = b.add_raw(
+        "m",
+        "t",
+        1,
+        &bank("https://evil.example.net/pay"),
+        &["INBOX"],
+    );
+    b.run(&Limits::default()).unwrap();
+    let hostile = |b: &Box_| {
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+                    [m],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let items = |b: &Box_| {
+        b.col(&format!(
+            "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = {m} AND s.role = 'origin' AND i.form <> 'conversation'"
+        ))
+        .unwrap()
+    };
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!((b.script.calls(), items(&b)), (0, 0));
+
+    // The release: the next run reads the mail with the model, also when
+    // the model used each try of the message before the mark held it.
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET tries = 3 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    // A link check waits at the time of the release: it cannot take the
+    // place of the understanding.
+    b.store
+        .write(|tx| {
+            tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    let r = b.store.write(|tx| release(tx, m)).unwrap();
+    assert_eq!(
+        r,
+        Release::Done {
+            released: vec!["link".into()],
+            kept: vec![]
+        }
+    );
+    // A second release before the run: Iris reads the mail again now.
+    assert_eq!(
+        b.store.write(|tx| release(tx, m)).unwrap(),
+        Release::Reading
+    );
+    let feed = || {
+        Ok((
+            r#"{"items": [{"form": "feed", "status": "new", "title": "Invoice",
+              "quote": "Pay the invoice by Friday.", "confidence": 0.5}], "phishing": false}"#
+                .to_string(),
+            usage(100, 10),
+        ))
+    };
+    b.script.push(feed());
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), "[]");
+    assert_eq!((b.script.calls(), items(&b)), (1, 1));
+    // The released message is in the conversation of its thread.
+    let talk = |b: &Box_| {
+        b.col(&format!(
+            "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = {m} AND i.form = 'conversation' AND i.status <> 'gone'"
+        ))
+        .unwrap()
+    };
+    assert!(talk(&b) > 0);
+    // The link check of the same content keeps the release.
+    iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
+    assert_eq!(hostile(&b), "[]");
+
+    // A link check reads the release, and the undo comes before its write.
+    b.store
+        .write(|tx| {
+            tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    let read = iris_understand::store::link_read(&b.store, m).unwrap();
+    assert!(!read.mark);
+
+    // The end of the release: the mark comes back with no model call.
+    assert!(matches!(
+        b.store.write(|tx| unrelease(tx, m)).unwrap(),
+        Release::Done { .. }
+    ));
+    assert_eq!(
+        b.store.write(|tx| unrelease(tx, m)).unwrap(),
+        Release::Nothing
+    );
+    // The undo holds the mail at once, before the fixed check runs: each
+    // gate reads `message.hostile`.
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    // The write of that link check keeps its queue row and the mark.
+    let row = b
+        .col(&format!("SELECT id FROM link_check WHERE message_id = {m}"))
+        .unwrap();
+    assert!(!b
+        .store
+        .write(|tx| iris_understand::store::link_check_done(tx, row, m, &read))
+        .unwrap());
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!(
+        b.col(&format!(
+            "SELECT count(*) FROM link_check WHERE message_id = {m}"
+        )),
+        Some(1)
+    );
+    assert_eq!(
+        b.col(&format!(
+            "SELECT count(*) FROM message m WHERE m.id = {m} AND {}",
+            iris_store::may_be_hostile!()
+        )),
+        Some(1)
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!((b.script.calls(), items(&b)), (1, 0));
+    // The undo takes the message out of the conversation (section 7.3).
+    assert_eq!(talk(&b), 0);
+
+    // New content ends a release.
+    b.store.write(|tx| release(tx, m)).unwrap();
+    let other = bank("https://evil2.example.net/pay").replace('\n', "\r\n");
+    let sha = b.store.put_content(other.as_bytes()).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                // As the sync does: new content clears `understood_at`.
+                "UPDATE message SET content_sha256 = ?2, understood_at = NULL WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.col(&format!(
+            "SELECT released IS NULL FROM message WHERE id = {m}"
+        )),
+        Some(1)
+    );
+    // The old marks stay until Iris reads the new content: no release of
+    // them, so the new content gets its own marks.
+    assert_eq!(
+        b.store.write(|tx| release(tx, m)).unwrap(),
+        Release::Reading
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!(b.script.calls(), 1);
+
+    // Only `phishing`: nothing to release. With `link` too, `phishing` stays.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                r#"UPDATE message SET hostile = '["phishing"]' WHERE id = ?1"#,
+                [m],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.store.write(|tx| release(tx, m)).unwrap(),
+        Release::Nothing
+    );
+    b.store
+        .write(|tx| {
+            tx.execute(
+                r#"UPDATE message SET hostile = '["link","phishing"]' WHERE id = ?1"#,
+                [m],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.store.write(|tx| release(tx, m)).unwrap(),
+        Release::Done {
+            released: vec!["link".into()],
+            kept: vec!["phishing".into()]
+        }
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), r#"["phishing"]"#);
+    assert_eq!((b.script.calls(), items(&b)), (1, 0));
+}
+
+/// Issue #1126: a waiter of the run lock stops the wait of the run for the
+/// answer of a call in flight. The call keeps its worst case as unknown
+/// cost, starts no model wait, and adds no try and no mark to its message.
+#[test]
+fn a_waiter_cancels_the_call_in_flight() {
+    let b = store("cancel");
+    b.model(true, Some(10_000));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let dir = b.store.dir().to_path_buf();
+    let (started, wait) = std::sync::mpsc::channel::<()>();
+    *b.script.hang.borrow_mut() = Some(started);
+    let waiter = std::thread::spawn(move || {
+        let store = Store::open(&dir).unwrap();
+        wait.recv().unwrap();
+        let start = std::time::Instant::now();
+        let got = batch::lock_wait(&store, batch::WAIT).is_ok();
+        (got, start.elapsed())
+    });
+    let r = b.run(&Limits::default()).unwrap();
+    let (got, waited) = waiter.join().unwrap();
+    assert!(got, "the waiter gets the run lock");
+    assert!(waited < std::time::Duration::from_secs(10), "{waited:?}");
+    assert_eq!(r.stop.as_deref(), Some("yield"));
+    assert_eq!((r.calls, r.unknown_calls), (0, 1));
+    assert_eq!(r.unknown_cost_micro_usd, Some(WORST));
+    assert_eq!(r.reserved_micro_usd, 0);
+    assert_eq!(b.budget(), Some(10_000 - WORST));
+    assert_eq!(b.col("SELECT retry_failures FROM model_setting"), Some(0));
+    assert_eq!(b.col("SELECT retry_at FROM model_setting"), None);
+    assert!(!b.understood(m));
+    assert_eq!(
+        b.col(&format!(
+            "SELECT tries + waits_model + coalesce(retry_at, 0) FROM message WHERE id = {m}"
+        )),
+        Some(0)
+    );
+    // The next run reads the message.
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert!(b.understood(m));
+}
+
+/// Issue #1126: an answer that comes after a waiter came starts no second
+/// request. Here the answer is no JSON, so the steps would ask again: the
+/// budget wrapper sees the waiter before the request and starts none.
+#[test]
+fn a_waiter_stops_the_retry_of_an_answer_that_came_late() {
+    let b = store("late");
+    b.model(true, Some(10_000));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    b.script.push(Ok(("no json".into(), usage(100, 10))));
+    let dir = b.store.dir().to_path_buf();
+    let (started, wait) = std::sync::mpsc::channel::<()>();
+    *b.script.late.borrow_mut() = Some(started);
+    let waiter = std::thread::spawn(move || {
+        let store = Store::open(&dir).unwrap();
+        wait.recv().unwrap();
+        batch::lock_wait(&store, batch::WAIT).is_ok()
+    });
+    let r = b.run(&Limits::default()).unwrap();
+    assert!(waiter.join().unwrap(), "the waiter gets the run lock");
+    assert_eq!(b.script.calls(), 1, "no second request");
+    assert_eq!(r.stop.as_deref(), Some("yield"));
+    assert_eq!((r.calls, r.unknown_calls), (1, 0));
+    assert_eq!(b.col("SELECT retry_failures FROM model_setting"), Some(0));
+    assert!(!b.understood(m));
+    assert_eq!(
+        b.col(&format!(
+            "SELECT tries + waits_model + coalesce(retry_at, 0) FROM message WHERE id = {m}"
+        )),
         Some(0)
     );
 }

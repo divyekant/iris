@@ -644,15 +644,66 @@ fn an_addition_waits_for_the_person() {
         col(&b, "SELECT count(*) FROM matter_add WHERE item_id = 3"),
         0
     );
-    // An expired signal is no candidate, and its addition ends.
+    // An expired signal is no candidate, and its addition ends. The stored
+    // status stays `active`: only the clock passed `expires` (issue #927).
     b.store
-        .write(|tx| Ok(tx.execute("UPDATE item SET status = 'expired' WHERE id = 4", [])?))
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE item SET doc = json_set(doc, '$.expires',
+                   strftime('%Y-%m-%dT%H:%M:%SZ', ?1 / 1000, 'unixepoch')) WHERE id = 4",
+                [NOW + 3],
+            )?)
+        })
         .unwrap();
     reset_fingerprint(&b);
     let f = fake(vec![]);
     run(&b, &f, Gate::Now, NOW + 3);
     assert!(!f.data.borrow()[0].contains("\"id\":\"s-4\""));
     assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
+}
+
+/// A signal that is past its `expires` time at the end of the model call is
+/// no addition and no member, also while its stored status is `active`: the
+/// final write expires signals again (issue #927).
+#[test]
+fn a_signal_that_expires_during_the_call_is_not_saved() {
+    let b = setup(
+        "expire-during",
+        3,
+        &titles(4),
+        &["record", "conversation", "commitment", "signal"],
+    );
+    activate_signals(&b);
+    let m = iris_matters::create(
+        &b.store,
+        "Tokyo trip",
+        &[(1, "record"), (2, "conversation")],
+        NOW,
+    )
+    .unwrap();
+    let add = json!({"matters": [], "additions": [
+        {"matter": format!("g-{m}"), "items": ["s-4"]},
+    ]});
+    // During the call, the clock passes `expires`; no tick runs.
+    let f = fake_during(
+        vec![Ok(add.to_string())],
+        Some((
+            b.dir.clone(),
+            "UPDATE item SET doc = json_set(doc, '$.expires', '1970-01-01T00:00:01Z') WHERE id = 4"
+                .into(),
+        )),
+    );
+    let o = run(&b, &f, Gate::Now, NOW);
+    assert!(f.data.borrow()[0].contains("\"id\":\"s-4\""));
+    assert_eq!(o.added, 0, "{o:?}");
+    assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM item WHERE id = 4 AND status = 'expired'"
+        ),
+        1
+    );
 }
 
 /// Random additions never write an addition outside the rules: the matter
@@ -888,4 +939,104 @@ fn try_now_after_a_failed_call_lets_the_hourly_step_call_again() {
         .unwrap();
     assert!(!waited);
     assert_eq!(run(&b, &f, Gate::Hourly, later).skip, Some(Skip::Hourly));
+}
+
+/// A model whose call ends with a cancel for a waiter of the run lock.
+struct Cancelled;
+
+impl Model for Cancelled {
+    fn name(&self) -> &str {
+        "fake"
+    }
+    fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
+        panic!("the step calls with a cancel test")
+    }
+    fn ask_cancel(&self, _: &str, _: &str, _: &dyn Fn() -> bool) -> Result<Reply, ModelError> {
+        Err(ModelError::Cancelled)
+    }
+}
+
+/// Issue #1126: a call that a waiter of the run lock cancels is no model
+/// error: the run says `yield` and no wait starts. The call can be out and
+/// charged, so the hourly gate counts it: no second call within the hour.
+/// A manual step calls again at once.
+#[test]
+fn a_cancelled_call_starts_no_wait_and_counts_for_the_hour() {
+    let b = setup("cancel", 3, &titles(3), &["record"]);
+    let connect = |_: &ModelRow| -> Result<std::boxed::Box<dyn Model>, String> {
+        Ok(std::boxed::Box::new(Cancelled))
+    };
+    let o = propose(&b.store, &connect, Gate::Hourly, NOW).unwrap();
+    assert!(!o.failed);
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM model_setting WHERE retry_failures = 0 AND retry_at IS NULL"
+        ),
+        1
+    );
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM understand_run WHERE stop = 'yield' AND unknown_calls = 1"
+        ),
+        1
+    );
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM matter_run WHERE candidates IS NULL AND tried_at IS NOT NULL"
+        ),
+        1
+    );
+    let f = fake(vec![]);
+    assert_eq!(run(&b, &f, Gate::Hourly, NOW + 1).skip, Some(Skip::Hourly));
+    assert!(f.data.borrow().is_empty());
+    assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, None);
+    assert_eq!(f.data.borrow().len(), 1);
+}
+
+/// A model that must get no call.
+struct NoCall;
+
+impl Model for NoCall {
+    fn name(&self) -> &str {
+        "fake"
+    }
+    fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
+        panic!("no request goes out")
+    }
+    fn ask_cancel(&self, _: &str, _: &str, _: &dyn Fn() -> bool) -> Result<Reply, ModelError> {
+        panic!("no request goes out")
+    }
+}
+
+/// Issue #1175: a waiter of the run lock that comes before the request
+/// stops the step with no request. The attempt is undone: no run row stays,
+/// `tried_at` keeps its old value, and the next hourly step calls.
+#[test]
+fn a_waiter_before_the_call_keeps_the_hourly_slot() {
+    let b = setup("waitfirst", 3, &titles(3), &["record"]);
+    let want = b.store.dir().join(iris_understand::batch::WANT_FILE);
+    let held = RefCell::new(None);
+    let connect = |_: &ModelRow| -> Result<std::boxed::Box<dyn Model>, String> {
+        // The waiter comes after the step took the run lock.
+        *held.borrow_mut() = iris_store::FileLock::try_take(&want).unwrap();
+        assert!(held.borrow().is_some());
+        Ok(std::boxed::Box::new(NoCall))
+    };
+    let o = propose(&b.store, &connect, Gate::Hourly, NOW).unwrap();
+    drop(held.take());
+    assert!(!o.failed);
+    assert_eq!(col(&b, "SELECT count(*) FROM understand_run"), 0);
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM matter_run WHERE tried_at IS NOT NULL"
+        ),
+        0
+    );
+    let f = fake(vec![]);
+    assert_eq!(run(&b, &f, Gate::Hourly, NOW + 1).skip, None);
+    assert_eq!(f.data.borrow().len(), 1);
 }

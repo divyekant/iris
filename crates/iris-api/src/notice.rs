@@ -1,4 +1,5 @@
-//! Notices by rule (card R5-08): the routes `/api/notices`.
+//! Notices by rule (card R5-08) and job notices
+//! (`docs/specs/2026-11-25-job-notices.md`): the routes `/api/notices`.
 
 use iris_store::{format_id, parse_id, Kind, Store};
 use serde::Serialize;
@@ -10,14 +11,19 @@ use crate::{Error, MessageSummary, Result};
 pub struct Notice {
     /// The `n-` ID.
     pub id: String,
-    /// The rule and its name at the time of the notice.
-    pub rule: u32,
+    /// The rule and its name at the time of the notice. `None` for a job
+    /// notice, whose name is `Job due` or `Job question`.
+    pub rule: Option<u32>,
+    /// The `j-` ID of the job of a job notice, or `None`.
+    pub job: Option<String>,
     pub rule_name: String,
-    /// The sender and the subject, one line each.
+    /// The sender and the subject, or `j-<n>` and the goal, one line each.
     pub title: String,
     pub text: String,
     pub created: String,
-    /// The mail. `None` after the sync marked it gone.
+    /// The mail. `None` for a job notice, and after the sync marked it gone.
+    /// For a mail that is not checked yet (issue #1045), the sender and the
+    /// subject are empty: the notice shows no words of such a mail.
     pub message: Option<MessageSummary>,
 }
 
@@ -37,8 +43,9 @@ pub struct NoticePage {
 }
 
 /// One page of the notices for the Mac app (`docs/specs/2026-11-17-mac-app.md`):
-/// the notices that are not done with a row ID larger than `after`, oldest
-/// first, at most `limit`. Also the count of notices that are not done, and
+/// the open notices that interrupt (no `Job question`), with a row ID larger
+/// than `after`, oldest first, at most `limit`. Also the count of all open
+/// notices, and
 /// the largest row ID of all notices. One snapshot.
 pub fn notices_after(store: &Store, after: i64, limit: i64) -> Result<NoticePage> {
     Ok(store.read(|c| {
@@ -62,11 +69,22 @@ fn shape(
         out.push(Notice {
             id: format_id(Kind::Notice, n.id),
             rule: n.rule,
+            job: n.job_id.map(iris_job::format_job_id),
             rule_name: n.rule_name,
             title: n.title,
             text: n.text,
             created: rfc3339(n.created_at),
-            message: summaries(c, &[n.message_id])?.pop(),
+            message: match n.message_id {
+                Some(m) => summaries(c, &[m])?.pop().map(|mut s| {
+                    if !n.checked {
+                        s.from.name = None;
+                        s.from.address = None;
+                        s.subject = None;
+                    }
+                    s
+                }),
+                None => None,
+            },
         });
     }
     Ok(out)

@@ -35,7 +35,9 @@ mod step;
 mod stop;
 
 pub use send::{
-    release, sending, sent_by_iris, set_sending, HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
+    bcc_open, bcc_test, bcc_waits, has_files, is_sent_by_iris, release, sending, sent_by_iris,
+    set_sending, CHANGE_CHANGED, CHANGE_DURING, CHANGE_GONE, CHANGE_NEW_MAIL, CHANGE_OLD_FILE,
+    CHANGE_UNDO_FILE, CHANGE_UNKNOWN, HOLD_MS, NO_BCC, OFF_WAIT, SENT_OTHER, SENT_OTHER_END,
 };
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};
@@ -45,13 +47,13 @@ pub use stop::{
 };
 
 use iris_policy::Mode;
-use iris_provider::{Provider, BATCH_LIMIT};
+use iris_provider::{Move, Provider, BATCH_LIMIT};
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
 use unicase::UniCase;
 
 mod undo;
-pub use undo::undo;
+pub use undo::{undo, CHANGE_LATER};
 
 #[derive(Debug)]
 pub enum Error {
@@ -80,6 +82,9 @@ pub enum Error {
     /// error that ends with [`SENT_OTHER_END`]). Each release stops until the owner checks
     /// assumption 6 of the send spec. The action stays as it was.
     SendStopped,
+    /// The test addresses of the `Bcc` gate cannot test it, with the
+    /// reason ([`bcc_test`]). Nothing changed.
+    BccTest(String),
 }
 
 impl std::fmt::Display for Error {
@@ -92,6 +97,7 @@ impl std::fmt::Display for Error {
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
             Error::Undo(why) => write!(f, "no undo: {why}"),
+            Error::BccTest(why) => write!(f, "{why}"),
             Error::SendStopped => write!(
                 f,
                 "a mail provider {SENT_OTHER_END}: each send stops until the owner checks"
@@ -154,9 +160,17 @@ pub enum Outcome {
     /// The send switch is off (`iris sending on` turns it on). The send
     /// stays `held`, and no call is made.
     SendingOff,
+    /// The draft has `bcc`, and the `Bcc` gate of the provider is closed
+    /// (send content spec, section 6.2). The send stays `held`, and no
+    /// call is made.
+    BccUnchecked,
     /// Iris is stopped (`iris resume` ends the stop). The action stays
     /// `approved` or `held`, and no call is made.
     Stopped,
+    /// The account has read access only (`account.state` `read_only`), for
+    /// example after a sign-in without `--write` during the step (issue
+    /// #683). The action stays `approved` or `held`, and no call is made.
+    ReadOnly,
     /// The result of a `drafts.create` or `drafts.send` call is not known
     /// yet. The ledger row stays in `writing`, and the recovery decides
     /// later. No call is made again.
@@ -227,6 +241,19 @@ impl Change {
     /// One provider call for each message.
     fn single(&self) -> bool {
         self.call != BATCH
+    }
+
+    /// The folder move of the change, on a provider with location IDs
+    /// (IMAP moves spec, section 3). Works on a change of the ledger too.
+    fn mv(&self) -> Option<Move> {
+        let inbox = |v: &[String]| v.len() == 1 && v[0] == "INBOX";
+        match self.call {
+            "trash" => Some(Move::Trash),
+            "untrash" => Some(Move::Untrash),
+            _ if self.add.is_empty() && inbox(&self.remove) => Some(Move::Archive),
+            _ if self.remove.is_empty() && inbox(&self.add) => Some(Move::Inbox),
+            _ => None,
+        }
     }
 
     /// The change that a ledger row recorded in `ops` (see [`Change::ops`]).
@@ -346,6 +373,22 @@ fn lock(store: &Store) -> Result<std::fs::File> {
 
 /// The name of the apply lock in the data folder.
 pub const LOCK_FILE: &str = "apply.lock";
+
+/// Wait up to `wait` for the apply lock, and give it. An apply holds the
+/// lock from its first gate to the end of its write calls, so while the
+/// caller holds it no write call runs and none starts. After `wait`, gives
+/// [`Error::Busy`].
+pub fn wait_lock(store: &Store, wait: std::time::Duration) -> Result<std::fs::File> {
+    let start = std::time::Instant::now();
+    loop {
+        match lock(store) {
+            Err(Error::Busy) if start.elapsed() < wait => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            r => return r,
+        }
+    }
+}
 
 /// The access token of the mailbox. `renew` gives a new token after HTTP
 /// 401, or `None` if there is none (the account needs a sign-in).
@@ -558,6 +601,7 @@ pub fn apply(
         )?;
         Ok(())
     })?;
+    let mv = run.relocates(&change);
     let mut after = 0;
     loop {
         // A gone message has no provider ID here. An undo of the entry `o`
@@ -609,6 +653,9 @@ pub fn apply(
         after = last;
         let mut seen: Vec<(i64, Vec<String>)> = Vec::new();
         let mut todo: Vec<(i64, String)> = Vec::new();
+        // A move with location IDs: the messages for `move_plan`, with
+        // their `pre` labels.
+        let mut plan: Vec<(i64, String, String)> = Vec::new();
         for (id, provider_id, eligible) in page {
             if !eligible {
                 run.counts.unchanged += 1;
@@ -620,7 +667,9 @@ pub fn apply(
             };
             match run.call(|g, t| g.minimal(t, &provider_id)) {
                 Ok(m) => {
-                    if change.needed(&m.label_ids) {
+                    if mv.is_some() {
+                        plan.push((id, provider_id, change.pre(&m.label_ids)));
+                    } else if change.needed(&m.label_ids) {
                         todo.push((id, change.pre(&m.label_ids)));
                     } else {
                         run.counts.unchanged += 1;
@@ -635,6 +684,34 @@ pub fn apply(
             }
         }
         mirror(store, account, &seen);
+        if let (Some(mv), false) = (mv, plan.is_empty()) {
+            // The folder of each ID decides; the plan only reads.
+            let ids: Vec<&str> = plan.iter().map(|(_, p, _)| p.as_str()).collect();
+            match run.call(|g, t| g.move_plan(t, &ids, mv)) {
+                Ok(moves) if moves.len() == plan.len() => {
+                    for ((id, _, pre), m) in plan.into_iter().zip(moves) {
+                        if m {
+                            todo.push((id, pre));
+                        } else {
+                            run.counts.unchanged += 1;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    let e = iris_provider::Error::Transport("move plan: wrong length".into());
+                    return Err(Error::Provider(e));
+                }
+                // Nothing was written: the next apply reads again.
+                Err(e)
+                    if e.write_result_unknown()
+                        || matches!(e, iris_provider::Error::Unauthorized) =>
+                {
+                    return Err(Error::Provider(e))
+                }
+                // A definite refusal: no message moves (section 3).
+                Err(e) => return run.fail_unclaimed(action, &change, e.to_string()),
+            }
+        }
         store.write(|tx| {
             let mut add =
                 tx.prepare_cached("INSERT INTO temp.apply_todo(message_id, pre) VALUES (?1, ?2)")?;
@@ -743,6 +820,12 @@ impl<'a, 'b> Run<'a, 'b> {
         })
     }
 
+    /// The move of `change` if the provider gives a moved message a new
+    /// ID: the apply then uses `move_plan` and `relocate`.
+    fn relocates(&self, change: &Change) -> Option<Move> {
+        self.mail.location_ids().then(|| change.mv()).flatten()
+    }
+
     /// Gmail message IDs belong to one mailbox: the token must be of the
     /// mailbox of the account.
     fn mailbox(&mut self) -> Result<()> {
@@ -789,8 +872,10 @@ impl<'a, 'b> Run<'a, 'b> {
     /// expiry or the mode.
     fn claim(&mut self, action: i64, change: &Change) -> Result<std::result::Result<i64, Outcome>> {
         let account = self.account;
+        // A move with location IDs is one call for each batch.
+        let single = change.single() && self.relocates(change).is_none();
         let claimed = self.store.write(|tx| {
-            if let Some(o) = gate(tx, action)? {
+            if let Some(o) = gate(tx, action, account)? {
                 return Ok(Err(o));
             }
             let approved: bool = tx.query_row(
@@ -802,7 +887,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 return Ok(Ok(None));
             }
             let n: i64 = tx.query_row("SELECT count(*) FROM temp.apply_todo", [], |r| r.get(0))?;
-            let calls = if change.single() {
+            let calls = if single {
                 n
             } else {
                 (n + BATCH_LIMIT as i64 - 1) / BATCH_LIMIT as i64
@@ -820,7 +905,7 @@ impl<'a, 'b> Run<'a, 'b> {
                  SELECT ?1, message_id, CASE WHEN ?2 THEN n ELSE (n - 1) / ?3 + 1 END, pre, ?4
                  FROM (SELECT message_id, pre, row_number() OVER (ORDER BY message_id) AS n
                        FROM temp.apply_todo)",
-                params![ledger, change.single(), BATCH_LIMIT as i64, labels_json(&change.add)],
+                params![ledger, single, BATCH_LIMIT as i64, labels_json(&change.add)],
             )?;
             tx.execute("DELETE FROM temp.apply_todo", [])?;
             Ok(Ok(Some(ledger)))
@@ -898,6 +983,33 @@ impl<'a, 'b> Run<'a, 'b> {
             }
             if live.is_empty() {
                 continue;
+            }
+            if let Some(mv) = self.relocates(change) {
+                let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
+                match self.call(|g, t| g.relocate(t, &ids, mv)) {
+                    Ok(new) if new.len() == live.len() => {
+                        // `done` and the rebind in one transaction (section 3).
+                        self.store.write(|tx| {
+                            tx.execute(
+                                "UPDATE ledger_message SET done = 1
+                                 WHERE ledger_id = ?1 AND call = ?2 AND listed IS NULL",
+                                params![ledger, k],
+                            )?;
+                            for ((id, _), n) in live.iter().zip(&new) {
+                                iris_store::rebind(tx, *id, n)?;
+                            }
+                            Ok(())
+                        })?;
+                        let moved: Vec<(i64, String)> =
+                            live.iter().map(|(id, _)| *id).zip(new).collect();
+                        self.mirror_read(&moved);
+                        continue;
+                    }
+                    // The server moved, but the new IDs are not known.
+                    Ok(_) => return self.recover(ledger),
+                    Err(e) if e.write_result_unknown() => return self.recover(ledger),
+                    Err(e) => return self.end(ledger, Some(e.to_string())),
+                }
             }
             let result = if change.single() {
                 let (id, p) = &live[0];
@@ -1095,6 +1207,9 @@ impl<'a, 'b> Run<'a, 'b> {
                 })?;
             Ok((call, Change::of_ledger(c, ledger)?))
         })?;
+        // A started move with location IDs is never confirmed by a read:
+        // the old ID is not found after a move too (section 4).
+        let relocates = self.relocates(&change).is_some();
         let mut after = 0;
         loop {
             let page: Vec<(i64, Option<String>, i64)> = self.store.read(|c| {
@@ -1123,6 +1238,10 @@ impl<'a, 'b> Run<'a, 'b> {
                 // messages of a call that never started: the recovery after
                 // a write sign-in reads them (Run::calls).
                 if self.read_only && !started {
+                    continue;
+                }
+                if started && relocates {
+                    found.push((id, Found::Listed("unknown")));
                     continue;
                 }
                 let Some(provider_id) = provider_id else {
@@ -1208,8 +1327,9 @@ impl Run<'_, '_> {
     /// [`gate`], and the state `approved`. Gives the outcome if the action
     /// does not apply now, and [`Error::NotApproved`] if it is not approved.
     fn recheck(&mut self, action: i64) -> Result<Option<Outcome>> {
+        let account = self.account;
         let checked = self.store.write(|tx| {
-            if let Some(o) = gate(tx, action)? {
+            if let Some(o) = gate(tx, action, account)? {
                 return Ok(Some(Some(o)));
             }
             let approved: bool = tx.query_row(
@@ -1256,7 +1376,7 @@ impl Run<'_, '_> {
         let ended = self.store.write(|tx| {
             // The mode and the expiry, as in the claim: an action that
             // waits or expires does not fail.
-            if let Some(o) = gate(tx, action)? {
+            if let Some(o) = gate(tx, action, account)? {
                 return Ok(Err(o));
             }
             let n = tx.execute(
@@ -1377,14 +1497,24 @@ fn writing_rows(store: &Store, account: i64) -> Result<bool> {
     })?)
 }
 
-/// The expiry and the mode, in the transaction of the caller: `expired`
-/// 14 days after the submit (section 5.5), and a wait in the mode
-/// `observe` (section 5.4). Gives the outcome if the action does not apply
+/// The stop, the read-only state of `account`, the expiry and the mode, in
+/// the transaction of the caller: `expired` 14 days after the submit
+/// (section 5.5), and a wait in the mode `observe` (section 5.4). Gives the outcome if the action does not apply
 /// now.
-fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
+fn gate(tx: &Connection, action: i64, account: i64) -> iris_store::Result<Option<Outcome>> {
     // The stop comes first: while stopped, nothing about the action changes.
     if iris_store::stopped(tx)?.is_some() {
         return Ok(Some(Outcome::Stopped));
+    }
+    // A read-only sign-in saves its token and the state in one write, so a
+    // write claim never starts after it, also within a step (issue #683).
+    let read_only: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1 AND state = 'read_only')",
+        [account],
+        |r| r.get(0),
+    )?;
+    if read_only {
+        return Ok(Some(Outcome::ReadOnly));
     }
     if expire(tx, action)? {
         return Ok(Some(Outcome::Expired));
@@ -1564,7 +1694,7 @@ fn check(
     action: i64,
     approved_hash: Option<String>,
 ) -> Result<Option<Outcome>> {
-    if let Some(o) = store.write(|tx| gate(tx, action))? {
+    if let Some(o) = store.write(|tx| gate(tx, action, account))? {
         return Ok(Some(o));
     }
     // Each mailbox that the action names: the account of each message,

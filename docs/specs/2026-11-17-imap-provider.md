@@ -30,8 +30,12 @@ choose it for the account.
   setting of the provider spec, section 6. `create_draft`, `draft_raw`,
   `drafts_with_id` and `send_draft` give a definite rejection
   (`Error::Api` status 400, reason `notSupported`) until a later card.
-- Moves (archive, inbox, trash, untrash, folder labels). The provider spec
-  (section 4) says that a provider with location IDs refuses them.
+- Moves through `modify`, `trash` and `untrash`, and folder labels. These
+  calls refuse each move (section 7). Archive, inbox, trash and untrash
+  move mail only through `move_plan` and `relocate`
+  (`docs/specs/2026-11-25-imap-moves.md`). Until the apply uses those two
+  calls (the next stage of that spec), the verbs stay refused for an IMAP
+  account.
 - A server without `CONDSTORE`. `profile` gives `Error::Api` status 400,
   reason `noCondstore`, so the account cannot sync. A full compare at each
   sync would be the only way, and the sync would need the old UID set,
@@ -70,9 +74,15 @@ Errors map as follows:
 The provider reads the folder list (`LIST "" "*"`) at each `profile`,
 `labels`, `messages` and `changes` call. It skips folders that cannot be
 selected, and folders with `\All` or `\Flagged`: these are views of mail in
-other folders, and their copies would count each message two times. Mail
-that is only in a `\All` folder (Gmail over IMAP) does not sync: limit
-issue #633.
+other folders, and their copies would count each message two times.
+Gmail over IMAP keeps archived mail only in its `\All` folder. So a server
+with the capability `X-GM-EXT-1` (Gmail) gets `Api` 400 `gmailImap` from
+each call, before the mirror can miss that mail. A Gmail account uses the
+Gmail sign-in (issue #633).
+
+The label name of a folder is the decoded text of its modified UTF-7 name
+(RFC 3501 section 5.1.3). A name that does not decode stays as the server
+sent it. The label ID keeps the name as the server sent it.
 
 The order of the folders is `INBOX` first, then the other folders by the
 bytes of the name. A page token holds the name of its folder, not an
@@ -135,17 +145,19 @@ and lists `Spam` with only `\HasNoChildren`, `Spam` gets `\Junk`:
 
 | Role | Common names |
 |---|---|
-| `\Sent` | `Sent`, `Sent Items`, `Sent Messages`, `Sent Mail` |
-| `\Drafts` | `Drafts`, `Draft` |
-| `\Junk` | `Junk`, `Spam`, `Junk E-mail`, `Junk Email`, `Bulk Mail` |
-| `\Trash` | `Trash`, `Deleted Items`, `Deleted Messages`, `Bin` |
+| `\Sent` | `Sent`, `Sent Items`, `Sent Messages`, `Sent Mail`, and the German, French, Spanish, Italian, Dutch, Portuguese and Scandinavian names in `NAMES` of `crates/iris-imap/src/provider.rs` (for example `Gesendet`, `Envoyés`, `Enviados`) |
+| `\Drafts` | `Drafts`, `Draft`, and the names in `NAMES` (for example `Entwürfe`, `Brouillons`) |
+| `\Junk` | `Junk`, `Spam`, `Junk E-mail`, `Junk Email`, `Bulk Mail`, and the names in `NAMES` (for example `Courrier indésirable`) |
+| `\Trash` | `Trash`, `Deleted Items`, `Deleted Messages`, `Bin`, and the names in `NAMES` (for example `Papierkorb`, `Corbeille`) |
+
+The match compares the lowercase decoded text of the last name part.
 
 A folder with the attribute wins: if one folder has `\Junk`, a folder
 named `Spam` with no attribute is an ordinary folder. The mapping errs to
 the safe side: a folder named `Sent` gets `SENT_COPY`, so its mail stays
-out of the understanding, and never gets `SENT`. A role folder with
-another name (for example `Gesendet`) on a server with no attributes is
-an ordinary folder: limit issue #648 (English names only).
+out of the understanding, and never gets `SENT`. A role folder with a
+name that is not in the list, on a server with no attributes, is an
+ordinary folder.
 
 No IMAP message gets `SENT` or `DRAFT`. Each of the two labels is proof
 that the owner wrote the mail (the sender axis, the hostile checks, the
@@ -215,7 +227,8 @@ needed. Each change of `SENT` or a label of `iris_store::DRAFT_OR_COPY`
 also clears `understood_at`.
 
 Each folder label has the kind `system`, a folder that the person made
-too: the provider refuses each folder change (section 7), and the
+too: `modify` refuses each folder change (section 7; only `relocate`
+moves mail, between inbox, archive and trash), and the
 provider spec (section 4) gives `system` to each folder that a provider
 cannot change as a user label. So a `label` action cannot target a
 folder. A message in the `\Archive` folder has its folder label, no
@@ -386,6 +399,7 @@ mirror does not have.
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
 | `create_label(name)` | `Api` 400 `notSupported`, also with the flag writes (limit issue #652). IMAP has no call that makes a keyword with no message: if the targets of the action are gone before the apply, a created label would have no `STORE` behind it, and the next `labels` would not list it. A label action can use a keyword that a folder lists in `FLAGS` or `PERMANENTFLAGS` (section 4). Its ID is the lowercase `kw:` ID, so the ledger and the undo use the same ID as `labels`, `minimal` and `changes` |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
+| `move_plan`, `relocate` (`location_ids` is true) | `archive`, `inbox`, `trash` and `untrash` with `UID MOVE` and `COPYUID`, on a server with `MOVE` and `UIDPLUS`: `docs/specs/2026-11-25-imap-moves.md`. `modify`, `trash` and `untrash` keep their refusal of each move |
 | drafts and send | `Api` 400 `notSupported` |
 
 A `modify` checks all IDs and labels before the first write. It then
@@ -499,6 +513,8 @@ times after an unknown result (spec 2 section 7.2).
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
 | A server with no special-use attributes, or with `\Sent` only and a `Spam` folder with `\HasNoChildren` | the common names give each missing role; an attribute wins | `special_folders_by_name`, `name_fallback_for_each_role`, `an_attribute_wins_over_a_name` |
 | `create_label("Todo")` | `Api` 400 `notSupported`, nothing written | `writes_refuse_before_any_command` |
+| Folder names in other languages, in modified UTF-7, with no attributes | the special labels, and the decoded label name | `special_folders_by_name_in_other_languages`, `folder_text_examples` |
+| Gmail over IMAP (`X-GM-EXT-1`) | `Api` 400 `gmailImap` from each call | `gmail_over_imap_refuses` |
 | A folder name over 255 bytes | `Api` 400 `longFolderName` | `long_folder_name` |
 | A thread header ID over 998 bytes | the own location ID as thread | `long_thread_header_is_ignored` |
 | A keyword or folder named as a fixed label | a name with ` (keyword)` or ` (folder)` | `label_names_are_unique` |

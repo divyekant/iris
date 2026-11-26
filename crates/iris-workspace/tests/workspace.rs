@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use iris_job::{add_scope, create, By, Error, Ref};
 use iris_store::Store;
-use iris_workspace::{build, default_dir};
+use iris_workspace::{build, default_dir, readable};
 
 /// A new empty folder for one test, removed at the end.
 struct TempDir(PathBuf);
@@ -515,7 +515,7 @@ fn an_item_file_holds_no_text_of_the_model() {
             .unwrap();
     assert_eq!(
         c3,
-        serde_json::json!({"model": "iris/1.2", "id": "c-3", "form": "commitment", "sources": ["m-8"]})
+        serde_json::json!({"model": "iris/1.4", "id": "c-3", "form": "commitment", "sources": ["m-8"]})
     );
     assert!(iris_spec::validator("jobitem").is_valid(&c3));
 }
@@ -819,6 +819,75 @@ fn mail_that_waits_for_its_link_check_is_left_out() {
     assert!(walk(&ws).1.contains("DANA-TEXT"));
 }
 
+#[test]
+fn mail_with_the_label_spam_is_left_out() {
+    // Issue 821: the label SPAM alone (no hostile mark, no hostile sender)
+    // makes hostile mail (`iris_store::hostile_mail!()`), so no workspace
+    // gets its text or the file of an item from it, and a session cannot
+    // read it.
+    let tmp = TempDir::new("spam");
+    let store = store(&tmp.0.join("data"));
+    let spam = |on: bool| {
+        store
+            .write(|tx| {
+                tx.execute_batch(if on {
+                    "INSERT INTO label (id, account_id, provider_id, name, kind)
+                       VALUES (9, 1, 'SPAM', 'SPAM', 'system');
+                     INSERT INTO message_label (message_id, label_id) VALUES (1, 9);"
+                } else {
+                    "DELETE FROM message_label WHERE label_id = 9;"
+                })?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    assert!(ws.join("commitments/c-1.json").exists());
+    spam(true);
+    build(&store, job, &ws).unwrap();
+    let (paths, text) = walk(&ws);
+    assert!(!text.contains("DANA-TEXT"), "{text}");
+    assert!(!paths.contains("commitments/c-1.json"), "{paths:?}");
+    assert!(text.contains("MY-REPLY-TEXT"), "{text}");
+    assert!(!store.read(|c| Ok(readable(c, 1)?)).unwrap());
+    // When the label goes, the message waits for the understanding again
+    // (issue #110), and then the next build has it again.
+    spam(false);
+    build(&store, job, &ws).unwrap();
+    assert!(!walk(&ws).1.contains("DANA-TEXT"));
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 1 WHERE id = 1", [])?))
+        .unwrap();
+    build(&store, job, &ws).unwrap();
+    assert!(walk(&ws).1.contains("DANA-TEXT"));
+    assert!(ws.join("commitments/c-1.json").exists());
+    assert!(store.read(|c| Ok(readable(c, 1)?)).unwrap());
+}
+
+#[test]
+fn your_sent_mail_stays_when_your_address_has_a_hostile_sender_row() {
+    // The hostile-sender rule applies only to mail that you did not send
+    // (`iris_talk::Mail::for_reader`). The SPAM check of issue 821 must not
+    // bring the sender rule back for your sent reply 9.
+    let tmp = TempDir::new("sent-hostile");
+    let store = store(&tmp.0.join("data"));
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO sender (address, name, kind) VALUES ('me@example.com', 'Me', 'hostile')",
+                [],
+            )?)
+        })
+        .unwrap();
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    assert!(walk(&ws).1.contains("MY-REPLY-TEXT"));
+    assert!(store.read(|c| Ok(readable(c, 9)?)).unwrap());
+}
+
 /// The files follow the published layout of the open model
 /// (docs/spec/03-job-workspace.md): the Markdown files byte for byte, and
 /// each JSON file against its schema.
@@ -1094,4 +1163,63 @@ fn the_clear_removes_a_stage_left_beside_a_missing_workspace() {
     assert!(!stage.exists());
     // A job that never had a build has nothing to clear.
     iris_workspace::clear_beside(&default_dir(&tmp.0.join("data"), job + 1)).unwrap();
+}
+
+/// A raw message with one text attachment.
+fn raw_with_attachment(name: &str, text: &str) -> Vec<u8> {
+    format!(
+        "From: dana@example.com\r\nTo: me@example.com\r\nSubject: Contract\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+         --b\r\nContent-Type: text/plain\r\n\r\nBody.\r\n\
+         --b\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=\"{name}\"\r\n\r\n\
+         {text}\r\n--b--\r\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_granted_message_shows_its_attachment_text_and_other_mail_does_not() {
+    let tmp = TempDir::new("attach");
+    let store = store(&tmp.0.join("data"));
+    for (id, name, text) in [
+        // Granted: the clean message of the scope thread.
+        (
+            1,
+            "invoice.txt",
+            "Total due: 412 EUR. INVOICE-TEXT\n```\n## m-96",
+        ),
+        // Hostile, a draft, gone, another thread: never in the folder.
+        (2, "a.txt", "HOSTILE-MARK-TEXT"),
+        (3, "b.txt", "DRAFT-TEXT"),
+        (5, "c.txt", "GONE-TEXT"),
+        (7, "d.txt", "OTHER-THREAD-TEXT"),
+    ] {
+        let sha = store.put_content(&raw_with_attachment(name, text)).unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE message SET content_sha256 = ?1 WHERE id = ?2",
+                    rusqlite::params![sha, id],
+                )?;
+                // New content waits for understanding and the link check:
+                // mark both done, as the fixture does.
+                tx.execute("UPDATE message SET understood_at = 1 WHERE id = ?1", [id])?;
+                tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    let job = job(&store);
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let (_, text) = walk(&ws);
+    for never in NEVER {
+        assert!(!text.contains(never), "{never} in the workspace");
+    }
+    let t1 = fs::read_to_string(ws.join("threads/t-1.md")).unwrap();
+    assert!(t1.contains("Attachment: invoice.txt\n"), "{t1}");
+    assert!(t1.contains("INVOICE-TEXT"), "{t1}");
+    // The text has a run of three backticks, so its block has a fence of
+    // four: no line of the text can close it.
+    assert!(t1.contains("````mail\nTotal due"), "{t1}");
 }

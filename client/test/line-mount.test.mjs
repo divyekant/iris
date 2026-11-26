@@ -204,10 +204,7 @@ test("a line shows Draft ready only when the engine says a draft is ready", asyn
     try {
       const pill = view.target.querySelector(".ready");
       assert.equal(!!pill, shown, `${item.form} ready=${JSON.stringify(item.ready)}`);
-      if (shown) {
-        assert.equal(text(pill).trim(), "Draft ready");
-        assert.equal(pill.querySelector("a, button"), null, "the pill is no control: the line opens the item");
-      }
+      if (shown) assert.equal(text(pill).trim(), "Draft ready");
     } finally {
       view.destroy();
     }
@@ -300,8 +297,10 @@ test("a ready draft owed to you shows as a nudge, and only such a line asks", as
     [owed, [200, fx.nudgeDraft], "Nudge ready", null, ["threads/t-8700/draft"]],
     [owed, [200, { ...fx.nudgeDraft, nudge: false, to: null }], "Draft ready", null, ["threads/t-8700/draft"]],
     [owed, [404, { error: "Not found." }], "Draft ready", null, ["threads/t-8700/draft"]],
-    // A nudge for another commitment of the same thread.
-    [owed, [200, { ...fx.nudgeDraft, item: "c-999" }], "Draft ready", null, ["threads/t-8700/draft"]],
+    // A nudge for other commitments of the same thread (another person).
+    [owed, [200, { ...fx.nudgeDraft, items: ["c-998", "c-999"] }], "Draft ready", null, ["threads/t-8700/draft"]],
+    // One nudge names this commitment and another one of the same person (decision D8).
+    [owed, [200, { ...fx.nudgeDraft, items: ["c-999", "c-207"] }], "Nudge ready", null, ["threads/t-8700/draft"]],
     [owe, [200, fx.nudgeDraft], "Draft ready", null, []],
   ];
   for (const [item, answer, pill, body, want] of cases) {
@@ -379,5 +378,34 @@ test("a held line pushed out of a full section takes the place of its last line:
     assert.ok(!section.textContent.includes("Filler 17"), "the held line takes the place of the last line");
   } finally {
     view.destroy();
+  }
+});
+
+test("Reply and a Draft ready pill open the reply form of the thread from the line (issue 582)", async () => {
+  const talk = { ...fx.items.find((i) => i.form === "conversation" && i.status === "active"), ready: [] };
+  const owe = { ...fx.items.find((i) => i.form === "commitment" && i.direction === "you_owe"), ready: ["draft"] };
+  const owed = { ...fx.items.find((i) => i.form === "commitment" && i.direction === "owed_to_you"), ready: ["draft"] };
+  const threadOf = (item) => (item.sources.find((x) => x.role === "origin") ?? item.sources[0]).thread;
+  serve(() => [404, { error: "Not found." }]);
+  for (const [name, item, reply, pill] of [
+    ["a conversation", talk, `#/write/${talk.thread}`, null],
+    ["a conversation with a draft", { ...talk, ready: ["draft"] }, `#/write/${talk.thread}`, `#/write/${talk.thread}`],
+    ["a gone conversation", { ...talk, status: "gone", ready: ["draft"] }, null, null],
+    ["a commitment that you owe, with a draft", owe, null, `#/write/${threadOf(owe)}`],
+    // A draft owed to you can be a nudge to another person: the write view of the thread does not take it.
+    ["a commitment owed to you, with a draft", owed, null, null],
+    // Each other form keeps the pill that opens the item, also when its thread has a draft.
+    ...[...new Set(fx.items.map((i) => i.form))]
+      .filter((form) => form !== "conversation" && form !== "commitment")
+      .map((form) => [`a ${form} with a draft`, { ...fx.items.find((i) => i.form === form), ready: ["draft"] }, null, null]),
+  ]) {
+    const view = await mount("/src/views/Line.svelte", { item });
+    try {
+      assert.equal(view.target.querySelector("a.reply")?.getAttribute("href") ?? null, reply, `${name}: Reply`);
+      if (reply) assert.equal(view.target.querySelector("a.reply").getAttribute("aria-label"), `Reply: ${item.title}`);
+      assert.equal(view.target.querySelector("a.ready")?.getAttribute("href") ?? null, pill, `${name}: the pill`);
+    } finally {
+      view.destroy();
+    }
   }
 });

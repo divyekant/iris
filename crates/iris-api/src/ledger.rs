@@ -25,6 +25,9 @@ pub struct LedgerEntry {
     /// The messages of the entry, and the messages that Gmail confirmed.
     pub messages: i64,
     pub changed: i64,
+    /// The messages whose change the recovery cannot confirm
+    /// (`ledger_message.listed = 'unknown'`, section 7.3).
+    pub unknown: i64,
     /// The items of a state verb, and the title of the first item.
     pub items: i64,
     pub title: Option<String>,
@@ -59,6 +62,106 @@ pub struct LedgerEntry {
     /// For an undo: true when an undo of the undone entry can
     /// start now (`ledger_can_undo`). False for each other entry.
     pub retry: bool,
+    /// For a `send` or a `draft` entry: the subject and the recipients of
+    /// its draft (issue 490). `None` for each other entry, and for a mail
+    /// whose content Iris cannot read.
+    pub mail: Option<Mail>,
+    /// For a `draft` entry: true when it changed a draft that exists
+    /// (`drafts.update`), not a create. An undo of a change is a change
+    /// with `undo_of`.
+    pub change: bool,
+    /// The action of the entry, to read the content of its draft.
+    #[serde(skip)]
+    action: i64,
+}
+
+/// The words of the mail of a `send` or a `draft` entry.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Mail {
+    /// At most 200 characters.
+    pub subject: String,
+    /// The first recipient of `to`. A checked draft has one or more.
+    pub to: Option<String>,
+    /// The number of all recipients (to, cc and bcc).
+    pub recipients: usize,
+}
+
+/// The longest subject that an entry gives, in characters.
+const SUBJECT: usize = 200;
+
+/// Read the mail of a `send` or a `draft` entry, as it was at that entry
+/// (issue 490). A later change of the draft, at Gmail or in Iris, never
+/// changes the words of an older entry. An entry whose content Iris cannot
+/// read keeps no mail.
+fn with_mail(c: &Connection, mut e: LedgerEntry) -> LedgerEntry {
+    if e.verb == "send" || e.verb == "draft" {
+        e.mail = entry_content(c, e.action).ok().flatten().map(|m| Mail {
+            subject: m.subject.chars().take(SUBJECT).collect(),
+            to: m.to.first().cloned(),
+            recipients: m.to.len() + m.cc.len() + m.bcc.len(),
+        });
+    }
+    e
+}
+
+/// The `post` of a ledger row of a draft create or change: the content
+/// that the row wrote (`iris-apply`, `Stored`).
+#[derive(serde::Deserialize)]
+struct Post {
+    content: iris_compose::Content,
+}
+
+/// The content of the mail of the ledger entry of `action`. A create or a
+/// change of a draft keeps its content in `post`. A send keeps only the
+/// hash of the content that it sent (`ops.hash`). Each row with the same
+/// hash in its ops wrote the same content, so the post of such a row
+/// gives it. With no such row, the stored draft gives it only while its
+/// content has that hash.
+fn entry_content(c: &Connection, action: i64) -> rusqlite::Result<Option<iris_compose::Content>> {
+    let from_post = |p: &str| serde_json::from_str::<Post>(p).ok().map(|p| p.content);
+    let Some((ops, post)) = c
+        .query_row(
+            "SELECT ops, post FROM ledger WHERE action_id = ?1",
+            [action],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    if let Some(post) = post {
+        return Ok(from_post(&post));
+    }
+    let Some(hash) = serde_json::from_str::<Value>(&ops)
+        .ok()
+        .and_then(|o| o["hash"].as_str().map(String::from))
+    else {
+        return Ok(None);
+    };
+    let post: Option<String> = c
+        .query_row(
+            "SELECT post FROM ledger
+              WHERE post IS NOT NULL AND json_valid(ops) AND json_extract(ops, '$.hash') = ?1
+              ORDER BY id DESC LIMIT 1",
+            [&hash],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(post) = post {
+        return Ok(from_post(&post));
+    }
+    let draft: Option<(String, Vec<u8>)> = c
+        .query_row(
+            "SELECT a.address, d.raw FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+               JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1",
+            [action],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(draft.and_then(|(address, raw)| {
+        let read = iris_compose::read(&raw, &address)?;
+        (iris_compose::hash(&read.content, read.reply.as_ref()) == hash).then_some(read.content)
+    }))
 }
 
 /// The author of the changeset of an entry. `goal` is the goal of the job of
@@ -112,6 +215,7 @@ const TRIED: &str = "(SELECT (SELECT count(*) FROM ledger_message lm
 const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error, 1, 2000),
         (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id),
         (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.done = 1),
+        (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.listed = 'unknown'),
         (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id),
         (SELECT CASE WHEN json_type(i.doc, '$.title') = 'text' THEN substr(json_extract(i.doc, '$.title'), 1, 2000) END
          FROM action_item ai JOIN item i ON i.id = ai.item_id
@@ -132,7 +236,9 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
                        - (SELECT count(*) FROM json_each(coalesce(l.post, '{}'))))
              ELSE 0 END,
         coalesce({tried}, 0),
-        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone})
+        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone}),
+        a.id,
+        json_valid(l.ops) AND json_extract(l.ops, '$.call') IS 'drafts.update'
      FROM ledger l
      JOIN changeset_action a ON a.id = l.action_id
      JOIN changeset c ON c.id = a.changeset_id
@@ -160,27 +266,31 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         error: r.get(5)?,
         messages: r.get(6)?,
         changed: r.get(7)?,
-        items: r.get(8)?,
-        title: r.get(9)?,
-        changeset: iris_changeset::format_changeset_id(r.get(10)?),
+        unknown: r.get(8)?,
+        items: r.get(9)?,
+        title: r.get(10)?,
+        changeset: iris_changeset::format_changeset_id(r.get(11)?),
         author: Author {
-            kind: r.get(11)?,
-            name: r.get(12)?,
-            job: r.get(13)?,
-            goal: r.get(14)?,
+            kind: r.get(12)?,
+            name: r.get(13)?,
+            job: r.get(14)?,
+            goal: r.get(15)?,
         },
-        decided_by: r.get(15)?,
-        rule: r.get(16)?,
-        policy: r.get(17)?,
-        reason: r.get(18)?,
-        why: r.get(19)?,
-        can_undo: r.get(20)?,
-        undo_open: r.get(21)?,
-        undone_by: l(r.get(22)?),
-        undo_of: l(r.get(23)?),
-        skipped: r.get(24)?,
-        tried: r.get(25)?,
-        retry: r.get(26)?,
+        decided_by: r.get(16)?,
+        rule: r.get(17)?,
+        policy: r.get(18)?,
+        reason: r.get(19)?,
+        why: r.get(20)?,
+        can_undo: r.get(21)?,
+        undo_open: r.get(22)?,
+        undone_by: l(r.get(23)?),
+        undo_of: l(r.get(24)?),
+        skipped: r.get(25)?,
+        tried: r.get(26)?,
+        retry: r.get(27)?,
+        mail: None,
+        change: r.get(29)?,
+        action: r.get(28)?,
     })
 }
 
@@ -202,7 +312,8 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
     let mut entries: Vec<LedgerEntry> = store.read(|c| {
         let mut st = c.prepare_cached(&entry_sql("WHERE l.id < ?1 ORDER BY l.id DESC LIMIT ?2"))?;
         let rows = st.query_map(params![before, limit + 1], entry)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let rows: Vec<LedgerEntry> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(rows.into_iter().map(|e| with_mail(c, e)).collect())
     })?;
     let more = entries.len() > limit as usize;
     entries.truncate(limit as usize);
@@ -213,8 +324,9 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
 }
 
 fn one(c: &Connection, id: i64) -> rusqlite::Result<Option<LedgerEntry>> {
-    c.query_row(&entry_sql("WHERE l.id = ?1"), [id], entry)
-        .optional()
+    Ok(c.query_row(&entry_sql("WHERE l.id = ?1"), [id], entry)
+        .optional()?
+        .map(|e| with_mail(c, e)))
 }
 
 /// The row ID of `l-<n>`, only in its canonical form.
@@ -241,6 +353,167 @@ pub fn undo_entry(store: &Store, id: &str, now_ms: i64) -> Result<Option<LedgerE
         Err(e) => return Err(Error::Store(iris_store::Error::Query(e.to_string()))),
     }
     Ok(store.read(|c| Ok(one(c, n)?))?)
+}
+
+/// Dismiss the line of the brief for the entries `ids` (`l-<n>`) whose
+/// messages the recovery cannot confirm (specification 2, section 7.3).
+/// The client sends the entries that the line showed, so an entry that
+/// fails later shows a new line. An entry with no such message, or one
+/// that is dismissed already, is left as it is. Gives the number of new
+/// dismissals. An ID that is not in the canonical form is
+/// [`Error::Query`], and nothing is written.
+pub fn dismiss_unconfirmed(store: &Store, ids: &[String], now: i64) -> Result<usize> {
+    if ids.len() > crate::MAX_LIMIT as usize {
+        return Err(Error::Query(format!(
+            "at most {} entries",
+            crate::MAX_LIMIT
+        )));
+    }
+    let rows = ids
+        .iter()
+        .map(|id| parse_id(id).ok_or_else(|| Error::Query(format!("no such entry form: {id:?}"))))
+        .collect::<Result<Vec<i64>>>()?;
+    Ok(store.write(|tx| {
+        let mut n = 0;
+        for id in &rows {
+            n += tx.execute(
+                "INSERT OR IGNORE INTO ledger_unknown_seen(ledger_id, at)
+                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM ledger_message lm
+                   JOIN ledger l ON l.id = lm.ledger_id
+                   WHERE lm.ledger_id = ?1 AND lm.listed = 'unknown' AND l.state <> 'writing')",
+                params![id, now],
+            )?;
+        }
+        Ok(n)
+    })?)
+}
+
+/// A page of the messages of entry `id` (`l-<n>`) that the recovery cannot
+/// confirm (specification 2, section 7.3), so that the person can check
+/// each one in the mailbox. Each message has the form of `GET
+/// /api/messages`. `after` is the `next` value of the page before (an
+/// `m-<n>` ID): a keyset on the message row ID, so a page does not repeat
+/// or skip a message. Gives `None` when no entry has the ID.
+pub fn unknown_messages(
+    store: &Store,
+    id: &str,
+    limit: u32,
+    after: Option<&str>,
+) -> Result<Option<serde_json::Value>> {
+    if !(1..=crate::MAX_LIMIT).contains(&limit) {
+        return Err(Error::Query(format!(
+            "limit must be 1 to {}",
+            crate::MAX_LIMIT
+        )));
+    }
+    let Some(n) = parse_id(id) else {
+        return Ok(None);
+    };
+    let after = match after {
+        None => 0,
+        Some(a) => match iris_store::parse_id(a) {
+            Some((iris_store::Kind::Message, row)) => row,
+            _ => return Err(Error::Query(format!("not a message ID: {a:?}"))),
+        },
+    };
+    let rows = store.read(|c| {
+        if !c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ledger WHERE id = ?1)",
+            [n],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Ok(None);
+        }
+        // One more row than the page tells if a next page exists.
+        let rows: Vec<i64> = c
+            .prepare(
+                "SELECT message_id FROM ledger_message
+                 WHERE ledger_id = ?1 AND listed = 'unknown' AND message_id > ?2
+                 ORDER BY message_id LIMIT ?3",
+            )?
+            .query_map(params![n, after, limit + 1], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(rows))
+    })?;
+    let Some(mut rows) = rows else {
+        return Ok(None);
+    };
+    let next = (rows.len() > limit as usize).then(|| {
+        rows.truncate(limit as usize);
+        iris_store::format_id(iris_store::Kind::Message, rows[rows.len() - 1])
+    });
+    let ids = rows
+        .iter()
+        .map(|&r| iris_store::format_id(iris_store::Kind::Message, r))
+        .collect::<Vec<_>>()
+        .join(",");
+    let messages = if ids.is_empty() {
+        Vec::new()
+    } else {
+        crate::review::messages_by_id(store, &ids)?
+    };
+    Ok(Some(
+        serde_json::json!({ "messages": messages, "next": next }),
+    ))
+}
+
+/// The line of the brief (specification 2, section 7.3): the newest
+/// [`crate::MAX_LIMIT`] entries with messages that the recovery cannot
+/// confirm, that the person did not dismiss, of an account that is not
+/// removed. An entry in `writing` does not count: its recovery can still
+/// list more messages, and a dismissal is for the final list. Each later
+/// state counts, `undone` too: an undo restores only the confirmed
+/// messages. `messages` counts the messages of these entries only, so the
+/// line is the entries that it lists, and one dismissal of them covers
+/// the line. `more` counts the other such entries: they show in the next
+/// line.
+#[derive(Debug, Default, Serialize, PartialEq)]
+pub struct Unconfirmed {
+    pub messages: i64,
+    /// At most [`crate::MAX_LIMIT`] entries, as `l-<n>`, newest first.
+    pub entries: Vec<String>,
+    pub more: i64,
+    /// The messages that the recovery listed `unknown` in entries whose
+    /// recovery did not end yet (`writing`): for example, a later read of
+    /// the recovery failed, and it waits to try again. The line warns of
+    /// them at once, but a dismissal waits for the final list.
+    pub waiting: i64,
+}
+
+pub(crate) fn unconfirmed(c: &Connection) -> rusqlite::Result<Unconfirmed> {
+    // The brief shows nothing of an account in `removing` or `removed`
+    // (remove account spec).
+    const UNKNOWN: &str = "FROM ledger_message lm
+           JOIN ledger l ON l.id = lm.ledger_id
+           JOIN account a ON a.id = l.account_id
+         WHERE lm.listed = 'unknown'
+           AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))
+           AND NOT EXISTS (SELECT 1 FROM ledger_unknown_seen s
+                           WHERE s.ledger_id = lm.ledger_id)";
+    let open = format!("{UNKNOWN} AND l.state <> 'writing'");
+    let waiting: i64 = c.query_row(
+        &format!("SELECT count(*) {UNKNOWN} AND l.state = 'writing'"),
+        [],
+        |r| r.get(0),
+    )?;
+    let rows: Vec<(i64, i64)> = c
+        .prepare(&format!(
+            "SELECT lm.ledger_id, count(*) {open}
+             GROUP BY lm.ledger_id ORDER BY lm.ledger_id DESC LIMIT ?1"
+        ))?
+        .query_map([crate::MAX_LIMIT], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let all: i64 = c.query_row(
+        &format!("SELECT count(DISTINCT lm.ledger_id) {open}"),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(Unconfirmed {
+        messages: rows.iter().map(|r| r.1).sum(),
+        more: all - rows.len() as i64,
+        entries: rows.iter().map(|r| format!("l-{}", r.0)).collect(),
+        waiting,
+    })
 }
 
 #[cfg(test)]

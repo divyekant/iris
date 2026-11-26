@@ -142,6 +142,13 @@ pub fn save_sign_in(
     } else {
         STATE_READ_ONLY
     };
+    // A read-only sign-in waits for the apply lock (issue #683): an apply
+    // holds it from its gate to the end of its write calls, so no write
+    // call with the old grant runs after the state is `read_only`.
+    let _lock = match tokens.write {
+        true => None,
+        false => Some(iris_apply::wait_lock(store, iris_apply::OFF_WAIT).map_err(Error::Apply)?),
+    };
     let id = store.save_account_secret("gmail", &address, None, &sealed, state)?;
     Ok((id, address))
 }
@@ -277,7 +284,8 @@ fn outlook_of(store: &Arc<Store>, account: i64) -> Result<Box<dyn Provider>> {
     // The store gives the sent copies at each read of labels: another
     // engine process can complete a send (issue #719).
     let read = store.clone();
-    let sent = move || iris_apply::sent_by_iris(&read, account).map_err(|e| e.to_string());
+    let sent =
+        move |id: &str| iris_apply::is_sent_by_iris(&read, account, id).map_err(|e| e.to_string());
     Ok(Box::new(
         iris_graph::Outlook::new(iris_graph::Graph::new(graph_config()?))
             .with_sent_source(sent)
@@ -524,6 +532,12 @@ impl Worker {
     /// Verify the mirror of the account one time (specification 1, section 4.8).
     pub fn verify(&mut self) -> Result<iris_sync::Report> {
         self.call(iris_sync::verify)
+    }
+
+    /// [`Worker::verify`] under `held`, the sync lock of the account that
+    /// the caller took before any token call (issue #836).
+    pub fn verify_held(&mut self, held: &iris_sync::SyncLock) -> Result<iris_sync::Report> {
+        self.call(|s, m, a, t| iris_sync::verify_held(held, s, m, a, t))
     }
 
     /// Call `f` with an access token. On HTTP 401, get a new access token
@@ -859,7 +873,8 @@ fn understand_loop(store: Arc<Store>) {
 /// One turn of the understanding thread. The answer is the time until the
 /// next turn. After each run, idle or not, the proposal step of matters
 /// runs with its hourly gate, so a mailbox that is already understood
-/// still gets proposals. Then the nudge step ([`crate::nudge::step`]).
+/// still gets proposals. Then the nudge step ([`crate::nudge::step`]) and
+/// the summary step ([`crate::summary::step`], issue 478).
 pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
     match crate::cost::after_sync(store, now_ms) {
         Ok(crate::cost::AfterSync::Busy) => return BUSY_RETRY,
@@ -872,6 +887,9 @@ pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
     let connect = |row: &iris_understand::budget::ModelRow| crate::cost::connect(store, row);
     if let Err(e) = crate::nudge::step(store, &connect, now_ms) {
         say!("iris: nudge: {e}");
+    }
+    if let Err(e) = crate::summary::step(store, &connect, now_ms) {
+        say!("iris: summary: {e}");
     }
     UNDERSTAND_EVERY
 }
@@ -889,24 +907,43 @@ pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 /// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]),
 /// and the notices by rule ([`iris_policy::notice::refresh`]).
 fn attention_loop(store: Arc<Store>) {
-    let mut mark = None;
-    let system = crate::notify::spawn(crate::notify::show);
+    let fresh = {
+        let store = store.clone();
+        move |id| {
+            store
+                .read(|c| iris_policy::notice::get_open(c, id))
+                .ok()
+                .flatten()
+                .map(|n| crate::notify::Shown::rule(&n))
+        }
+    };
+    let system = crate::notify::spawn(fresh, crate::notify::show);
+    let mut turn = AttentionState::default();
     loop {
         // The system notice runs on its own thread: this loop never waits
         // for it.
-        for n in attention_turn(&store, &mut mark) {
+        for n in attention_turn(&store, &mut turn) {
             let _ = system.try_send(n);
         }
         std::thread::sleep(ATTENTION_EVERY);
     }
 }
 
+/// The state of the attention loop between two turns. Kept in memory.
+#[derive(Default)]
+pub struct AttentionState {
+    /// The mark of the proposed rules.
+    pub mark: Option<iris_policy::propose::Mark>,
+    /// The largest job notice row ID that the loop read. The first turn
+    /// sets it to the largest notice row ID, so a restart shows no old job
+    /// notice.
+    pub jobs_seen: Option<i64>,
+}
+
 /// One turn of the attention loop. Gives the notices for the system. Each
 /// step logs its own error, so one failed step does not stop the others.
-pub fn attention_turn(
-    store: &Store,
-    mark: &mut Option<iris_policy::propose::Mark>,
-) -> Vec<crate::notify::Shown> {
+pub fn attention_turn(store: &Store, turn: &mut AttentionState) -> Vec<crate::notify::Shown> {
+    let mark = &mut turn.mark;
     // The conversations first: a kind change marks their threads, and
     // the attention reads the items.
     if let Err(e) = iris_understand::store::update_due_talks(store, now_ms()) {
@@ -931,16 +968,40 @@ pub fn attention_turn(
             Vec::new()
         }
     };
-    // The due date of a job (decision D24): the move to needs you, then one
-    // system notice for each moved job. The jobs page shows the state.
+    // Job notices (docs/specs/2026-11-25-job-notices.md): the first turn
+    // starts after the notices that are there, so a restart shows no old one.
+    if turn.jobs_seen.is_none() {
+        match store.read(iris_policy::notice::counts) {
+            Ok((_, max)) => turn.jobs_seen = Some(max),
+            Err(e) => say!("iris: job notices: {e}"),
+        }
+    }
+    // The due date of a job (decision D24): the move to needs you. Its
+    // trigger adds the `Job due` row in the transaction of the move.
     match iris_job::move_due(store, now_ms()) {
-        Ok(turn) => {
-            for (job, e) in &turn.failed {
+        Ok(moves) => {
+            for (job, e) in &moves.failed {
                 say!("iris: due job j-{job}: {e}");
             }
-            system.extend(turn.moved.iter().map(crate::notify::Shown::job_due));
         }
         Err(e) => say!("iris: due jobs: {e}"),
+    }
+    // One system notice for each new `Job due` row, from any path. A
+    // `Job question` row never interrupts: `jobs_after` leaves it out.
+    if let Some(seen) = turn.jobs_seen {
+        match store.read(|c| iris_policy::notice::jobs_after(c, seen)) {
+            Ok(new) => {
+                if let Some(last) = new.last() {
+                    turn.jobs_seen = Some(last.id);
+                }
+                system.extend(
+                    crate::notify::for_system(new, now_ms())
+                        .iter()
+                        .map(crate::notify::Shown::rule),
+                );
+            }
+            Err(e) => say!("iris: job notices: {e}"),
+        }
     }
     // The measure "time to the first brief" ends at the first brief with content.
     if let Err(e) = iris_api::measures::check_brief(store, now_ms()) {
@@ -1042,6 +1103,9 @@ impl Engine {
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");
         }
+        if let Err(e) = self.store.expire_signals(now_ms()) {
+            say!("iris: signal expiry: {e}");
+        }
         if let Err(e) = iris_changeset::expire(&self.store, now_ms()) {
             say!("iris: changeset expiry: {e}");
         }
@@ -1065,6 +1129,9 @@ impl Engine {
             self.last_clean = Some(Instant::now());
             if let Err(e) = self.store.clean_gone(now_ms()) {
                 say!("iris: content cleanup: {e}");
+            }
+            if let Err(e) = self.store.clean_attachments(now_ms()) {
+                say!("iris: attachment cleanup: {e}");
             }
             // The grants of an ended job match nothing: remove them from
             // the policy (issue #385). A held lock or a file with a change

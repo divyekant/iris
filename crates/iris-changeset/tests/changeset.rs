@@ -535,7 +535,8 @@ fn first_contact_flag_for_a_stranger_thread() {
 /// verbs, JSON shapes, IDs and arguments, written as another writer would.
 /// Submit never panics. A mailbox action is `proposed` only with one or
 /// more messages, a state action only with items of its kind, a draft only
-/// with one account or one thread, and a send only with the one draft.
+/// with one account, one thread or (a change by the person) one draft, and
+/// a send only with the one draft.
 #[test]
 fn random_target_rows() {
     let dir = TempDir::new("fuzz");
@@ -754,6 +755,127 @@ fn random_target_rows() {
     assert!(state > 0, "the test reaches a proposed state action");
     assert!(write > 0, "the test reaches a proposed draft or send");
     assert!(one > 0, "the test reaches a proposed skip, mute or dismiss");
+}
+
+/// A change of a draft by the person, with the switch on: submit never
+/// panics, and proposes only one draft of Iris. A reply change (d-1)
+/// resolves to one parent and has no subject. A new-mail change (d-2)
+/// resolves to no message and has a subject. Each proposed action agrees
+/// with the schema.
+#[test]
+fn random_draft_change_rows() {
+    let dir = TempDir::new("fuzz-change");
+    let s = store(&dir);
+    let person = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+               VALUES (last_insert_rowid(), 1, 1, 'draft', '{}', '{}');
+             INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content,
+                               hash, raw, action_id, created_at, updated_at)
+               VALUES (1, 1, 'r1', 'iris.1@example.com',
+                       '{\"content\":{\"to\":[\"p@x.org\"],\"subject\":\"Re: Q\",\"body\":\"B\"}}',
+                       'h1', x'00', last_insert_rowid(), 0, 0);
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+               VALUES (1, 1, 2, 'draft', '{}', '{}');
+             INSERT INTO draft(account_id, provider_id, message_id_hdr, content,
+                               hash, raw, action_id, created_at, updated_at)
+               VALUES (1, 'r2', 'iris.2@example.com',
+                       '{\"content\":{\"to\":[\"p@x.org\"],\"subject\":\"Q\",\"body\":\"B\"}}',
+                       'h2', x'00', last_insert_rowid(), 0, 0);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let ids = [
+        json!("d-1"),
+        json!("d-2"),
+        json!("d-9"),
+        json!("d-0"),
+        json!("t-1"),
+        json!("x"),
+        json!(1),
+    ];
+    let args = [
+        "{\"to\":[\"p@x.org\"],\"body\":\"B\"}",
+        "{\"to\":[\"p@x.org\"],\"subject\":\"Hi\",\"body\":\"B\"}",
+        "{\"to\":[\"p@x.org\"],\"subject\":\"\",\"body\":\"B\"}",
+        "{\"to\":[],\"body\":\"B\"}",
+        "{}",
+        "null",
+    ];
+    let (mut reply, mut new) = (0, 0);
+    for round in 0..300 {
+        let cs = create(&s, &person, NOW).unwrap();
+        s.write(|tx| {
+            for n in 1..=4 {
+                let list: Vec<Value> = (0..next(4))
+                    .map(|_| ids[next(ids.len() as u64) as usize].clone())
+                    .collect();
+                let targets = json!({ "drafts": list }).to_string();
+                let a = args[next(args.len() as u64) as usize];
+                tx.execute(
+                    "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                     VALUES (?1, 1, ?2, 'draft', ?3, ?4)",
+                    rusqlite::params![cs, n, targets, a],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        submit(&s, cs, &person, "Fuzz.", NOW).unwrap();
+        let mut out = Vec::new();
+        write_document(&s, cs, &mut out).unwrap();
+        let mut d: Value = serde_json::from_slice(&out).unwrap();
+        let all = d["actions"].as_array().unwrap().clone();
+        d["actions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["decision"]["state"] == "proposed");
+        if !d["actions"].as_array().unwrap().is_empty() {
+            let errors: Vec<String> = iris_spec::validator("changeset")
+                .iter_errors(&d)
+                .map(|e| format!("{e} at {}", e.instance_path()))
+                .collect();
+            assert!(errors.is_empty(), "round {round}: {errors:#?}");
+        }
+        for a in &all {
+            let resolved = a["resolved"]["messages"].as_array().unwrap();
+            let subject = a["args"].get("subject").is_some();
+            match a["decision"]["state"].as_str().unwrap() {
+                "proposed" if a["targets"] == json!({"drafts": ["d-1"]}) => {
+                    assert_eq!(resolved.len(), 1, "round {round}: {a}");
+                    assert!(!subject, "round {round}: {a}");
+                    reply += 1;
+                }
+                "proposed" if a["targets"] == json!({"drafts": ["d-2"]}) => {
+                    assert!(resolved.is_empty(), "round {round}: {a}");
+                    assert!(subject, "round {round}: {a}");
+                    new += 1;
+                }
+                "denied" => assert!(resolved.is_empty(), "round {round}: {a}"),
+                other => panic!("round {round}: {other}: {a}"),
+            }
+        }
+        // Withdraw the proposals, so that no change stays open for the
+        // next round.
+        withdraw(&s, cs, Some(&person)).unwrap();
+    }
+    assert!(reply > 0, "the test reaches a proposed reply change");
+    assert!(new > 0, "the test reaches a proposed new-mail change");
 }
 
 /// Submit gives the messages from the targets only: a row of another

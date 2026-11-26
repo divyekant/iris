@@ -19,9 +19,12 @@ the conformance kit.</p>
 <li>Write only the fields of the minor version that your program claims.
 For version 1.0, do not write <code>account</code>, the field of 1.1. For
 version 1.0 or 1.1, do not write <code>withdrawn_by</code> or
-<code>comments</code>, the fields of 1.2.</li>
-<li>Write the <code>model</code> value of that version: <code>"iris/1.2"</code>,
-<code>"iris/1.1"</code> or <code>"iris/1.0"</code>.</li>
+<code>comments</code>, the fields of 1.2. For version 1.2 or older, do not
+write a <code>draft</code> action with a <code>drafts</code> target. For
+version 1.3 or older, do not write the <code>ready</code> value
+<code>summary</code>.</li>
+<li>Write the <code>model</code> value of that version: <code>"iris/1.4"</code>,
+<code>"iris/1.3"</code>, <code>"iris/1.2"</code>, <code>"iris/1.1"</code> or <code>"iris/1.0"</code>.</li>
 <li>Make sure that each document passes the schema of its kind, with the
 format checks of <code>date</code> and <code>date-time</code>.</li>
 <li>Do not write a key two times in one JSON object.</li>

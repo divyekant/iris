@@ -35,7 +35,8 @@ pub enum Call {
         status: Option<String>,
         kind: Option<String>,
         before: Option<String>,
-        limit: u32,
+        /// `None` when the client gave no limit.
+        limit: Option<u32>,
     },
     /// `iris watch add <text>`.
     WatchAdd { text: String },
@@ -148,7 +149,7 @@ const SPECS: &[Spec] = &[
         about: "Write a reply to a thread (t-3) or a new mail from an account (a-1) in a draft changeset.",
         args: &[
             arg("target", Kind::Text, "The thread (t-3) or the account (a-1)."),
-            arg("draft", Kind::Object, "The mail: to, cc, subject (not for a reply) and body."),
+            arg("draft", Kind::Object, "The mail: to, cc, bcc, subject (not for a reply) and body. An agent cannot attach a file."),
         ],
         adds: true,
     },
@@ -440,7 +441,7 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
             status: text("status"),
             kind: text("type"),
             before: text("before"),
-            limit: args.get("limit").and_then(Value::as_f64).unwrap_or(50.0) as u32,
+            limit: args.get("limit").and_then(Value::as_f64).map(|l| l as u32),
         },
         "submit" => socket(
             "submit",

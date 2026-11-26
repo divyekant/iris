@@ -6,7 +6,7 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -34,6 +34,11 @@ const PROBE_WAIT: Duration = Duration::from_secs(5);
 const INFO_MAX: usize = 4096;
 /// The longest wait of `stop` for the end of the namespace.
 const STOP_WAIT: Duration = Duration::from_secs(5);
+/// The first file descriptor of a read path in `bwrap` (`--ro-bind-fd`).
+/// The helper puts the open read paths there, in order.
+const READ_FD: RawFd = 5;
+/// The option of `bwrap` that binds the object of a descriptor.
+const RO_BIND_FD: &str = "--ro-bind-fd";
 /// The most open connections of the relay, as in the egress proxy.
 pub(crate) const RELAY_MAX: usize = 8;
 /// The system files of `/etc` that programs read at the start, shown
@@ -103,8 +108,16 @@ impl Bwrap {
     }
 
     /// The options of the namespaces and of the file view. `home` gets an
-    /// empty `tmpfs`; `reads` are extra read-only paths.
-    fn view(&self, home: Option<&Path>, reads: &[PathBuf], workspace: &Path) -> Vec<OsString> {
+    /// empty `tmpfs`; `reads` are extra read-only paths (the program
+    /// files); `bound` are the read paths of the adapter, which the helper
+    /// binds by descriptor ([`READ_FD`] on).
+    fn view(
+        &self,
+        home: Option<&Path>,
+        reads: &[PathBuf],
+        bound: &[PathBuf],
+        workspace: &Path,
+    ) -> Vec<OsString> {
         let mut a: Vec<OsString> = Vec::new();
         let mut push = |items: &[&OsStr]| a.extend(items.iter().map(|s| s.to_os_string()));
         push(&[
@@ -164,6 +177,10 @@ impl Bwrap {
         for r in reads {
             push(&["--ro-bind".as_ref(), r.as_os_str(), r.as_os_str()]);
         }
+        for (i, r) in bound.iter().enumerate() {
+            let fd = OsString::from((READ_FD + i as RawFd).to_string());
+            push(&[RO_BIND_FD.as_ref(), fd.as_os_str(), r.as_os_str()]);
+        }
         // The data folder is empty in the view, also when it is inside a
         // system folder or a read path. Then the workspace comes back.
         push(&[
@@ -191,7 +208,7 @@ impl Bwrap {
     fn probe(&self) -> Result<(), String> {
         // The data folder in the place of a workspace: each mount of a real
         // view happens. The probe runs only `true`.
-        let mut args = self.view(None, &[], &self.data_dir);
+        let mut args = self.view(None, &[], &[], &self.data_dir);
         args.push("--".into());
         args.push("true".into());
         let mut child = std::process::Command::new(&self.bwrap)
@@ -226,25 +243,45 @@ impl Bwrap {
         }
     }
 
-    /// [`Isolation::spawn`] with the egress port of the session.
+    /// [`Isolation::spawn`] with the egress port of the session and the
+    /// helper end of the socket pair of its proxy.
     pub(crate) fn spawn_with(
         &self,
         session: i64,
         command: &mut std::process::Command,
-        egress_port: Option<u16>,
+        egress: Option<(u16, OwnedFd)>,
     ) -> io::Result<Child> {
+        // The read paths of the command: each one is opened and checked
+        // again here, just before bwrap starts, and bwrap binds the object
+        // of the descriptor, not a path (read paths spec, "Linux").
+        let opened = self.open_reads(command)?;
+        let local_port = local_port_of(command);
+        let read_fds: Vec<RawFd> = opened.iter().map(|(f, _)| f.as_raw_fd()).collect();
+        // Each folder of a read path goes into the view through a
+        // read-only overlay (issue 996). Made before the fork: the child
+        // only runs system calls on it.
+        let mut overlays = Overlays::plan(&opened)?;
+        let has_overlays = overlays.is_some();
         let (info_r, info_w) = pipe()?;
         let (block_r, block_w) = pipe()?;
         let (iw, br) = (info_w.as_raw_fd(), block_r.as_raw_fd());
         // SAFETY: the closure runs in the child between fork and exec. It
-        // calls only dup2, which is async-signal-safe. dup2 clears
-        // FD_CLOEXEC on the new descriptor, so bwrap gets fds 3 and 4.
+        // calls only fcntl and dup2, which are async-signal-safe, and reads
+        // `read_fds` with no allocation. dup2 clears FD_CLOEXEC on the new
+        // descriptor, so bwrap gets fds 3, 4 and the read paths.
         unsafe {
             command.pre_exec(move || {
-                // Move both out of the target range first, so one dup2
-                // cannot close the other.
-                let iw2 = libc::fcntl(iw, libc::F_DUPFD_CLOEXEC, 10);
-                let br2 = libc::fcntl(br, libc::F_DUPFD_CLOEXEC, 10);
+                // Move each source out of the target range first (3 to
+                // 4 + the read paths), so one dup2 cannot close another.
+                let iw2 = libc::fcntl(iw, libc::F_DUPFD_CLOEXEC, 64);
+                let br2 = libc::fcntl(br, libc::F_DUPFD_CLOEXEC, 64);
+                let mut high = [0 as RawFd; crate::read_paths::MAX_READS];
+                for (i, fd) in read_fds.iter().enumerate() {
+                    high[i] = libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 64);
+                    if high[i] < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
                 if iw2 < 0
                     || br2 < 0
                     || libc::dup2(iw2, INFO_FD) < 0
@@ -252,13 +289,37 @@ impl Bwrap {
                 {
                     return Err(io::Error::last_os_error());
                 }
+                // Each read path to its number.
+                for (i, fd) in high.iter().take(read_fds.len()).enumerate() {
+                    if libc::dup2(*fd, READ_FD + i as RawFd) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                if let Some(o) = &mut overlays {
+                    o.apply()?;
+                }
                 Ok(())
             });
         }
-        // The engine: the relay connects only while it runs.
+        // The engine: the relay of the local port connects only while it
+        // runs.
         // SAFETY: getppid has no memory effects.
         let engine = pidfd_open(unsafe { libc::getppid() })?;
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(|e| {
+            if has_overlays {
+                // Names the cause for the person (read paths spec, "Linux").
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "the read-only overlay of a read path folder failed ({e}): \
+                         the system must permit an overlay in a user namespace \
+                         for the iris program"
+                    ),
+                )
+            } else {
+                e
+            }
+        })?;
         drop(info_w);
         drop(block_r);
         let mut init: Option<OwnedFd> = None;
@@ -269,12 +330,15 @@ impl Bwrap {
                 identify(pid)?.ok_or_else(|| io::Error::other("the init of the sandbox exited"))?;
             init = Some(fd);
             self.write_record(session, &info)?;
-            if let Some(port) = egress_port {
-                // The proxy of the session takes only this address.
-                let from = crate::egress::session_peer(session)
-                    .ok_or_else(|| io::Error::other("the session has no session address"))?;
+            if let Some((port, channel)) = egress {
                 let listener = listen_in(info.pid, port, deadline)?;
-                start_relay(listener, port, from, engine)?;
+                start_handoff(listener, channel)?;
+            }
+            if let Some(port) = local_port {
+                // The server on the port is a program of the person, not
+                // an Iris proxy: the relay connects from 127.0.0.1.
+                let listener = listen_in(info.pid, port, deadline)?;
+                start_relay(listener, port, Ipv4Addr::LOCALHOST, engine)?;
             }
             // bwrap runs the program of the adapter after this byte.
             (&File::from(block_w)).write_all(b"x")
@@ -292,6 +356,45 @@ impl Bwrap {
             return Err(e);
         }
         Ok(child)
+    }
+
+    /// Opens and checks each read path of `command` (the pairs
+    /// `--ro-bind-fd <n> <path>`, in order from [`READ_FD`]). The helper
+    /// runs the checks of the launch again on the object that it binds,
+    /// with no link in the path: a change after the launch fails here.
+    fn open_reads(&self, command: &std::process::Command) -> io::Result<Vec<(OwnedFd, PathBuf)>> {
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let home = std::env::var_os("HOME");
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == RO_BIND_FD {
+                let (Some(n), Some(path)) = (args.get(i + 1), args.get(i + 2)) else {
+                    return Err(io::Error::other("a read path option has no path"));
+                };
+                if out.len() >= crate::read_paths::MAX_READS
+                    || n.to_str() != Some(&(READ_FD + out.len() as RawFd).to_string())
+                {
+                    return Err(io::Error::other("the read path options are out of order"));
+                }
+                let path = Path::new(path);
+                let c = crate::read_paths::check(path, &self.data_dir, home.as_deref())
+                    .map_err(io::Error::other)?;
+                if c.real != path {
+                    return Err(io::Error::other(format!(
+                        "the read path {} changed after the launch",
+                        path.display()
+                    )));
+                }
+                out.push((c.fd, c.real));
+                i += 3;
+            } else if args[i] == "--" {
+                break;
+            } else {
+                i += 1;
+            }
+        }
+        Ok(out)
     }
 
     fn write_record(&self, session: i64, info: &Info) -> io::Result<()> {
@@ -377,6 +480,8 @@ impl Isolation for Bwrap {
         _egress_port: Option<u16>,
         program: &Path,
         args: &[String],
+        bound: &[PathBuf],
+        local_port: Option<u16>,
     ) -> Command {
         // The real path of the program, so that a link in the home of the
         // person is not necessary.
@@ -392,7 +497,16 @@ impl Isolation for Bwrap {
         // resolve a link in a destination.
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-        let mut a = self.view(home.as_deref(), &reads, &workspace);
+        let mut a = self.view(home.as_deref(), &reads, bound, &workspace);
+        // The helper reads the local port from this pair, and the agent
+        // learns it too.
+        if let Some(port) = local_port {
+            a.extend([
+                "--setenv".into(),
+                crate::LOCAL_PORT_VAR.into(),
+                port.to_string().into(),
+            ]);
+        }
         if let Some(dir) = iris.as_deref().and_then(Path::parent) {
             let mut path = dir.as_os_str().to_os_string();
             if let Some(p) = std::env::var_os("PATH") {
@@ -441,8 +555,316 @@ impl Isolation for Bwrap {
         let port = std::env::var("HTTPS_PROXY")
             .ok()
             .and_then(|v| v.strip_prefix("http://127.0.0.1:")?.parse::<u16>().ok());
-        self.spawn_with(session, command, port)
+        let egress = match port {
+            Some(port) => Some((port, take_channel()?)),
+            None => None,
+        };
+        self.spawn_with(session, command, egress)
     }
+}
+
+/// Room for the `lowerdir` value of one overlay,
+/// `/proc/self/fd/<n>:/proc/self/fd/<n>`, and its zero byte.
+const LOWER_LEN: usize = 64;
+
+/// The overlays of the read path folders (issue 996). A program of the
+/// person can make a socket in a read path after the checks. The kernel
+/// finds a socket by the inode of its file, and an overlay shows each file
+/// with an inode of its own, so a `connect` through the overlay is refused
+/// (`ECONNREFUSED`). The child of the spawn makes a new user and mount
+/// namespace, puts an overlay on each folder there, and gives `bwrap` the
+/// overlay in the place of the folder. `bwrap` runs in that namespace.
+/// A read path that is a file needs no overlay: no socket can appear in it.
+struct Overlays {
+    /// The lines of `/proc/self/{setgroups,uid_map,gid_map}`.
+    maps: [(CString, CString); 3],
+    /// For each folder: its read path number, its path, and its device
+    /// and inode.
+    /// The outer folders come first.
+    dirs: Vec<(usize, CString, (u64, u64))>,
+    /// For each folder that another read path folder holds: the index in
+    /// `dirs` of the nearest such folder, and the path from it.
+    inner: Vec<Option<(usize, CString)>>,
+    /// Test only: after the identity checks of `apply` and before the
+    /// overlays, move the folder `.0` to `.1` and put a link to `.2` at `.0`.
+    #[cfg(test)]
+    swap: Option<(CString, CString, CString)>,
+    /// For each folder, written in the child with no allocation: its
+    /// descriptor in the new namespace, and the `lowerdir` value.
+    fds: Vec<RawFd>,
+    lower: Vec<[u8; LOWER_LEN]>,
+}
+
+impl Overlays {
+    fn plan(opened: &[(OwnedFd, PathBuf)]) -> io::Result<Option<Overlays>> {
+        let mut found = Vec::new();
+        for (i, (fd, path)) in opened.iter().enumerate() {
+            let m = File::from(fd.try_clone()?).metadata()?;
+            if m.is_dir() {
+                found.push((i, path, (m.dev(), m.ino())));
+            }
+        }
+        if found.is_empty() {
+            return Ok(None);
+        }
+        found.sort_by_key(|(_, path, _)| path.components().count());
+        let mut inner = Vec::new();
+        for (_, p, _) in &found {
+            // The outer folders come first, so the last one that holds `p`
+            // is the nearest.
+            let outer = found
+                .iter()
+                .enumerate()
+                .rfind(|(_, (_, o, _))| o != p && p.starts_with(o));
+            inner.push(match outer {
+                Some((o, (_, op, _))) => {
+                    let rel = p.strip_prefix(op).map_err(io::Error::other)?;
+                    Some((o, cstr(rel.as_os_str())?))
+                }
+                None => None,
+            });
+        }
+        let dirs = found
+            .into_iter()
+            .map(|(i, path, id)| Ok((i, cstr(path.as_os_str())?, id)))
+            .collect::<io::Result<Vec<_>>>()?;
+        let c = |s: &str| CString::new(s).map_err(io::Error::other);
+        // SAFETY: getuid and getgid have no memory effects.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        Ok(Some(Overlays {
+            maps: [
+                (c("/proc/self/setgroups")?, c("deny")?),
+                (c("/proc/self/uid_map")?, c(&format!("{uid} {uid} 1"))?),
+                (c("/proc/self/gid_map")?, c(&format!("{gid} {gid} 1"))?),
+            ],
+            fds: vec![-1; dirs.len()],
+            lower: vec![[0; LOWER_LEN]; dirs.len()],
+            dirs,
+            inner,
+            #[cfg(test)]
+            swap: None,
+        }))
+    }
+
+    /// Runs in the child of the spawn, after the read paths are at their
+    /// numbers. Only system calls, no allocation. Each new descriptor is
+    /// one that the kernel gives, so no fixed number can close another.
+    ///
+    /// # Safety
+    ///
+    /// Call only in the child of a fork, before exec.
+    unsafe fn apply(&mut self) -> io::Result<()> {
+        let err = || Err(io::Error::last_os_error());
+        if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+            return err();
+        }
+        for (path, line) in &self.maps {
+            let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+            if fd < 0 {
+                return err();
+            }
+            let n = line.as_bytes().len();
+            let w = libc::write(fd, line.as_ptr() as *const libc::c_void, n);
+            libc::close(fd);
+            if w != n as isize {
+                return err();
+            }
+        }
+        // No mount of this namespace goes back to the host.
+        if libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        ) != 0
+        {
+            return err();
+        }
+        // Each folder again, at its path in this namespace, before any
+        // overlay: an overlay on one folder changes the inodes of each
+        // folder in it. It must be the folder that the checks opened (a
+        // folder has one path: no hard link).
+        for (k, (_, path, id)) in self.dirs.iter().enumerate() {
+            let lo = libc::open(
+                path.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            );
+            if lo < 0 {
+                return err();
+            }
+            self.fds[k] = lo;
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(lo, &mut st) != 0 {
+                return err();
+            }
+            if (st.st_dev as u64, st.st_ino as u64) != *id {
+                return Err(io::Error::from_raw_os_error(libc::ESTALE));
+            }
+        }
+        #[cfg(test)]
+        if let Some((from, to, link)) = &self.swap {
+            if libc::rename(from.as_ptr(), to.as_ptr()) != 0
+                || libc::symlink(link.as_ptr(), from.as_ptr()) != 0
+            {
+                return err();
+            }
+        }
+        let empty = fs_mount(c"tmpfs", None)?;
+        for k in 0..self.dirs.len() {
+            let (lo, slot) = (self.fds[k], READ_FD + self.dirs[k].0 as RawFd);
+            let lower = lower_value(&mut self.lower[k], lo, empty);
+            let m = fs_mount(c"overlay", Some(lower))?;
+            // Put the overlay on the folder in this namespace, then give
+            // its root to bwrap in the place of the folder. The slot holds
+            // the checked folder, so the kernel never gives its number.
+            // bwrap 0.11 binds the path of the descriptor, not the object,
+            // and refuses a mount that is not at the path. So an inner
+            // folder goes on its path in the overlay of its outer folder,
+            // which is on the path now (the outer folders come first). The
+            // open stays in that overlay: no link, no other mount. A folder
+            // that took the path after the checks is in the view of the
+            // outer folder already, so the inner overlay shows no more.
+            let target = match &self.inner[k] {
+                Some((o, rel)) => {
+                    let mut how: libc::open_how = std::mem::zeroed();
+                    how.flags = (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64;
+                    how.resolve = libc::RESOLVE_BENEATH
+                        | libc::RESOLVE_NO_SYMLINKS
+                        | libc::RESOLVE_NO_MAGICLINKS
+                        | libc::RESOLVE_NO_XDEV;
+                    libc::syscall(
+                        libc::SYS_openat2,
+                        READ_FD + self.dirs[*o].0 as RawFd,
+                        rel.as_ptr(),
+                        &how as *const libc::open_how,
+                        std::mem::size_of::<libc::open_how>(),
+                    ) as RawFd
+                }
+                None => lo,
+            };
+            if target < 0 {
+                return err();
+            }
+            let moved = libc::syscall(
+                libc::SYS_move_mount,
+                m,
+                c"".as_ptr(),
+                target,
+                c"".as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            );
+            if target != lo {
+                libc::close(target);
+            }
+            if moved != 0 || libc::dup2(m, slot) < 0 {
+                return err();
+            }
+            libc::close(m);
+            libc::close(lo);
+        }
+        libc::close(empty);
+        Ok(())
+    }
+}
+
+/// Writes `/proc/self/fd/<lower>:/proc/self/fd/<empty>` and a zero byte
+/// into `buf`, with no allocation, and gives it.
+fn lower_value(buf: &mut [u8; LOWER_LEN], lower: RawFd, empty: RawFd) -> &std::ffi::CStr {
+    let mut n = 0;
+    let mut put = |b: &[u8]| {
+        buf[n..n + b.len()].copy_from_slice(b);
+        n += b.len();
+    };
+    for (k, fd) in [lower, empty].into_iter().enumerate() {
+        put(if k == 0 {
+            b"/proc/self/fd/"
+        } else {
+            b":/proc/self/fd/"
+        });
+        let (mut digits, mut d, mut v) = ([0u8; 10], 10, fd as u32);
+        loop {
+            d -= 1;
+            digits[d] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        put(&digits[d..]);
+    }
+    put(b"\0");
+    std::ffi::CStr::from_bytes_until_nul(buf).expect("the value has its zero byte")
+}
+
+const FSCONFIG_SET_STRING: libc::c_uint = 1;
+const FSCONFIG_CMD_CREATE: libc::c_uint = 6;
+const MOUNT_ATTR_RDONLY: libc::c_uint = 0x1;
+const MOUNT_ATTR_NOSUID: libc::c_uint = 0x2;
+const MOUNT_ATTR_NODEV: libc::c_uint = 0x4;
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
+
+/// A new detached read-only mount of the file system `kind`, with the
+/// option `lowerdir` if given (new mount API, Linux 5.2).
+///
+/// # Safety
+///
+/// Only system calls: safe in the child of a fork.
+unsafe fn fs_mount(kind: &std::ffi::CStr, lowerdir: Option<&std::ffi::CStr>) -> io::Result<RawFd> {
+    let fs = libc::syscall(libc::SYS_fsopen, kind.as_ptr(), 1 as libc::c_uint) as RawFd;
+    if fs < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let ok = lowerdir.is_none_or(|l| {
+        libc::syscall(
+            libc::SYS_fsconfig,
+            fs,
+            FSCONFIG_SET_STRING,
+            c"lowerdir".as_ptr(),
+            l.as_ptr(),
+            0,
+        ) == 0
+    }) && libc::syscall(
+        libc::SYS_fsconfig,
+        fs,
+        FSCONFIG_CMD_CREATE,
+        std::ptr::null::<libc::c_char>(),
+        std::ptr::null::<libc::c_void>(),
+        0,
+    ) == 0;
+    let m = if ok {
+        libc::syscall(
+            libc::SYS_fsmount,
+            fs,
+            1 as libc::c_uint,
+            MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+        ) as RawFd
+    } else {
+        -1
+    };
+    let e = io::Error::last_os_error();
+    libc::close(fs);
+    if m < 0 {
+        return Err(e);
+    }
+    Ok(m)
+}
+
+fn cstr(s: &OsStr) -> io::Result<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(s.as_bytes()).map_err(io::Error::other)
+}
+
+/// The local port of `command`: the value of the pair
+/// `--setenv IRIS_LOCAL_PORT <port>` that [`Isolation::command`] writes.
+fn local_port_of(command: &std::process::Command) -> Option<u16> {
+    // Only the options of bwrap: the arguments after `--` are the
+    // program's.
+    let args: Vec<&OsStr> = command.get_args().take_while(|a| *a != "--").collect();
+    args.windows(3)
+        .find(|w| w[0] == "--setenv" && w[1] == crate::LOCAL_PORT_VAR)
+        .and_then(|w| w[2].to_str()?.parse().ok())
 }
 
 fn find_bwrap(path: Option<&OsStr>) -> Option<PathBuf> {
@@ -479,10 +901,17 @@ fn boot_id() -> io::Result<String> {
 /// the ID was its own during the reads (an ID goes to another process only
 /// after the reap), so the values are its own.
 pub(crate) fn identify(pid: i32) -> io::Result<Option<(OwnedFd, Info)>> {
-    let gone = |e: io::Error| if exited(&e) { Ok(None) } else { Err(e) };
     let fd = match pidfd_open(pid) {
         Ok(fd) => fd,
-        Err(e) => return gone(e),
+        Err(e) if exited(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    // A read of `/proc` fails in more than one way when the process ends or
+    // is reaped during the read (`ns/pid` of a reaped process gives
+    // `EACCES`). The pidfd is the truth: an error after its exit is "ended".
+    let gone = |e: io::Error| match readable(fd.as_raw_fd(), Duration::ZERO) {
+        Ok(true) => Ok(None),
+        _ => Err(e),
     };
     let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(s) => s,
@@ -730,7 +1159,7 @@ unsafe fn join_and_bind(net: &CString, own_user: u64, port: u16, sock: RawFd) ->
 /// # Safety
 ///
 /// Only system calls on the stack: safe in the child of a fork.
-unsafe fn send_fd(sock: RawFd, fd: RawFd) -> i32 {
+pub(crate) unsafe fn send_fd(sock: RawFd, fd: RawFd) -> i32 {
     let mut byte = [0u8; 1];
     let mut iov = libc::iovec {
         iov_base: byte.as_mut_ptr() as *mut libc::c_void,
@@ -762,44 +1191,63 @@ fn recv_fd(sock: &std::os::unix::net::UnixStream, wait: Duration) -> io::Result<
             "no listener in the time limit",
         ));
     }
-    let mut byte = [0u8; 1];
-    let mut iov = libc::iovec {
-        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
-        iov_len: 1,
+    crate::egress::recv_fd(sock.as_raw_fd())?
+        .ok_or_else(|| io::Error::other("the child sent no listener"))
+}
+
+/// Takes the helper end of the socket pair of the egress proxy:
+/// [`EGRESS_FD`](crate::egress::EGRESS_FD), which the launch gives to the helper. It gets
+/// close-on-exec, so no program of the session gets it.
+fn take_channel() -> io::Result<OwnedFd> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat writes into `st`; fcntl has no memory effects.
+    let ok = unsafe {
+        libc::fstat(crate::egress::EGRESS_FD, &mut st) == 0
+            && st.st_mode & libc::S_IFMT == libc::S_IFSOCK
+            && libc::fcntl(crate::egress::EGRESS_FD, libc::F_SETFD, libc::FD_CLOEXEC) == 0
     };
-    let mut space = [0u64; 4];
-    // SAFETY: msg points to valid buffers that live for the call.
-    unsafe {
-        let mut msg: libc::msghdr = std::mem::zeroed();
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = space.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = std::mem::size_of_val(&space) as _;
-        let n = libc::recvmsg(sock.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC);
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let cmsg = libc::CMSG_FIRSTHDR(&msg);
-        if n != 1
-            || cmsg.is_null()
-            || (*cmsg).cmsg_level != libc::SOL_SOCKET
-            || (*cmsg).cmsg_type != libc::SCM_RIGHTS
-        {
-            return Err(io::Error::other("the child sent no listener"));
-        }
-        let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const RawFd);
-        Ok(OwnedFd::from_raw_fd(fd))
+    if !ok {
+        return Err(io::Error::other(
+            "the helper has no egress channel from the engine",
+        ));
     }
+    // SAFETY: the launch gave this descriptor to the helper, and nothing
+    // else in the helper owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(crate::egress::EGRESS_FD) })
+}
+
+/// Starts the handoff thread of the egress listener: it sends each
+/// connection to `listener` (in the sandbox) to the proxy of the session
+/// on `channel`, and keeps no copy. The relay makes no connection on the
+/// host. If the engine end of the pair closed (the engine ended), the send
+/// fails, the thread ends and the listener closes (issue 507).
+pub(crate) fn start_handoff(listener: TcpListener, channel: OwnedFd) -> io::Result<()> {
+    thread::Builder::new()
+        .name("iris-handoff".into())
+        .spawn(move || {
+            for inner in listener.incoming() {
+                let Ok(inner) = inner else {
+                    // For example no file descriptor: wait, do not spin.
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                };
+                // SAFETY: both descriptors are open for the call.
+                if unsafe { send_fd(channel.as_raw_fd(), inner.as_raw_fd()) } != 0 {
+                    return; // the listener closes
+                }
+            }
+        })?;
+    Ok(())
 }
 
 /// Starts the relay thread: each connection to `listener` (in the sandbox)
-/// goes to `127.0.0.1:<port>` of the host from the session address `from`,
+/// goes to `127.0.0.1:<port>` of the host from the address `from`,
 /// at most [`RELAY_MAX`] at a time, while the process of `engine` runs. The
 /// threads end with the helper.
 pub(crate) fn start_relay(
     listener: TcpListener,
     port: u16,
-    from: std::net::Ipv4Addr,
+    from: Ipv4Addr,
     engine: OwnedFd,
 ) -> io::Result<()> {
     let open = Arc::new(AtomicUsize::new(0));
@@ -812,9 +1260,7 @@ pub(crate) fn start_relay(
                     thread::sleep(Duration::from_millis(50));
                     continue;
                 };
-                // A second guard: the proxy of another session refuses the
-                // session address in all cases (an engine crash frees the
-                // port). After the end of the engine, make no new connection.
+                // After the end of the engine, make no new connection.
                 if readable(engine.as_raw_fd(), Duration::ZERO).unwrap_or(true) {
                     return; // the listener closes
                 }

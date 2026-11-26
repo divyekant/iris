@@ -17,6 +17,18 @@ use crate::Model;
 
 /// The run lock file in the data folder.
 pub const LOCK_FILE: &str = "understand.lock";
+
+/// The file lock of a caller that waits for the run lock ([`lock_wait`]).
+/// While a caller holds it, a run stops before its next message
+/// ([`Stop::Yield`]), so a draft or a question of the person does not wait
+/// for a long run (#279).
+pub const WANT_FILE: &str = "understand.want";
+
+/// The longest wait of [`lock_wait`]. A holder of the run lock stops the
+/// wait for the answer of its model call when a caller waits
+/// (`Budgeted::yielding`, issue #1126), so the wait does not hold for the
+/// time limit of a call.
+pub const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Messages between two sender refreshes (step 5 of the runner).
 pub const BATCH: usize = 50;
 /// The age limit of the first group of threads.
@@ -32,14 +44,34 @@ const PAGE: i64 = 500;
 /// The sort value of a message with no `internal_date`: the oldest.
 const NO_DATE: i64 = -9_223_372_036_854_775_807;
 
-/// The pending conditions other than the thread rule, on message `m`.
+/// The SQL condition "the `From` sender of message `m` is a stranger that
+/// the person declined at the gate". Such mail makes no model call (decision
+/// D29), so no model wait holds it.
+/// The refusal mark condition in [`BASE`], which the estimate leaves out.
+const REFUSAL_MARK: &str = "m.waits_model = 0\n           AND ";
+
+macro_rules! declined {
+    () => {
+        "EXISTS (SELECT 1 FROM header dh JOIN sender ds ON ds.address = dh.from_addr
+           WHERE dh.message_id = m.id AND ds.declined_at IS NOT NULL
+             AND coalesce(ds.kind, 'stranger') = 'stranger')"
+    };
+}
+
+/// The pending conditions other than the thread rule, on message `m`. The
+/// model wait (a refusal mark, the try limit, a retry time) holds only mail
+/// that can call the model: not the mail of a declined stranger.
 const BASE: &str = concat!(
     "m.gone_at IS NULL AND m.understood_at IS NULL
-  AND m.content_sha256 IS NOT NULL AND m.waits_model = 0
+  AND m.content_sha256 IS NOT NULL
   AND NOT ",
     iris_store::removed_account!("m"),
     "
-  AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)
+  AND (",
+    declined!(),
+    "
+       OR (m.waits_model = 0
+           AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)))
   AND NOT ",
     iris_store::draft_or_copy!("m"),
     "
@@ -105,13 +137,75 @@ impl From<rusqlite::Error> for Error {
 /// releases it when the process ends, also after a crash.
 pub struct RunLock(#[allow(dead_code)] iris_store::FileLock);
 
-/// Takes the run lock, or gives [`Error::Busy`].
+/// Takes the run lock, or gives [`Error::Busy`]. While a caller of
+/// [`lock_wait`] waits, it gives [`Error::Busy`] too: the waiter gets the
+/// lock first (#279). A shared lock on [`WANT_FILE`] stays held through
+/// the take, so a waiter that comes during the take waits for its end and
+/// then finds the run lock held: the two never take the lock in an order
+/// that the waiter cannot see.
 pub fn lock(store: &Store) -> Result<RunLock, Error> {
+    let want = store.dir().join(WANT_FILE);
+    // The file exists after this, so the probe below always gives a lock.
+    // No lock here: an exclusive try would look like a waiter to a run.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&want)
+        .map_err(|e| Error::Store(e.into()))?;
+    match iris_store::FileLock::probe(&want) {
+        Ok(iris_store::Probe::Free(shared)) => {
+            let r = take(store);
+            drop(shared);
+            r
+        }
+        Ok(_) => Err(Error::Busy),
+        Err(e) => Err(Error::Store(e.into())),
+    }
+}
+
+fn take(store: &Store) -> Result<RunLock, Error> {
     match iris_store::FileLock::try_take(&store.dir().join(LOCK_FILE)) {
         Ok(Some(l)) => Ok(RunLock(l)),
         Ok(None) => Err(Error::Busy),
         Err(e) => Err(Error::Store(e.into())),
     }
+}
+
+/// Takes the run lock. If a run holds it, asks the run to stop (the lock
+/// on [`WANT_FILE`]) and waits up to `max`, then gives [`Error::Busy`].
+/// Waiters take the run lock in turn: only the holder of the want lock
+/// tries the run lock, and it releases the want lock when it returns. The
+/// OS releases the want lock of a waiter that crashes.
+pub fn lock_wait(store: &Store, max: std::time::Duration) -> Result<RunLock, Error> {
+    let start = std::time::Instant::now();
+    let mut want = None;
+    loop {
+        if want.is_none() {
+            want = iris_store::FileLock::try_take(&store.dir().join(WANT_FILE))
+                .map_err(|e| Error::Store(e.into()))?;
+        }
+        if want.is_some() {
+            match take(store) {
+                Err(Error::Busy) => {}
+                r => return r,
+            }
+        }
+        if start.elapsed() >= max {
+            return Err(Error::Busy);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// True while a caller of [`lock_wait`] waits. Each holder of the run lock
+/// that works in a loop (a run, the nudge and summary steps of the engine)
+/// stops before its next unit of work. An error of the probe reads as no
+/// waiter: the holder goes on.
+pub fn wanted(store: &Store) -> bool {
+    matches!(
+        iris_store::FileLock::probe(&store.dir().join(WANT_FILE)),
+        Ok(iris_store::Probe::Held)
+    )
 }
 
 /// The limits of one run.
@@ -163,6 +257,9 @@ pub enum Stop {
     Model,
     /// A call to a priced model with an unknown result or unknown usage.
     Unknown,
+    /// A draft or a question of the person waits for the run lock
+    /// ([`lock_wait`]). The next run goes on with the mail that is left.
+    Yield,
     Error,
 }
 
@@ -176,6 +273,7 @@ impl Stop {
             Stop::Messages => "messages",
             Stop::Model => "model",
             Stop::Unknown => "unknown",
+            Stop::Yield => "yield",
             Stop::Error => "error",
         }
     }
@@ -322,11 +420,15 @@ fn run_messages(
     limits: &Limits,
     now_ms: i64,
 ) -> Result<Stop, Error> {
+    // Issue 1049: the context of the understood messages from before
+    // migration 69, before a step below changes one.
+    store::record_unknown_contexts(store)?;
     // Step 1: the link check of each new or old content (migration 20),
     // with no model, so a model error cannot hold it back. Each message
     // that it understands counts toward the run limit.
-    let done =
-        store::recheck_links(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
+    let links =
+        store::recheck_links_scan(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
+    let done = links.count;
     store.write(|tx| {
         tx.execute(
             "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
@@ -334,15 +436,27 @@ fn run_messages(
         )?;
         Ok(())
     })?;
+    // Each scan stops for a waiter and leaves its rows (#279).
+    if links.yielded {
+        return Ok(Stop::Yield);
+    }
     // Step 2 before step 3: the refresh needs no model, so a model that
     // cannot be made does not keep stale items of a changed sender. Its
     // resets come before the main pass, which sees them.
     refresh_senders(store, now_ms)?;
+    // The fixed check after a kind or name change (decision D31), with no
+    // model, so a model that cannot be made does not hold it back either.
+    let left = limits.max_messages.map(|n| n.saturating_sub(done));
+    let fixed = fixed_check(store, now_ms, run, left)?;
+    if fixed.yielded {
+        return Ok(Stop::Yield);
+    }
+    let done = done + fixed.count;
     let inner: Box<dyn Model> = match row {
         Some(r) if calls => connect(r).map_err(Error::Connect)?,
         _ => Box::new(NoModel),
     };
-    let model = Budgeted::new(inner.as_ref(), store, run, row);
+    let model = Budgeted::new(inner.as_ref(), store, run, row).yielding();
     let mut r = Runner {
         store,
         model: &model,
@@ -357,10 +471,11 @@ fn run_messages(
         done,
         since_refresh: 0,
         rerun: false,
+        yielded: false,
     };
-    // Main pass, then one more pass if a sender rerun reset mail. Reruns of
-    // the second pass wait for the next run, so a message gets at most 2
-    // calls of `store::understand` in one run.
+    // Main pass, then one more pass if a sender rerun or a fixed check
+    // reset mail. Resets of the second pass wait for the next run, so a
+    // message gets at most 2 calls of `store::understand` in one run.
     for pass in 0..2 {
         if pass == 1 && !r.rerun {
             break;
@@ -379,6 +494,13 @@ fn run_messages(
                     return Ok(stop);
                 }
             }
+        }
+        // The kind and name changes of this pass (the sender step of each
+        // message). Mail that the check of the main pass resets gets the
+        // second pass.
+        r.fixed()?;
+        if r.yielded {
+            return Ok(Stop::Yield);
         }
     }
     let s = model.state();
@@ -402,6 +524,28 @@ fn refresh_senders(store: &Store, now_ms: i64) -> Result<u64, Error> {
     Ok(reset)
 }
 
+/// The fixed check of the queue `fixed_due` (decision D31), inside the
+/// message limit `left`. Counts the messages that it understood again in
+/// the run row, and gives their count.
+fn fixed_check(
+    store: &Store,
+    now_ms: i64,
+    run: i64,
+    left: Option<u64>,
+) -> Result<store::Scan, Error> {
+    let scan = store::recheck_fixed_scan(store, now_ms, left).map_err(Error::Understand)?;
+    if scan.count > 0 {
+        store.write(|tx| {
+            tx.execute(
+                "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
+                params![run, i64_of(scan.count)],
+            )?;
+            Ok(())
+        })?;
+    }
+    Ok(scan)
+}
+
 struct Runner<'a> {
     store: &'a Store,
     model: &'a Budgeted<'a>,
@@ -414,6 +558,8 @@ struct Runner<'a> {
     since_refresh: usize,
     /// A sender rerun reset mail in this run: one more pass.
     rerun: bool,
+    /// A fixed check of this run stopped for a waiter (#279).
+    yielded: bool,
 }
 
 impl Runner<'_> {
@@ -422,6 +568,21 @@ impl Runner<'_> {
         let reset = refresh_senders(self.store, self.now_ms)?;
         self.since_refresh = 0;
         self.rerun |= reset > 0;
+        self.fixed()
+    }
+
+    /// The fixed check of the queue `fixed_due` (decision D31). Each message
+    /// that it understands again counts toward the run limit. Mail that it
+    /// makes pending gets one more pass.
+    fn fixed(&mut self) -> Result<(), Error> {
+        let left = self
+            .limits
+            .max_messages
+            .map(|n| n.saturating_sub(self.done));
+        let scan = fixed_check(self.store, self.now_ms, self.run, left)?;
+        self.done += scan.count;
+        self.rerun |= scan.count > 0;
+        self.yielded |= scan.yielded;
         Ok(())
     }
 
@@ -439,6 +600,9 @@ impl Runner<'_> {
             };
             if self.limits.max_messages.is_some_and(|n| self.done >= n) {
                 return Ok(Some(Stop::Messages));
+            }
+            if self.yielded || wanted(self.store) {
+                return Ok(Some(Stop::Yield));
             }
             if let Some(max) = self.limits.max_cost_micro_usd {
                 let spent = self.store.read(|c| Ok(run_cost(c, self.run)?))?;
@@ -482,6 +646,11 @@ impl Runner<'_> {
             if s.store_failed {
                 return Ok(Some(Stop::Error));
             }
+            // A call stopped for a waiter (issue #1126): no model error, so
+            // no model wait. The message has no added try and no mark.
+            if s.cancelled {
+                return Ok(Some(Stop::Yield));
+            }
             if s.key_refused || s.server_failed {
                 return Ok(Some(Stop::Model));
             }
@@ -518,16 +687,18 @@ fn threads_after(
     cursor: (i64, i64, i64),
     now_ms: i64,
 ) -> rusqlite::Result<Vec<((i64, i64, i64), i64)>> {
-    let mut st = c.prepare_cached(
+    let mut st = c.prepare_cached(concat!(
         "SELECT grp, newest, thread_id FROM (
            SELECT m.thread_id, coalesce(max(m.internal_date), :no_date) AS newest,
                   CASE WHEN max(m.internal_date) >= :recent THEN 0 ELSE 1 END AS grp
            FROM message m WHERE m.gone_at IS NULL GROUP BY m.thread_id
            HAVING max(m.understood_at IS NULL AND m.content_sha256 IS NOT NULL
-                      AND m.waits_model = 0) = 1)
+                      AND (m.waits_model = 0 OR ",
+        declined!(),
+        ")) = 1)
          WHERE (grp, -newest, -thread_id) > (:g, -:n, -:t)
-         ORDER BY grp, newest DESC, thread_id DESC LIMIT :page",
-    )?;
+         ORDER BY grp, newest DESC, thread_id DESC LIMIT :page"
+    ))?;
     let rows = st.query_map(
         rusqlite::named_params! {
             ":no_date": NO_DATE,
@@ -546,8 +717,9 @@ fn threads_after(
 }
 
 /// The oldest pending message of `thread` that is not in `skip`. A message
-/// that the thread rule holds still runs when it is hostile mail: `SPAM`,
-/// or a `From` sender of the kind `hostile`. Sync saves no header row, so
+/// that the thread rule holds still runs when it is hostile mail (`SPAM`,
+/// or a `From` sender of the kind `hostile`), or when its `From` sender is
+/// a declined stranger. Sync saves no header row, so
 /// the `From` address of such a message comes from the head of its content
 /// file (fixed rules, no model).
 fn next_pending(
@@ -585,12 +757,17 @@ fn next_pending(
                 .and_then(|path| from_of(&path)),
         };
         if let Some(from) = from {
-            let kind: Option<String> = c
-                .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
-                .query_row([&from], |r| r.get(0))
-                .optional()?
-                .flatten();
-            if kind.as_deref() == Some("hostile") {
+            // Hostile mail gets its marks with no model call. The mail of a
+            // declined stranger gets no model call (decision D29). So
+            // neither waits for an older message.
+            let free: bool = c
+                .prepare_cached(
+                    "SELECT EXISTS (SELECT 1 FROM sender WHERE address = ?1
+                       AND (kind = 'hostile' OR (declined_at IS NOT NULL
+                            AND coalesce(kind, 'stranger') = 'stranger')))",
+                )?
+                .query_row([&from], |r| r.get(0))?;
+            if free {
                 return Ok(Some(id));
             }
         }
@@ -752,12 +929,15 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
         "SELECT (SELECT max(t.internal_date) FROM message t
                  WHERE t.thread_id = m.thread_id AND t.gone_at IS NULL) >= :recent,
                 EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                        WHERE ml.message_id = m.id AND l.provider_id = 'SPAM'),
+                        WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
+                  OR {},
                 min(coalesce(m.size, :max_data), :max_data)
          FROM message m WHERE {}",
+        declined!(),
         // Mail that waits for a model is the work that an approval pays for.
-        BASE.replace(" AND m.waits_model = 0", "")
+        BASE.replace(REFUSAL_MARK, "")
     );
+    debug_assert!(BASE.contains(REFUSAL_MARK));
     let mut st = tx.prepare(&sql)?;
     let mut rows = st.query(rusqlite::named_params! {
         ":now": now_ms,
@@ -774,6 +954,7 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
         let (recent, spam, size): (Option<bool>, bool, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
         e.messages += 1;
         e.recent += u64::from(recent == Some(true));
+        // `SPAM` and the mail of a declined stranger make no call.
         if spam {
             continue;
         }
@@ -804,6 +985,8 @@ mod tests {
             "CREATE TABLE message(id INTEGER PRIMARY KEY, thread_id INTEGER,
                internal_date INTEGER, gone_at INTEGER, understood_at INTEGER,
                content_sha256 BLOB, waits_model INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE header(message_id INTEGER, from_addr TEXT);
+             CREATE TABLE sender(address TEXT, kind TEXT, declined_at INTEGER);
              INSERT INTO message VALUES (1, 10, 5, NULL, NULL, x'00', 1);
              INSERT INTO message VALUES (2, 10, 6, NULL, 7, x'00', 0);
              INSERT INTO message VALUES (3, 20, 5, NULL, NULL, x'00', 1);

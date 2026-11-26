@@ -514,3 +514,40 @@ async fn a_policy_view_that_waits_for_the_lock_stops_no_other_request() {
         release.join().unwrap();
     }
 }
+
+/// #816: a writer commits a new policy while the view waits for the backup
+/// lock (the file is missing in the rename gap). The view must show the
+/// rules and the version of the same active policy that its file state
+/// compares to.
+#[tokio::test]
+async fn the_view_and_its_file_state_read_one_active_policy() {
+    let d = open("race");
+    let (held, wait) = std::sync::mpsc::channel();
+    let writer = {
+        let (s, dir) = (d.1.clone(), d.0.clone());
+        std::thread::spawn(move || {
+            let lock = s.backup_lock().unwrap();
+            held.send(()).unwrap();
+            // The view reads the old active policy, then waits for the lock.
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::fs::write(dir.join(iris_policy::FILE), FILE).unwrap();
+            let l = iris_policy::load(&dir).unwrap().unwrap();
+            s.write(|tx| {
+                tx.execute(
+                    "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, ?2, 0)",
+                    [&l.text, &l.sha256],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            drop(lock);
+        })
+    };
+    wait.recv().unwrap();
+    let v = d.get().await;
+    writer.join().unwrap();
+    assert_eq!(v["file"], json!({ "state": "same" }), "{v}");
+    assert_eq!(v["version"], json!(1), "{v}");
+    assert_eq!(v["mode"], json!("apply"), "{v}");
+    assert_eq!(v["rules"].as_array().map(Vec::len), Some(2), "{v}");
+}

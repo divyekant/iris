@@ -190,8 +190,23 @@ fn comment_name(entry: &str, addr: &str) -> Option<String> {
     let at = low.find(addr)? + addr.len();
     let rest = entry.get(at..)?.trim_start();
     let inner = rest.strip_prefix('(')?;
-    let end = inner.find(')')?;
-    Some(inner[..end].trim().to_string()).filter(|n| !n.is_empty())
+    // A quoted pair (`\)`) is text and a nested comment stays in the name
+    // (RFC 5322 section 3.2.2). The name ends at the `)` of depth 0.
+    let (mut name, mut depth, mut escaped) = (String::new(), 0u32, false);
+    for c in inner.chars() {
+        match c {
+            _ if std::mem::take(&mut escaped) => name.push(c),
+            '\\' => escaped = true,
+            ')' if depth == 0 => {
+                let name = name.trim().to_string();
+                return (!name.is_empty()).then_some(name);
+            }
+            '(' => (depth += 1, name.push(c)).1,
+            ')' => (depth -= 1, name.push(c)).1,
+            _ => name.push(c),
+        }
+    }
+    None
 }
 
 /// Split an address list at the commas that are outside quotes and angle
@@ -206,14 +221,36 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
 /// with each (lowercase address, display name).
 pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
     let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
-    let mut escaped = false;
-    let mut push = |entry: &str| {
-        let s = strip_comments(entry);
-        let s = s.trim();
-        let (addr, name) = match (s.rfind('<'), s.rfind('>')) {
-            (Some(a), Some(b)) if a < b => (&s[a + 1..b], s[..a].trim()),
-            _ => (s, ""),
+    let (mut escaped, mut literal, mut prev) = (false, false, '\0');
+    // The last `]` of the list, found once, so the literal check stays linear.
+    let close = v.rfind(']');
+    // The `<` and `>` of the open entry that the scan found outside quotes
+    // and comments. A `<` or `>` in a quoted local part is text (issue #980).
+    let (mut open, mut shut): (Option<usize>, Option<usize>) = (None, None);
+    // True from a `<` up to the first sign outside white space and comments.
+    let mut fresh = false;
+    let mut push = |entry: std::ops::Range<usize>,
+                    open: Option<usize>,
+                    shut: Option<usize>,
+                    open_quote: bool| {
+        let (addr, name) = match (open, shut) {
+            (Some(a), Some(b)) if entry.start <= a && a < b && b < entry.end => (
+                strip_comments(&v[a + 1..b]),
+                strip_comments(&v[entry.start..a]),
+            ),
+            // An open quote at the end of the list (`"Ana <a@example.org>`):
+            // the last `<>` of the entry, as a mail client reads it.
+            _ if open_quote => {
+                let s = strip_comments(&v[entry.clone()]);
+                match (s.rfind('<'), s.rfind('>')) {
+                    (Some(a), Some(b)) if a < b => (s[a + 1..b].to_string(), s[..a].to_string()),
+                    _ => (s, String::new()),
+                }
+            }
+            _ => (strip_comments(&v[entry.clone()]), String::new()),
         };
+        let entry = &v[entry];
+        let name = name.trim();
         let addr = addr.trim().to_ascii_lowercase();
         if addr.contains('@') {
             // `a@b.example (Ana Lee)`: the comment is the display name.
@@ -229,29 +266,76 @@ pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
         }
     };
     for (i, c) in v.char_indices() {
+        let after_at = std::mem::replace(&mut prev, c) == '@';
+        let at_start = fresh;
+        // White space and comments (CFWS) can come before the local part.
+        fresh = fresh && (c.is_whitespace() || c == '(' || c == ')' || comment > 0);
         // The sign after `\\` in a quoted string or a comment is text.
         if std::mem::take(&mut escaped) {
             continue;
         }
         match c {
+            // A domain literal (`user@[IPv6:2001:db8::1]`, RFC 5322 section
+            // 3.4.1) holds `:` that is not group syntax. It opens only right
+            // after `@`, so a `[` in a display name cannot hide the rest of
+            // the list, and an open `[` with no `]` after it is text.
+            '[' if after_at && !quoted && comment == 0 && close.is_some_and(|c| c > i) => {
+                literal = true
+            }
+            ']' if literal => literal = false,
+            _ if literal => {}
             '\\' if quoted || comment > 0 => escaped = true,
             '(' if !quoted => comment += 1,
             ')' if !quoted => comment = comment.saturating_sub(1),
             _ if comment > 0 => {}
-            '"' if !angle => quoted = !quoted,
-            '<' if !quoted => angle = true,
-            '>' if !quoted => angle = false,
+            '"' if quoted => quoted = false,
+            '"' if !angle => quoted = true,
+            // In `<>`, a quote opens a quoted local part only at the start of
+            // the address and only if its closing quote and an `@` follow,
+            // so an open quote cannot hide the rest of the list.
+            '"' if at_start && quoted_local_part(&v[i + 1..]) => quoted = true,
+            '<' if !quoted => {
+                angle = true;
+                fresh = true;
+                open = Some(i);
+            }
+            '>' if !quoted => {
+                angle = false;
+                shut = Some(i);
+            }
             // Group syntax (RFC 5322 section 3.4): the group name ends at
             // `:` and the group ends at `;`.
             ':' if !quoted && !angle => start = i + 1,
             ',' | ';' if !quoted && !angle => {
-                push(&v[start..i]);
+                push(start..i, open.take(), shut.take(), false);
                 start = i + 1;
             }
             _ => {}
         }
     }
-    push(&v[start..]);
+    push(start..v.len(), open, shut, quoted);
+}
+
+/// The most bytes of a quoted local part that [`each_address`] reads in
+/// `<>`. RFC 5321 allows 64 bytes in a local part, so the bound keeps the
+/// scan linear and still reads each valid quoted local part.
+const QUOTED_LOCAL: usize = 256;
+
+/// True if `rest`, the text after the `"` that starts a local part, has the
+/// closing `"` right before an `@`, inside [`QUOTED_LOCAL`] bytes. A quoted
+/// pair (`\"`) is text.
+fn quoted_local_part(rest: &str) -> bool {
+    let mut escaped = false;
+    let bytes = rest.as_bytes();
+    for (i, &b) in bytes.iter().enumerate().take(QUOTED_LOCAL) {
+        match b {
+            _ if std::mem::take(&mut escaped) => {}
+            b'\\' => escaped = true,
+            b'"' => return bytes.get(i + 1) == Some(&b'@'),
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]

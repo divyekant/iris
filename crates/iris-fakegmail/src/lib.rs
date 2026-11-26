@@ -8,7 +8,7 @@
 //! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, and `q`
 //! only as `rfc822msgid:<id>`), `users.messages.get` (`raw`, `metadata`,
 //! `minimal`), `users.messages.send`, `users.drafts.create`,
-//! `.get` (`raw`), `.list` (`q` as above) and `.send`,
+//! `.get` (`raw`), `.list` (`q` as above), `.update` and `.send`,
 //! `users.messages.batchModify`, `users.messages.trash`,
 //! `users.messages.untrash`, `users.labels.create` and
 //! `users.history.list` (paging, `historyTypes`). The JSON has the shape
@@ -147,6 +147,8 @@ struct Store {
     /// A draft edit that the next `drafts.get` of the draft starts, after
     /// its answer: the person edits the draft between a read and a send.
     edit_after_get: Option<(String, Vec<u8>)>,
+    /// True: the sent copy of `drafts.send` has no `Bcc` header.
+    drop_sent_bcc: bool,
     /// Each request: method, path and query.
     log: Vec<String>,
     /// The drafts: (draft id, message index). A sent or deleted draft
@@ -218,6 +220,7 @@ impl Store {
             before_matching: None,
             page_limit: usize::MAX,
             edit_after_get: None,
+            drop_sent_bcc: false,
             log: Vec::new(),
             drafts: Vec::new(),
             next_draft: 1,
@@ -297,13 +300,19 @@ impl Store {
         let Some(pos) = self.drafts.iter().position(|(d, _)| d == id) else {
             return false;
         };
+        let thread = self.msgs[self.drafts[pos].1].thread.clone();
+        self.put_draft(pos, raw, Some(thread));
+        true
+    }
+
+    /// The draft at `pos` gets a new message `raw` in `thread`, or in a
+    /// new thread for `None`, as a create puts it.
+    fn put_draft(&mut self, pos: usize, raw: Vec<u8>, thread: Option<String>) {
         let old = self.drafts[pos].1;
-        let thread = self.msgs[old].thread.clone();
         self.msgs[old].deleted = true;
         self.record(old, Kind::Deleted, Vec::new());
-        let i = self.add(raw, Some(thread), BTreeSet::from(["DRAFT".to_string()]));
+        let i = self.add(raw, thread, BTreeSet::from(["DRAFT".to_string()]));
         self.drafts[pos].1 = i;
-        true
     }
 
     fn draft_json(&self, id: &str, i: usize) -> Value {
@@ -561,6 +570,12 @@ impl FakeGmail {
         self.store.lock().unwrap().edit_after_get = Some((id.to_string(), raw.to_vec()));
     }
 
+    /// The sent copy of each later `drafts.send` has no `Bcc` header, as
+    /// a provider that drops it from the copy of the sender.
+    pub fn drop_sent_bcc(&self) {
+        self.store.lock().unwrap().drop_sent_bcc = true;
+    }
+
     /// Delete a draft, as the person does in Gmail. Returns false if there
     /// is no such draft.
     pub fn delete_draft(&self, id: &str) -> bool {
@@ -572,6 +587,19 @@ impl FakeGmail {
         s.msgs[i].deleted = true;
         s.record(i, Kind::Deleted, Vec::new());
         true
+    }
+
+    /// Give the draft `id` the new ID `new`, as Gmail can do after an
+    /// update. Returns false if there is no such draft.
+    pub fn rename_draft(&self, id: &str, new: &str) -> bool {
+        let mut s = self.store.lock().unwrap();
+        match s.drafts.iter_mut().find(|(d, _)| d == id) {
+            Some(d) => {
+                d.0 = new.to_string();
+                true
+            }
+            None => false,
+        }
     }
 
     /// The IDs of the drafts now.
@@ -614,7 +642,10 @@ fn router(store: Shared) -> Router {
             get(list_drafts).post(create_draft),
         )
         .route("/gmail/v1/users/{user}/drafts/send", post(send_draft))
-        .route("/gmail/v1/users/{user}/drafts/{id}", get(get_draft))
+        .route(
+            "/gmail/v1/users/{user}/drafts/{id}",
+            get(get_draft).put(update_draft),
+        )
         .layer(middleware::from_fn_with_state(store.clone(), log_and_fail))
         .with_state(store)
 }
@@ -1264,6 +1295,54 @@ async fn create_draft(
     Json(s.draft_json(&id, i)).into_response()
 }
 
+/// `PUT drafts/{id}` (`drafts.update`): the draft keeps its ID and gets a
+/// new message, in the Gmail form of a new draft, in the thread of
+/// `message.threadId` (a new thread with no `threadId`). The body must name the
+/// same draft ID, as Gmail asks.
+async fn update_draft(
+    State(s): State<Shared>,
+    Path((user, id)): Path<(String, String)>,
+    h: HeaderMap,
+    body: Result<Json<UpdateBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    if body.id.as_deref().is_some_and(|b| b != id) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The draft ID of the body is not the ID of the path.",
+        );
+    }
+    let thread = body.message.thread_id.clone();
+    let raw = match draft_raw(&DraftBody {
+        message: body.message,
+    }) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let mut s = s.lock().unwrap();
+    let Some(pos) = s.drafts.iter().position(|(d, _)| *d == id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    let n = s.next_draft;
+    s.next_draft += 1;
+    // As a create: the new message is in the thread of `threadId`, and in
+    // a new thread with no `threadId`. So a reply update needs the field.
+    s.put_draft(pos, gmail_draft_form(&raw, n), thread);
+    let i = s.draft(&id).expect("replaced");
+    Json(s.draft_json(&id, i)).into_response()
+}
+
+#[derive(Deserialize)]
+struct UpdateBody {
+    id: Option<String>,
+    message: DraftMessage,
+}
+
 /// The message of a new draft as real Gmail keeps it (send check of issue
 /// #302): Gmail sets its own `Message-ID`, sets a new `Date` and adds a
 /// `Received` header in front. The rest of the bytes stay.
@@ -1385,6 +1464,28 @@ struct SendDraftBody {
 /// message with the label `SENT` in the thread of the draft. A `message`
 /// in the request replaces the text of the draft first, and its `threadId`
 /// (or none: a new thread) is the thread of the sent message.
+/// `raw` with no `Bcc` header field (and no folded line of it) in the
+/// header block.
+fn without_bcc(raw: &[u8]) -> Vec<u8> {
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(raw.len(), |p| p + 2);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut skip = false;
+    for line in raw[..end].split_inclusive(|b| *b == b'\n') {
+        let folded = line.first().is_some_and(|b| *b == b' ' || *b == b'\t');
+        if !folded {
+            skip = line.len() >= 4 && line[..4].eq_ignore_ascii_case(b"bcc:");
+        }
+        if !skip {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(&raw[end..]);
+    out
+}
+
 async fn send_draft(
     State(s): State<Shared>,
     Path(user): Path<String>,
@@ -1418,7 +1519,10 @@ async fn send_draft(
         Some(m) => m.thread_id.clone(),
         None => Some(s.msgs[old].thread.clone()),
     };
-    let raw = s.raw(old);
+    let mut raw = s.raw(old);
+    if s.drop_sent_bcc {
+        raw = without_bcc(&raw);
+    }
     s.msgs[old].deleted = true;
     s.record(old, Kind::Deleted, Vec::new());
     let i = s.add(raw, thread, BTreeSet::from(["SENT".to_string()]));

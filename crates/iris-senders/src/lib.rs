@@ -301,12 +301,14 @@ fn decide_message(
                         now_ms,
                     )?;
                     // A row that a person set keeps its kind: only a known
-                    // sender adds its domain.
-                    let kind: Option<String> =
-                        conn.query_row("SELECT kind FROM sender WHERE address = ?1", [to], |r| {
-                            r.get(0)
-                        })?;
-                    if matches!(kind.as_deref(), Some("person" | "service")) {
+                    // sender adds its domain, as in `known_domains`.
+                    let known_row: bool = conn.query_row(
+                        "SELECT kind IN ('person', 'service') AND basis IS NOT ?2
+                           FROM sender WHERE address = ?1",
+                        params![to, gate::TRUSTED],
+                        |r| r.get(0),
+                    )?;
+                    if known_row {
                         known.push(domain_of(to).to_string());
                     }
                 }
@@ -543,12 +545,10 @@ fn upsert(
     basis: &str,
     now_ms: i64,
 ) -> rusqlite::Result<i64> {
-    let before: Option<(Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT kind, name FROM sender WHERE address = ?1",
-            [addr],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    let before: Option<Option<String>> = conn
+        .query_row("SELECT kind FROM sender WHERE address = ?1", [addr], |r| {
+            r.get(0)
+        })
         .optional()?;
     // A name that you wrote in sent mail replaces a name from received
     // mail: the spoof check compares later `From` names with it (#109).
@@ -564,20 +564,14 @@ fn upsert(
          WHERE sender.decided_by IS NOT 'person'",
     )?
     .execute(params![addr, name, kind.name(), basis, now_ms, yours])?;
-    let (id, after, after_name): (i64, Option<String>, Option<String>) = conn.query_row(
-        "SELECT id, kind, name FROM sender WHERE address = ?1",
+    let (id, after): (i64, Option<String>) = conn.query_row(
+        "SELECT id, kind FROM sender WHERE address = ?1",
         [addr],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let (before, before_name) = before.unwrap_or_default();
-    let old = (before.as_deref(), before_name.as_deref());
-    name_change(
-        conn,
-        ch,
-        addr,
-        old,
-        (after.as_deref(), after_name.as_deref()),
-    )?;
+    let before = before.flatten();
+    // A change of a known name or of the kind `service` queues the affected
+    // mail for the fixed rules (`fixed_due`, store triggers, decision D31).
     // A missing row or a NULL kind counts as not hostile.
     let hostile = |k: Option<&str>| k == Some(Kind::Hostile.name());
     if hostile(before.as_deref()) != hostile(after.as_deref()) {
@@ -593,58 +587,17 @@ fn upsert(
     Ok(id)
 }
 
-/// The spoof check (spec 1 section 6.7) compares the `From` name of a
-/// message with the names of the known persons. When the name of a known
-/// person of `addr` comes or goes (a new person, a new name, a person no
-/// more), add to `ch.rerun` each sender whose spoof result under the old or
-/// the new name can change, so that understanding checks the mark of its
-/// mail again (#111): each other sender with mail under that name, and
-/// `addr` itself if it has mail under that name and another known person
-/// has that name. `old` and `new` are (kind, name) of the row of `addr`.
-pub(crate) fn name_change(
-    conn: &Connection,
-    ch: &mut Changes,
-    addr: &str,
-    old: (Option<&str>, Option<&str>),
-    new: (Option<&str>, Option<&str>),
-) -> rusqlite::Result<()> {
-    let p = Kind::Person.name();
-    let was = (old.0 == Some(p)).then_some(old.1).flatten();
-    let is = (new.0 == Some(p)).then_some(new.1).flatten();
-    let same = match (was, is) {
-        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-        (a, b) => a.is_none() && b.is_none(),
-    };
-    if same {
-        return Ok(());
-    }
-    // shortcut: a scan of `header` for each change of a person name (no
-    // index on `from_name`), upgrade to an index if a large mailbox is slow.
-    let mut st = conn.prepare_cached(
-        "SELECT DISTINCT s.id FROM header h JOIN sender s ON s.address = h.from_addr
-          WHERE h.from_name = ?1 COLLATE NOCASE AND (h.from_addr != ?2 OR EXISTS (
-            SELECT 1 FROM sender o WHERE o.kind = 'person' AND o.address != ?2
-               AND o.name = ?1 COLLATE NOCASE))",
-    )?;
-    for name in [was, is].into_iter().flatten() {
-        for id in st.query_map(params![name, addr], |r| r.get::<_, i64>(0))? {
-            let id = id?;
-            if !ch.rerun.contains(&id) {
-                ch.rerun.push(id);
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The domains of the known senders (kind `person` or `service`), except
 /// the address `but`.
 fn known_domains(conn: &Connection, but: &str) -> rusqlite::Result<Vec<String>> {
     conn.prepare_cached(
         "SELECT DISTINCT substr(address, instr(address, '@') + 1) FROM sender
-          WHERE kind IN ('person', 'service') AND address != ?1",
+          WHERE kind IN ('person', 'service') AND address != ?1 AND basis IS NOT ?2",
     )?
-    .query_map([but], |r| r.get(0))?
+    // A trusted near copy is a known sender, but its domain is no reference
+    // of the near-copy rule: else the real domain that it looks like
+    // becomes a near copy of it (issue #49).
+    .query_map([but, gate::TRUSTED], |r| r.get(0))?
     .collect()
 }
 

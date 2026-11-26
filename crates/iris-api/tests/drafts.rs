@@ -277,7 +277,7 @@ async fn the_drafts_stream_one_at_a_time_and_name_a_flag_with_no_mark() {
         out: Vec::new(),
         writes: 0,
     };
-    iris_api::write_drafts(&s, cs, &mut w).unwrap();
+    iris_api::write_drafts(&s, cs, NOW, &mut w).unwrap();
     let v: Value = serde_json::from_slice(&w.out).unwrap();
     let ns: Vec<i64> = v["drafts"]
         .as_array()
@@ -342,4 +342,28 @@ async fn outside_thread_marks_each_outside_address() {
     );
     assert_eq!(d["cc"], json!([{"address": OWNER}]), "{v}");
     assert_eq!(d["unmarked"], json!([]), "{v}");
+}
+
+/// Send content spec, section 6: the review shows each file of a draft
+/// (name, type and size).
+#[tokio::test]
+async fn the_review_shows_each_file_of_a_draft() {
+    let dir = temp("files");
+    let s = store(&dir);
+    let cs = create(&s, &person(), NOW).unwrap();
+    let sha = "ab".repeat(32);
+    let mail = json!({"to": ["dana@acme.example"], "subject": "Renewal", "body": "Hello Dana",
+                      "attachments": [{"name": "q4.pdf", "type": "application/pdf", "sha256": sha, "size": 14}]})
+    .as_object()
+    .unwrap()
+    .clone();
+    add_action(&s, cs, &person(), Verb::Draft, &["a-1"], &mail, None).unwrap();
+    submit(&s, cs, &person(), "Write to Dana.", NOW).unwrap();
+    let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["drafts"][0]["attachments"],
+        json!([{"name": "q4.pdf", "type": "application/pdf", "size": 14}]),
+        "{v}"
+    );
 }

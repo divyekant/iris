@@ -734,3 +734,342 @@ async fn each_gate_item_is_in_one_place_after_any_answers() {
 fn ids_of(list: &Value) -> Vec<String> {
     ids(list)
 }
+
+/// Issue 478: an item at the gate shows the reply draft of its thread, as a
+/// brief line does. Both read `ready` from the same column, so the gate and
+/// the sections agree for each item.
+#[tokio::test]
+async fn a_gate_item_shows_a_ready_draft_of_its_thread() {
+    let g = Gate::new("ready");
+    let s = sample(&g);
+    g.exec("DELETE FROM link_check WHERE ?1", [1]);
+    // The clean text of message 1: a draft answers only a fetched message.
+    g.exec(
+        "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, 'Invoice', 'ana', 'Pay?')",
+        [1],
+    );
+    // A draft of the thread of message 1, the source of Ana's ask.
+    g.exec(
+        "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+         SELECT thread_id, id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message WHERE id = ?1",
+        [1],
+    );
+    // The set of the messages that the draft read, as a save keeps it (#479).
+    g.exec(
+        &format!(
+            "UPDATE reply_draft SET seen = ({}) WHERE ?1",
+            iris_voice::seen_sql(&iris_voice::messages_sql("reply_draft.thread_id"))
+        ),
+        [1],
+    );
+    let ready = |page: &Value| -> Vec<(String, Value)> {
+        page["senders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p["items"].as_array().unwrap().clone())
+            .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+            .collect()
+    };
+    let gate = g.get("/api/gate").await;
+    let marks = ready(&gate);
+    assert!(
+        marks.contains(&(s.ask.clone(), json!(["draft"]))),
+        "{marks:?}"
+    );
+    assert!(marks.contains(&(s.group.clone(), Value::Null)), "{marks:?}");
+    assert!(marks.contains(&(s.reply.clone(), Value::Null)), "{marks:?}");
+    assert_eq!(g.get("/api/brief").await["gate"], gate);
+    // A draft that does not answer the newest message of its thread is stale: no mark.
+    g.exec("UPDATE reply_draft SET based_on = 2 WHERE ?1", [1]);
+    let marks = ready(&g.get("/api/gate").await);
+    assert!(marks.contains(&(s.ask.clone(), Value::Null)), "{marks:?}");
+}
+
+/// Issue 478: an item at the stranger gate never shows "Summary ready",
+/// also when its thread has a summary that is ready. An item of a known
+/// person in the brief does. Red if `ready` does not read the item filter.
+#[tokio::test]
+async fn a_gate_item_shows_no_summary_and_a_brief_item_does() {
+    let g = Gate::new("ready-summary");
+    let s = sample(&g);
+    g.exec("DELETE FROM link_check WHERE ?1", [1]);
+    // Each message is fetched and understood, so each summary is ready.
+    g.exec(
+        "INSERT OR IGNORE INTO body(message_id, subject, sender, text)
+         SELECT id, 'Venue', 'ana', 'Can you book it?' FROM message WHERE ?1",
+        [1],
+    );
+    g.exec("UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    g.exec("DELETE FROM link_check WHERE ?1", [1]);
+    g.exec(
+        &format!(
+            "INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt, created_at)
+             SELECT t.thread_id, (SELECT m.id {} {} {} LIMIT 1), {}, 'A summary.', 'fake',
+                    'summary/0.1', 1
+               FROM (SELECT DISTINCT thread_id FROM message) t WHERE ?1",
+            iris_voice::messages_sql("t.thread_id"),
+            iris_voice::ANSWERABLE,
+            iris_voice::NEWEST,
+            iris_summary::basis_sql("t.thread_id")
+        ),
+        [1],
+    );
+    let gate = g.get("/api/gate").await;
+    let marks: Vec<Value> = gate["senders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["items"].as_array().unwrap().clone())
+        .map(|d| d["ready"].clone())
+        .collect();
+    assert!(!marks.is_empty());
+    assert!(
+        marks.iter().all(|r| !r.to_string().contains("summary")),
+        "{marks:?}"
+    );
+    let brief = g.get("/api/brief").await;
+    let you_owe: Vec<(String, Value)> = brief["you_owe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+        .collect();
+    assert!(
+        you_owe.contains(&(s.dee_ask.clone(), json!(["summary"]))),
+        "{you_owe:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_gate_sender_with_the_name_of_a_known_person_says_so() {
+    // Issue #370: a new address under the name of a known person.
+    let g = Gate::new("known-name");
+    let s = sample(&g);
+    g.exec(
+        "UPDATE sender SET name = 'Dee Ray' WHERE address = 'dee@contoso.example'",
+        [],
+    );
+    g.exec(
+        "UPDATE sender SET name = 'dee RAY' WHERE address = 'ana@paypal.com'",
+        [],
+    );
+    g.exec(
+        "UPDATE sender SET name = '' WHERE address = 'bo@later.example'",
+        [],
+    );
+    // A stranger with the same name is not a known person.
+    g.sender("eve@other.example", Some("stranger"));
+    g.exec(
+        "UPDATE sender SET name = '' WHERE address = 'eve@other.example'",
+        [],
+    );
+    let gate = g.get("/api/gate").await;
+    let of = |id: &str| {
+        gate["senders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id)
+            .unwrap()["known_as"]
+            .clone()
+    };
+    assert_eq!(of(&s.ana), "dee@contoso.example");
+    assert_eq!(of(&s.bo), Value::Null);
+}
+
+#[tokio::test]
+async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
+    // Issue #49.
+    let g = Gate::new("trust");
+    let s = sample(&g);
+    // Alice has no evidence rows: a person set her kind, so a refresh keeps it.
+    g.sender("alice@paypal.com", Some("person"));
+    g.exec(
+        "UPDATE sender SET decided_by = 'person' WHERE address = 'alice@paypal.com'",
+        [],
+    );
+    let look = g.sender("alerts@paypa1.com", Some("hostile"));
+    g.exec(
+        "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'alerts@paypa1.com'",
+        [],
+    );
+    // The state of the mail of message 5: kind, trust offer, Undo.
+    let mail = |m: Value| {
+        (
+            m["sender_kind"].clone(),
+            m["near_copy"].clone(),
+            m["trusted_sender"].clone(),
+        )
+    };
+    let offer = |id: &str| json!({"sender": id, "of": "paypal.com"});
+    // Message 5 is from the look-alike: it can be trusted.
+    assert_eq!(
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
+    );
+    assert_eq!(g.get("/api/messages/m-1").await["near_copy"], Value::Null);
+
+    let (code, v) = g.answer(&look, "trust").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["kind"].as_str(), v["decided_by"].as_str()),
+        (Some("person"), Some("person"))
+    );
+    assert_eq!(
+        g.one::<Option<i64>>("SELECT understood_at FROM message WHERE id = 5"),
+        None
+    );
+    // After a reload the mail still names the trusted sender, so the
+    // person can undo the trust.
+    assert_eq!(
+        mail(g.get("/api/messages/m-5").await),
+        (json!("person"), Value::Null, json!(look))
+    );
+
+    // The trusted look-alike is no reference of the near-copy rule: the
+    // real domain does not become a near copy of it.
+    assert_eq!(
+        g.one::<String>("SELECT kind FROM sender WHERE address = 'ana@paypal.com'"),
+        "stranger"
+    );
+    // A sender that is not an engine near copy: no trust, no write.
+    let (code, v) = g.answer(&s.ana, "trust").await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(v["error"].as_str().unwrap().contains("near copy"), "{v}");
+    assert_eq!(g.answer("p-999", "trust").await.0, StatusCode::NOT_FOUND);
+
+    // Reopen: the engine decides again, and the mark comes back.
+    let (code, v) = g.answer(&look, "reopen").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        v["kind"], "hostile",
+        "the answer gives the kind after reopen"
+    );
+    assert_eq!(
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
+    );
+
+    // Rows that differ only in case (issue #1043): the kind and the trust
+    // offer come from the most cautious row, and the Undo of a trusted row
+    // of any case stays. Each other row state gives the same Undo.
+    g.answer(&look, "trust").await;
+    let upper = g.sender("ALERTS@paypa1.com", Some("hostile"));
+    let set_upper = |kind: &str, by: &str, basis: Option<&str>| {
+        g.exec(
+            "UPDATE sender SET kind = ?1, decided_by = ?2, basis = ?3
+              WHERE address = 'ALERTS@paypa1.com'",
+            rusqlite::params![kind, by, basis],
+        );
+    };
+    for (kind, by, basis, want_offer) in [
+        (
+            "hostile",
+            "engine",
+            Some("near copy of paypal.com"),
+            offer(&upper),
+        ),
+        ("hostile", "person", None, Value::Null),
+        ("stranger", "engine", None, Value::Null),
+        ("person", "engine", None, Value::Null),
+    ] {
+        set_upper(kind, by, basis);
+        assert_eq!(
+            mail(g.get("/api/messages/m-5").await),
+            (json!(kind), want_offer, json!(look)),
+            "{kind} {by}"
+        );
+    }
+    // Undo of the trusted row works: the engine marks it again, and the
+    // offer goes to the lowest hostile row. No Undo stays.
+    set_upper("hostile", "engine", Some("near copy of paypal.com"));
+    assert_eq!(g.answer(&look, "reopen").await.0, StatusCode::OK);
+    assert_eq!(
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
+    );
+}
+
+/// Issues 369, 373 and 374: `POST /api/messages/{id}/release` releases the
+/// marks `dmarc`, `spoof` and `link` of a message, and queues the fixed
+/// check. `POST /api/messages/{id}/unrelease` ends the release. `GET /api/messages/{id}` names the
+/// released marks, so the client can offer Undo after a reload.
+#[tokio::test]
+async fn release_takes_a_message_out_of_quarantine_and_unrelease_undoes_it() {
+    let g = Gate::new("release");
+    g.exec(
+        r#"UPDATE message SET hostile = '["link","spoof"]', understood_at = 1 WHERE id = 3"#,
+        [],
+    );
+    g.exec(
+        r#"UPDATE message SET hostile = '["phishing"]', understood_at = 1 WHERE id = 4"#,
+        [],
+    );
+    let due = || g.one::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = 3");
+    assert_eq!(due(), 0);
+    assert_eq!(g.get("/api/messages/m-3").await["released"], json!([]));
+
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["released"], json!(["link", "spoof"]));
+    assert_eq!(v["id"], "m-3");
+    assert_eq!(due(), 1);
+    assert_eq!(
+        g.get("/api/messages/m-3").await["released"],
+        json!(["link", "spoof"])
+    );
+    // Nothing more to release.
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+
+    // `phishing` alone: no release, no write.
+    let (code, v) = g.call("POST", "/api/messages/m-4/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 4"),
+        None
+    );
+    let (code, _) = g.call("POST", "/api/messages/m-4/unrelease").await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(
+        g.call("POST", "/api/messages/m-999/release").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        g.call("POST", "/api/messages/p-3/release").await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Undo.
+    let (code, v) = g.call("POST", "/api/messages/m-3/unrelease").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["released"], json!([]));
+    // The marks come back at once, before the fixed check runs.
+    assert_eq!(v["hostile"], json!(["link", "spoof"]));
+    assert_eq!(due(), 1, "the undo queues the check again, in one row");
+
+    // Content that Iris did not read yet: its marks can be old, so no
+    // release and no write.
+    g.exec("UPDATE message SET understood_at = NULL WHERE id = 3", []);
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 3"),
+        None
+    );
+    g.exec("UPDATE message SET understood_at = 1 WHERE id = 3", []);
+
+    // Gone mail: no release and no undo, and no write.
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    g.exec("UPDATE message SET gone_at = 1 WHERE id = 3", []);
+    let (code, v) = g.call("POST", "/api/messages/m-3/unrelease").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 3"),
+        Some(r#"["link","spoof"]"#.into())
+    );
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+}
