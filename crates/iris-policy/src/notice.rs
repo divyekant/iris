@@ -23,7 +23,7 @@ pub const LATE_MS: i64 = 24 * WINDOW_MS;
 /// the words of the mail (issue #1045).
 pub const MODEL_WAIT_MS: i64 = 5 * 60_000;
 
-/// The title of a notice of a mail whose understanding did not finish ([`CHECKED`]).
+/// The title of a notice of a mail whose understanding did not finish ([`checked_sql`]).
 pub const UNCHECKED_TITLE: &str = "Mail not checked yet";
 /// The text of a notice of a mail whose understanding did not finish.
 pub const UNCHECKED_TEXT: &str = "Iris shows the sender and the subject after the phishing check.";
@@ -66,7 +66,7 @@ pub struct Notice {
 /// after its fetch, for a model `phishing` mark, while the model can read
 /// it (`iris_store::model_can_read!`). The notice of a mail whose
 /// understanding did not finish shows no words of the mail, until it
-/// finishes ([`CHECKED`], [`shown_words`]). Each guard reads the store in the
+/// finishes ([`checked_sql`], [`shown_words`]). Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
@@ -152,25 +152,25 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
     })
 }
 
-/// The SQL condition "the notice of message `m` can show the words of the
-/// mail": no model is set, or the understanding of `m` finished
-/// (`understood_at`). [`shown_words`] is the same condition for a read. The understanding finishes after the model read the
+/// The SQL condition "the notice of the message with the row ID `id` (an
+/// SQL term) can show the words of the mail": no model is set, or the
+/// understanding of the message finished
+/// (`understood_at`). [`shown_words`] and [`checked_mail`] read it. The
+/// understanding finishes after the model read the
 /// mail, or with no model call when a fixed rule completes it or the
 /// sender is a declined stranger (spec 1 section 7.3, decision D29): the
 /// same end of understanding that guard 4 waits for (issue #321).
-const CHECKED: &str = "(NOT EXISTS (SELECT 1 FROM model_setting) OR m.understood_at IS NOT NULL)";
+fn checked_sql(id: &str) -> String {
+    format!(
+        "(NOT EXISTS (SELECT 1 FROM model_setting)
+          OR EXISTS (SELECT 1 FROM message cm WHERE cm.id = {id} AND cm.understood_at IS NOT NULL))"
+    )
+}
 
 /// True if the notice of message `id` can show the words of the mail
-/// ([`CHECKED`]).
+/// ([`checked_sql`]).
 fn checked_mail(tx: &Connection, id: i64) -> Result<bool> {
-    Ok(tx
-        .query_row(
-            &format!("SELECT {CHECKED} FROM message m WHERE m.id = ?1"),
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(false))
+    Ok(tx.query_row(&format!("SELECT {}", checked_sql("?1")), [id], |r| r.get(0))?)
 }
 
 /// The sender and the subject of a message, one line each.
@@ -294,16 +294,15 @@ pub fn counts(conn: &Connection) -> Result<(i64, i64)> {
 }
 
 /// The columns of the title and the text that a read of the notices shows: the words of
-/// the row while the mail of a rule notice is [`CHECKED`] now, else
+/// the row while the mail of a rule notice is [`checked_sql`] now, else
 /// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`]. The check runs at each read,
 /// so a model that is set after the notice, or a notice from before
 /// issue #1045, shows no words of a mail whose understanding did not finish.
 /// A job notice shows its words.
 fn shown_words() -> String {
     format!(
-        "(notice.message_id IS NULL
-          OR EXISTS (SELECT 1 FROM message m WHERE m.id = notice.message_id AND {CHECKED})),
-         title, text"
+        "(notice.message_id IS NULL OR {}), title, text",
+        checked_sql("notice.message_id")
     )
 }
 
