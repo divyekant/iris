@@ -251,6 +251,28 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
+    /// Issue #1126: a waiter that comes after the step took the lock stops
+    /// the step at its first thread. No call, and the other thread gets no
+    /// try.
+    #[test]
+    fn a_waiter_after_the_lock_stops_the_step_at_its_first_thread() {
+        let (store, dir) = open("wantlate");
+        thread(&store, "t1", 5, "s-1");
+        thread(&store, "t2", 6, "s-1");
+        let calls = Rc::new(Cell::new(0));
+        let want = std::cell::RefCell::new(None);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            // The step holds the run lock now: the waiter comes.
+            *want.borrow_mut() =
+                Some(iris_store::FileLock::try_take(&dir.join(batch::WANT_FILE)).unwrap());
+            Ok(Box::new(Fake(calls.clone(), GOOD)))
+        };
+        assert_eq!(step(&store, &connect, 10_000), Ok(0));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(count(&store, "SELECT count(*) FROM thread_summary_try"), 1);
+        drop(want.borrow_mut().take());
+    }
+
     /// While a draft or a question waits for the lock (#279), the step
     /// takes no lock and makes no call. One step makes the calls of one
     /// thread only (`MAX_PER_TURN`), so it needs no stop in its loop.
