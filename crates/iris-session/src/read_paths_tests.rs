@@ -101,15 +101,21 @@ fn folders_of_system_state_are_refused() {
 
 #[test]
 fn a_home_folder_is_refused_also_with_no_home_variable() {
-    let (_d, _tool, data) = setup("home");
+    // The data folder must be outside the home folder. If not, the rule of
+    // the data folder refuses first, as on a CI runner with the checkout in
+    // the home folder.
+    let data = std::env::temp_dir().join(format!("iris-read-paths-home-{}", std::process::id()));
+    fs::create_dir_all(&data).unwrap();
+    let data = fs::canonicalize(&data).unwrap();
     // SAFETY: getpwuid and geteuid only read; one test thread reads it.
     let mine = homes(None).unwrap()[0].clone();
-    if mine.exists() && mine != Path::new("/") {
+    if mine.exists() && mine != Path::new("/") && !data.starts_with(&mine) {
         refused(check(&mine, &data, None), "home folder");
         if let Some(parent) = mine.parent().filter(|p| *p != Path::new("/")) {
             assert!(check(parent, &data, None).is_err(), "{}", parent.display());
         }
     }
+    let _ = fs::remove_dir_all(&data);
     // HOME names one more home folder.
     let (_d2, tool, data2) = setup("home-env");
     refused(check(&tool, &data2, Some(tool.as_os_str())), "home folder");
