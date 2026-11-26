@@ -4196,6 +4196,24 @@ Content-Type: text/html; charset=utf-8
         .unwrap();
     let before: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
     let calls = fake.calls.borrow().len();
+    // A raw file that Iris cannot read keeps its row; a later run checks it.
+    let sha: String = b.col("SELECT content_sha256 FROM message WHERE id = ?1", m1);
+    let path = b.store.content_path(&sha).unwrap();
+    let away = path.with_extension("away");
+    std::fs::rename(&path, &away).unwrap();
+    let marked = iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
+    assert_eq!(marked, 0);
+    let kept: i64 = b.col(
+        "SELECT count(*) FROM link_recheck WHERE message_id = ?1",
+        m1,
+    );
+    assert_eq!(kept, 1, "the unread row stays");
+    let rest: i64 = b.col(
+        "SELECT count(*) FROM link_recheck WHERE message_id = ?1",
+        m2,
+    );
+    assert_eq!(rest, 0, "the scan goes on after the unread row");
+    std::fs::rename(&away, &path).unwrap();
     let marked = iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
     assert_eq!(marked, 1);
     let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m1);

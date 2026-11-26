@@ -215,26 +215,36 @@ pub fn recheck_links_scan(store: &Store, now_ms: i64, max_marks: Option<u64>) ->
 /// (store migration 72: mail checked before the links of attached
 /// messages counted), in pages of [`LINK_CHECKS`], with no model. A
 /// message with a deceptive link moves to `link_check`, so the normal
-/// check gives it the mark. Each row goes after its read. A file that Iris
-/// cannot read now gives no mark: its first check had the same file.
-/// Gives true if it stopped for a waiter of the run lock (#279).
+/// check gives it the mark. Each row goes after its read. A row whose file
+/// Iris cannot read now stays for a later run, as in `link_check`: the scan
+/// goes on after it. Gives true if it stopped for a waiter of the run lock
+/// (#279).
 fn recheck_old_links(store: &Store) -> Result<bool> {
+    let mut after = 0;
     loop {
         let page: Vec<i64> = store.read(|c| {
             let v = c
-                .prepare_cached("SELECT message_id FROM link_recheck ORDER BY message_id LIMIT ?1")?
-                .query_map([LINK_CHECKS], |r| r.get(0))?
+                .prepare_cached(
+                    "SELECT message_id FROM link_recheck WHERE message_id > ?1
+                      ORDER BY message_id LIMIT ?2",
+                )?
+                .query_map([after, LINK_CHECKS], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(v)
         })?;
-        if page.is_empty() {
+        let Some(&last) = page.last() else {
             return Ok(false);
-        }
+        };
+        after = last;
         for id in page {
             if crate::batch::wanted(store) {
                 return Ok(true);
             }
-            let mark = link_read(store, id).is_some_and(|r| r.mark);
+            // A file that Iris cannot read now keeps its row for a later run.
+            let Some(read) = link_read(store, id) else {
+                continue;
+            };
+            let mark = read.mark;
             store.write(|tx| {
                 if mark {
                     // A new row, as the triggers of migration 20 make it.
