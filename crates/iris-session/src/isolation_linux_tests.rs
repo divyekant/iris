@@ -1220,3 +1220,33 @@ fn the_lowerdir_value_names_both_descriptors() {
         );
     }
 }
+
+/// The child of the spawn opens each folder again by its path. If the
+/// folder at the path is another folder than the one that the checks
+/// opened, the overlay step stops with `ESTALE` and shows nothing.
+#[test]
+fn the_overlay_step_refuses_a_folder_that_changed_after_the_checks() {
+    let tool = tool_dir("ovlswap");
+    let fd: OwnedFd = File::open(&tool).unwrap().into();
+    let mut o = Overlays::plan(&[(fd, tool.clone())]).unwrap().unwrap();
+    let old = tool.with_extension("old");
+    let _ = fs::remove_dir_all(&old);
+    fs::rename(&tool, &old).unwrap();
+    fs::create_dir(&tool).unwrap();
+    // SAFETY: the child runs only system calls (apply), then _exit.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let code = match unsafe { o.apply() } {
+            Ok(()) => 0,
+            Err(e) => e.raw_os_error().unwrap_or(1),
+        };
+        unsafe { libc::_exit(code) };
+    }
+    let mut status = 0;
+    // SAFETY: waitpid writes only `status`.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(libc::WIFEXITED(status), "{status}");
+    assert_eq!(libc::WEXITSTATUS(status), libc::ESTALE);
+    let _ = fs::remove_dir_all(&tool);
+    let _ = fs::remove_dir_all(&old);
+}

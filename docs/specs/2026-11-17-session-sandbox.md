@@ -350,12 +350,27 @@ gives a `pidfd` (`pidfd_open` exists, Linux 5.3). A system that refuses
 user namespaces (for example an AppArmor rule) fails the probe; the reason
 names the `bwrap` error.
 
+The probe has no read path. A session with a read path folder also needs
+the overlay step of the read paths spec (issue 996): the child of the
+spawn makes a user and mount namespace before it runs `bwrap`. A system
+that permits `bwrap` but not the `iris` program to make a user namespace
+(the AppArmor rule of Ubuntu 24.04, with a profile for `bwrap` only)
+passes the probe. Then a session with a read path folder does not start,
+and the spawn error names the overlay (fail closed). A session with no
+read path folder is not changed. Known limit, issue #518.
+
 ## Options not chosen
 
-- Our own namespace code (`unshare`, `pivot_root`, mounts) on Linux: more
-  security code to write and to test, and Ubuntu 24.04 lets only
-  programs with an AppArmor profile, such as `bwrap`, make a user
-  namespace.
+- Our own namespace code (`unshare`, `pivot_root`, mounts) on Linux in
+  place of `bwrap`: more security code to write and to test, and Ubuntu
+  24.04 lets only programs with an AppArmor profile, such as `bwrap`,
+  make a user namespace. Changed on 2026-11-26 (issue 996): the read
+  paths spec adds one small step of our own before `bwrap`, a user and
+  mount namespace with a read-only overlay of each read path folder,
+  because `bwrap` 0.9 has no overlay option. `bwrap` still makes the
+  view. Only a session with a read path folder runs the step, so only
+  such a session needs the `iris` program to have the AppArmor
+  permission (issue #518).
 - Landlock and seccomp with no network namespace (the Codex Linux sandbox):
   Landlock limits TCP connections by port only, not by address, and
   needs Linux 6.7. An agent could reach a remote host on the port number
