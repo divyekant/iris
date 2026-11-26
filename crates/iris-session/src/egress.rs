@@ -58,6 +58,9 @@ pub enum Reason {
     Timeout,
     NotTls,
     SniNotAllowed,
+    /// The ClientHello hides the true server name: Encrypted Client Hello
+    /// or the older ESNI draft (issue 426).
+    Ech,
     /// The proxy had no file descriptor or thread for the connection.
     NoResources,
     /// The client address is not the session address of the proxy.
@@ -76,6 +79,7 @@ impl Reason {
             Reason::Timeout => "timeout",
             Reason::NotTls => "not_tls",
             Reason::SniNotAllowed => "sni_not_allowed",
+            Reason::Ech => "ech",
             Reason::NoResources => "no_resources",
             Reason::NotSession => "not_session",
         }
@@ -1076,10 +1080,88 @@ fn check_hello(buf: &[u8], name: &str) -> Result<bool, Reason> {
         Ok(None) if buf.len() >= HELLO_MAX => Err(Reason::TooLong),
         Ok(None) => Ok(false),
         Ok(Some(accepted)) => match accepted.client_hello().server_name() {
-            Some(sni) if sni.eq_ignore_ascii_case(name) => Ok(true),
+            Some(sni) if sni.eq_ignore_ascii_case(name) => {
+                // With ECH, the SNI is only the outer name: the server can
+                // serve another site from the encrypted inner name.
+                match hello_extensions(buf) {
+                    Some(types) if types.iter().any(|t| HIDDEN_NAME.contains(t)) => {
+                        Err(Reason::Ech)
+                    }
+                    Some(_) => Ok(true),
+                    None => Err(Reason::NotTls),
+                }
+            }
             _ => Err(Reason::SniNotAllowed),
         },
         Err(_) => Err(Reason::NotTls),
+    }
+}
+
+/// The extension types that hide the true server name: Encrypted Client
+/// Hello (`encrypted_client_hello`) and the older ESNI draft
+/// (`encrypted_server_name`).
+const HIDDEN_NAME: [u16; 2] = [0xfe0d, 0xffce];
+
+/// The extension types of the ClientHello at the start of `buf`, in order.
+/// The ClientHello can come in more than one TLS record. `None` if `buf`
+/// does not start with one whole ClientHello.
+fn hello_extensions(buf: &[u8]) -> Option<Vec<u16>> {
+    // Join the fragments of the handshake records until the message is
+    // whole.
+    let mut message = Vec::new();
+    let mut rest = buf;
+    let len = loop {
+        if let [_, a, b, c, ..] = message[..] {
+            let len = 4 + u32::from_be_bytes([0, a, b, c]) as usize;
+            if message.len() >= len {
+                break len;
+            }
+        }
+        let (head, tail) = rest.split_at_checked(5)?;
+        if head[0] != 22 {
+            return None;
+        }
+        let (fragment, tail) =
+            tail.split_at_checked(u16::from_be_bytes([head[3], head[4]]) as usize)?;
+        message.extend_from_slice(fragment);
+        rest = tail;
+    };
+    let mut r = Reader(message.get(..len)?);
+    if r.take(1)? != [1] {
+        return None; // not a ClientHello
+    }
+    r.take(3 + 2 + 32)?; // length, version, random
+    for width in [1, 2, 1] {
+        // session ID, cipher suites, compression methods
+        r.vector(width)?;
+    }
+    let mut ext = Reader(r.vector(2)?);
+    let mut types = Vec::new();
+    while !ext.0.is_empty() {
+        let t = ext.take(2)?;
+        types.push(u16::from_be_bytes([t[0], t[1]]));
+        ext.vector(2)?;
+    }
+    Some(types)
+}
+
+/// A reader of TLS vectors.
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let (a, b) = self.0.split_at_checked(n)?;
+        self.0 = b;
+        Some(a)
+    }
+
+    /// A vector with a length of `width` bytes before it.
+    fn vector(&mut self, width: usize) -> Option<&'a [u8]> {
+        let len = self
+            .take(width)?
+            .iter()
+            .fold(0usize, |n, b| n << 8 | *b as usize);
+        self.take(len)
     }
 }
 
