@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 serde_json = "1"
 # Sync client with rustls (ring). No OpenSSL, no async runtime.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 # Already in the build through hyper. Parses the date form of `retry-after`.
 httpdate = "1"
 
