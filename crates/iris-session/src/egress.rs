@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
@@ -63,7 +63,8 @@ pub enum Reason {
     Ech,
     /// The proxy had no file descriptor or thread for the connection.
     NoResources,
-    /// The client address is not the session address of the proxy.
+    /// The client is not of the session: on macOS, not from `127.0.0.1`
+    /// or with no token of the session.
     NotSession,
 }
 
@@ -86,28 +87,34 @@ impl Reason {
     }
 }
 
-/// The first address of the session addresses: `127.128.0.0`.
-const SESSION_BASE: u32 = 0x7F80_0000;
-/// The largest session ID that has a session address (`127.255.255.254`).
-pub const SESSION_MAX: i64 = 0x7F_FFFE;
+/// The port of the egress listener in the network namespace of a Linux
+/// session. The namespace is private, so a fixed port is free. It is
+/// `EGRESS_PORT + 1` if the local port of the adapter is `EGRESS_PORT`.
+pub const EGRESS_PORT: u16 = 3128;
 
-/// The loopback address of `session`. The relay of a sandbox connects from
-/// this address, and the proxy of the session takes no other client. Session
-/// IDs are never used again, so no two sessions get the same address. None
-/// for an ID outside `1..=SESSION_MAX`.
-pub fn session_peer(session: i64) -> Option<Ipv4Addr> {
-    if !(1..=SESSION_MAX).contains(&session) {
-        return None;
+/// The port of the egress listener in a Linux session with the local port
+/// `local`: never the local port.
+pub fn sandbox_port(local: Option<u16>) -> u16 {
+    if local == Some(EGRESS_PORT) {
+        EGRESS_PORT + 1
+    } else {
+        EGRESS_PORT
     }
-    Some(Ipv4Addr::from(SESSION_BASE + session as u32))
 }
+
+/// The file descriptor of the helper end of the socket pair in the hold
+/// helper of a Linux session ([`Proxy::start_channel`]).
+pub const EGRESS_FD: RawFd = 3;
 
 /// The proxy endpoint that the agent of a session gets: the port, and on
 /// macOS the token of the session (macOS sandbox spec, "Egress on macOS").
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// On Linux, `channel` is the helper end of the socket pair of the proxy
+/// ([`Proxy::start_channel`]): the launch gives it to the helper.
+#[derive(Clone, Debug)]
 pub struct Endpoint {
     pub port: u16,
     pub token: Option<String>,
+    pub channel: Option<Arc<OwnedFd>>,
 }
 
 /// A new random token of 32 bytes, as 64 hex digits, from the random
@@ -330,7 +337,9 @@ struct Shared {
     allowed: Vec<String>,
     resolver: Arc<dyn Resolve>,
     public_only: bool,
-    /// The only client address that the proxy takes. None only in tests.
+    /// The only client address that the proxy takes (macOS). None for a
+    /// proxy that takes its clients from its socket pair (Linux), and in
+    /// tests.
     peer: Option<Ipv4Addr>,
     /// The token that each `CONNECT` must give (macOS only).
     token: Option<String>,
@@ -387,11 +396,10 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    /// Starts the proxy on a free port of `127.0.0.1`. `log` is the egress
-    /// log of the session, open for append. `peer` is the session address
-    /// ([`session_peer`]) on Linux and `127.0.0.1` on macOS: the proxy
-    /// refuses a client from another address. With a `token`, the proxy
-    /// answers each `CONNECT` that does not give it with `407`.
+    /// Starts the proxy on a free port of `127.0.0.1` (macOS). `log` is the
+    /// egress log of the session, open for append. `peer` is `127.0.0.1`:
+    /// the proxy refuses a client from another address. With a `token`, the
+    /// proxy answers each `CONNECT` that does not give it with `407`.
     pub fn start(
         allowed: Vec<String>,
         log: File,
@@ -399,10 +407,6 @@ impl Proxy {
         peer: Ipv4Addr,
         token: Option<String>,
     ) -> io::Result<Proxy> {
-        static WORKERS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
-        let workers = WORKERS
-            .get_or_init(|| Arc::new(AtomicUsize::new(0)))
-            .clone();
         Proxy::start_with(
             allowed,
             log,
@@ -411,8 +415,37 @@ impl Proxy {
             Some(peer),
             token,
             LOG_LIMIT,
-            workers,
+            workers(),
         )
+    }
+
+    /// Starts the proxy of a Linux session on a new socket pair, and gives
+    /// the helper end of the pair. The proxy has no port: the helper sends
+    /// it each connection of the agent as a file descriptor. The pair has no
+    /// name, so no other process can take the place of either end (issue
+    /// 507). `port` is the port of the listener in the namespace of the
+    /// session ([`sandbox_port`]), which the agent gets.
+    #[cfg(target_os = "linux")]
+    pub fn start_channel(
+        allowed: Vec<String>,
+        log: File,
+        resolver: Box<dyn Resolve>,
+        port: u16,
+    ) -> io::Result<(Proxy, OwnedFd)> {
+        let (engine, helper) = UnixStream::pair()?;
+        let proxy = Proxy::start_on(
+            Source::Channel(engine),
+            port,
+            allowed,
+            log,
+            resolver,
+            true,
+            None,
+            None,
+            LOG_LIMIT,
+            workers(),
+        )?;
+        Ok((proxy, helper.into()))
     }
 
     /// `public_only` is false only in tests, which use a loopback server.
@@ -427,9 +460,36 @@ impl Proxy {
         log_limit: u64,
         workers: Arc<AtomicUsize>,
     ) -> io::Result<Proxy> {
-        let written = file.metadata()?.len();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let port = listener.local_addr()?.port();
+        Proxy::start_on(
+            Source::Tcp(listener),
+            port,
+            allowed,
+            file,
+            resolver,
+            public_only,
+            peer,
+            token,
+            log_limit,
+            workers,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_on(
+        source: Source,
+        port: u16,
+        allowed: Vec<String>,
+        file: File,
+        resolver: Box<dyn Resolve>,
+        public_only: bool,
+        peer: Option<Ipv4Addr>,
+        token: Option<String>,
+        log_limit: u64,
+        workers: Arc<AtomicUsize>,
+    ) -> io::Result<Proxy> {
+        let written = file.metadata()?.len();
         let shared = Arc::new(Shared {
             allowed,
             resolver: Arc::from(resolver),
@@ -458,11 +518,11 @@ impl Proxy {
         // The accept loop waits in poll on the listener and on the read end
         // of this pair, which a stop closes.
         let (wake, woken) = UnixStream::pair()?;
-        listener.set_nonblocking(true)?;
+        source.set_nonblocking()?;
         let s = shared.clone();
         let accept = thread::Builder::new()
             .name("iris-egress".into())
-            .spawn(move || accept_loop(listener, woken, s))?;
+            .spawn(move || accept_loop(source, woken, s))?;
         Ok(Proxy {
             wake: Some(wake),
             port,
@@ -471,7 +531,8 @@ impl Proxy {
         })
     }
 
-    /// The port that the agent gets in `HTTPS_PROXY`.
+    /// The port that the agent gets in `HTTPS_PROXY`: on Linux the port in
+    /// the namespace of the session.
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -481,6 +542,7 @@ impl Proxy {
         Endpoint {
             port: self.port,
             token: self.shared.token.clone(),
+            channel: None,
         }
     }
 
@@ -543,12 +605,139 @@ impl Drop for Proxy {
     }
 }
 
-/// Waits until the listener has a connection (true) or the wake pipe is
-/// closed (false). The wait has no time limit.
-fn wait(listener: &TcpListener, woken: &UnixStream) -> bool {
+/// The live resolver workers of the process: one count for all proxies.
+fn workers() -> Arc<AtomicUsize> {
+    static WORKERS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
+    WORKERS
+        .get_or_init(|| Arc::new(AtomicUsize::new(0)))
+        .clone()
+}
+
+/// Where the clients of a proxy come from.
+enum Source {
+    /// A TCP listener on `127.0.0.1` (macOS, and tests).
+    Tcp(TcpListener),
+    /// The engine end of the socket pair of a Linux session. Each message
+    /// holds one TCP connection of the agent as a file descriptor.
+    #[cfg(target_os = "linux")]
+    Channel(UnixStream),
+}
+
+/// The result of one accept.
+enum Next {
+    Client(TcpStream, Option<SocketAddr>),
+    /// No client now.
+    Nothing,
+    /// No client ever again: the helper closed its end of the pair.
+    Ended,
+}
+
+impl Source {
+    fn fd(&self) -> RawFd {
+        match self {
+            Source::Tcp(l) => l.as_raw_fd(),
+            #[cfg(target_os = "linux")]
+            Source::Channel(c) => c.as_raw_fd(),
+        }
+    }
+
+    fn set_nonblocking(&self) -> io::Result<()> {
+        match self {
+            Source::Tcp(l) => l.set_nonblocking(true),
+            #[cfg(target_os = "linux")]
+            Source::Channel(c) => c.set_nonblocking(true),
+        }
+    }
+
+    fn accept(&self) -> Next {
+        match self {
+            Source::Tcp(l) => match l.accept() {
+                Ok((s, from)) => Next::Client(s, Some(from)),
+                Err(_) => Next::Nothing,
+            },
+            #[cfg(target_os = "linux")]
+            Source::Channel(c) => match recv_fd(c.as_raw_fd()) {
+                Ok(Some(fd)) if is_tcp_stream(&fd) => Next::Client(TcpStream::from(fd), None),
+                // Not a TCP connection: the descriptor closes here.
+                Ok(Some(_)) => Next::Nothing,
+                Ok(None) => Next::Ended,
+                // Only the end of the pair or an error of the socket ends
+                // the source; a message with no descriptor is dropped.
+                Err(e) if NOT_ENDED.contains(&e.kind()) => Next::Nothing,
+                Err(_) => Next::Ended,
+            },
+        }
+    }
+}
+
+/// The errors of [`recv_fd`] after which the pair still works.
+#[cfg(target_os = "linux")]
+const NOT_ENDED: [io::ErrorKind; 3] = [
+    io::ErrorKind::WouldBlock,
+    io::ErrorKind::Interrupted,
+    io::ErrorKind::InvalidData,
+];
+
+/// True if `fd` is a TCP stream socket.
+#[cfg(target_os = "linux")]
+fn is_tcp_stream(fd: &OwnedFd) -> bool {
+    let s = socket2::SockRef::from(fd);
+    matches!(s.r#type(), Ok(socket2::Type::STREAM))
+        && s.local_addr().is_ok_and(|a| a.as_socket().is_some())
+}
+
+/// Receives one message of [`send_fd`](crate::isolation_linux) from the
+/// Unix socket `sock`. Gives the file descriptor of the message, `None` at
+/// the end of the stream, or an error: `InvalidData` for a message with no
+/// descriptor. Each descriptor gets close-on-exec.
+#[cfg(target_os = "linux")]
+pub(crate) fn recv_fd(sock: RawFd) -> io::Result<Option<OwnedFd>> {
+    use std::os::fd::FromRawFd;
+    let mut byte = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
+        iov_len: 1,
+    };
+    let mut space = [0u64; 4];
+    // SAFETY: msg points to valid buffers that live for the call. The
+    // kernel closes each descriptor that does not fit in `space`.
+    unsafe {
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = space.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = std::mem::size_of_val(&space) as _;
+        let n = libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC | libc::MSG_DONTWAIT);
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        let has_fd = !cmsg.is_null()
+            && (*cmsg).cmsg_level == libc::SOL_SOCKET
+            && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+            && (*cmsg).cmsg_len as usize
+                >= libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize;
+        if !has_fd {
+            return if n == 0 {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a message with no file descriptor",
+                ))
+            };
+        }
+        let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const RawFd);
+        Ok(Some(OwnedFd::from_raw_fd(fd)))
+    }
+}
+
+/// Waits until `source` has a client (true) or the wake pipe is closed
+/// (false). A negative `source` is not polled. The wait has no time limit.
+fn wait(source: RawFd, woken: &UnixStream) -> bool {
     let mut fds = [
         libc::pollfd {
-            fd: listener.as_raw_fd(),
+            fd: source,
             events: libc::POLLIN,
             revents: 0,
         },
@@ -577,12 +766,17 @@ fn wait(listener: &TcpListener, woken: &UnixStream) -> bool {
     }
 }
 
-fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
-    while wait(&listener, &woken) {
-        let (stream, from) = match listener.accept() {
-            Ok(accepted) => accepted,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(_) => continue,
+fn accept_loop(source: Source, woken: UnixStream, shared: Arc<Shared>) {
+    // After the end of the source, the loop waits only for the stop.
+    let mut fd = source.fd();
+    while wait(fd, &woken) {
+        let (stream, from) = match source.accept() {
+            Next::Client(s, from) => (s, from),
+            Next::Nothing => continue,
+            Next::Ended => {
+                fd = -1;
+                continue;
+            }
         };
         // macOS gives the accepted socket the non-blocking mode of the
         // listener; Linux does not. The connection code needs blocking reads.
@@ -607,7 +801,7 @@ fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
         }
         if shared
             .peer
-            .is_some_and(|peer| from.ip() != IpAddr::V4(peer))
+            .is_some_and(|peer| from.map(|f| f.ip()) != Some(IpAddr::V4(peer)))
         {
             drop(c);
             finish(&shared, refuse(stream, Reason::NotSession));
