@@ -274,10 +274,18 @@ Then it fails with "a run is in progress", as before.
 - A scan that stops for a waiter says so (`store::Scan::yielded`), also
   the fixed check at the end of a pass. The run then ends with `stop =
   yield`, not `done`.
-- Limit: a model call that runs when the waiter comes is not stopped, and
-  in a batch run the retry of the answer of that message can follow it. A
-  call can take up to `timeout_s` (default 120 seconds), so a waiter can
-  still fail after 60 seconds (limit #1126).
+- Each holder that takes the lock with `batch::lock` (the batch runner,
+  the matter step, the nudge and summary steps) calls the model through
+  `Budgeted::yielding` (issue #1126). Its wait for the answer of a call
+  stops within 50 ms (`iris_model::CANCEL_POLL`) after a waiter comes:
+  `Client::ask_cancel` gives `Error::Cancelled`. So a waiter does not wait
+  for the time limit of a call in flight (`timeout_s`).
+- A cancel ("Cancel" below) is no model error. The holder ends with `stop
+  = yield`. It does not start or end the wait after model errors
+  (`model_setting.retry_failures`, `retry_at`), so the model health signal
+  of the notices (`iris_store::model_can_read!`) does not change. The
+  message of the call gets no added try and no mark `waits_model`, and the
+  next run reads it again.
 
 ### Model and budget
 
@@ -348,6 +356,27 @@ larger than its reservation. So the second try of
 `decide` in the same message cannot go out: `store::understand` returns
 `Error::Model`, no try counts, and the message stays pending for the next
 run. The runner then stops with `stop = unknown`.
+
+Cancel (issue #1126): the request of a cancelled call can have gone out,
+so the provider can charge it. The cost record is the same as for an
+unknown result: a priced call keeps its whole worst case taken from the
+budget, and the run row counts one unknown call (`unknown_calls`) with that
+worst case (`unknown_cost_micro_usd`). A call to a model with no price
+counts one unknown call. The wrapper sets `State::cancelled` and gives
+`Error::Cancelled` to each later call of the holder, so no request goes
+out after the cancel and no mail gets a refusal mark.
+
+Before each request, the wrapper also reads the waiter test
+(`batch::wanted`). If a waiter came, for example while the answer of the
+call before a retry came in, the wrapper starts no request. It gives
+`Error::Cancelled` and sets `State::cancelled`, but counts no call and no
+cost, because no request went out. So a waiter never causes one more paid
+request.
+
+Limit (issue #1158): the call of a cancelled
+request is not stopped. Its thread ends with the answer, or at the time
+limit of the call, and drops the answer. So for that time one more HTTP
+connection and one thread stay open, and the real cost is not known.
 
 If a known usage is still larger than the reservation, the settle write
 takes the real cost, the budget can go below zero, and the run stops with
@@ -674,6 +703,10 @@ The model call changes nothing outside the product, but it costs money.
 - A definite rejection: spec 1 section 7.4. The tokens count.
 - An unknown result: the worst case counts; the run stops; the message stays
   pending. A retry pays again, at most one message for each event.
+- A cancel for a waiter of the run lock (issue #1126): as an unknown
+  result, but the holder stops with `stop = yield` and no model wait. The
+  matter step keeps `matter_run.tried_at`, so its hourly gate counts the
+  call.
 - Retry: the next run.
 
 ## Open questions

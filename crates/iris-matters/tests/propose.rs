@@ -940,3 +940,58 @@ fn try_now_after_a_failed_call_lets_the_hourly_step_call_again() {
     assert!(!waited);
     assert_eq!(run(&b, &f, Gate::Hourly, later).skip, Some(Skip::Hourly));
 }
+
+/// A model whose call ends with a cancel for a waiter of the run lock.
+struct Cancelled;
+
+impl Model for Cancelled {
+    fn name(&self) -> &str {
+        "fake"
+    }
+    fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
+        panic!("the step calls with a cancel test")
+    }
+    fn ask_cancel(&self, _: &str, _: &str, _: &dyn Fn() -> bool) -> Result<Reply, ModelError> {
+        Err(ModelError::Cancelled)
+    }
+}
+
+/// Issue #1126: a call that a waiter of the run lock cancels is no model
+/// error: the run says `yield` and no wait starts. The call can be out and
+/// charged, so the hourly gate counts it: no second call within the hour.
+/// A manual step calls again at once.
+#[test]
+fn a_cancelled_call_starts_no_wait_and_counts_for_the_hour() {
+    let b = setup("cancel", 3, &titles(3), &["record"]);
+    let connect = |_: &ModelRow| -> Result<std::boxed::Box<dyn Model>, String> {
+        Ok(std::boxed::Box::new(Cancelled))
+    };
+    let o = propose(&b.store, &connect, Gate::Hourly, NOW).unwrap();
+    assert!(!o.failed);
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM model_setting WHERE retry_failures = 0 AND retry_at IS NULL"
+        ),
+        1
+    );
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM understand_run WHERE stop = 'yield' AND unknown_calls = 1"
+        ),
+        1
+    );
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM matter_run WHERE candidates IS NULL AND tried_at IS NOT NULL"
+        ),
+        1
+    );
+    let f = fake(vec![]);
+    assert_eq!(run(&b, &f, Gate::Hourly, NOW + 1).skip, Some(Skip::Hourly));
+    assert!(f.data.borrow().is_empty());
+    assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, None);
+    assert_eq!(f.data.borrow().len(), 1);
+}
