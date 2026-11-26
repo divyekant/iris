@@ -179,17 +179,24 @@ egress port.
   with system calls only:
   1. It makes a new user namespace (the same user and group, one line
      each) and a new mount namespace, and makes each mount private.
-  2. It makes one empty read-only `tmpfs` (`fsopen`, `fsmount`): the
-     second layer of each overlay. An overlay with no upper layer needs
-     two lower layers.
-  3. For each folder, it opens the path again in the new namespace and
+  2. For each folder, it opens the path again in the new namespace and
      compares the device and inode with the descriptor of the checks. A
      folder has one path (no hard link), so the same device and inode is
-     the same folder. Else no session starts (`ESTALE`).
-  4. It makes the overlay (`lowerdir` = the folder, then the empty
-     `tmpfs`; read-only, `nosuid`, `nodev`), puts it on the folder in the
-     new namespace (`move_mount`), and gives its root to `bwrap` at the
-     number of the read path.
+     the same folder. Else no session starts (`ESTALE`). It opens each
+     folder before it makes any overlay, because an overlay on one folder
+     changes the inodes of a read path in it.
+  3. It makes one empty read-only `tmpfs` (`fsopen`, `fsmount`): the
+     second layer of each overlay. An overlay with no upper layer needs
+     two lower layers.
+  4. For each folder, it makes the overlay (`lowerdir` = the folder, then
+     the empty `tmpfs`; read-only, `nosuid`, `nodev`), puts it on the
+     folder in the new namespace (`move_mount`), and gives its root to
+     `bwrap` at the number of the read path.
+
+  Each new descriptor of these steps is one that the kernel gives. No step
+  moves a descriptor to a fixed number other than the number of its read
+  path, which holds the checked folder until then. So a step cannot close
+  a descriptor of another step.
 
   `bwrap` then runs in that namespace and makes its own namespaces in it.
   A read path that is a file needs no overlay: no socket can appear in a
@@ -273,6 +280,8 @@ fails at its first call.
 | A write to a read path | The system refuses it (read-only bind) | Linux sandbox test |
 | A program of the person makes a socket in a read path folder after the checks, while the session runs (issue 996) | Linux: `connect` through the overlay gives `ECONNREFUSED`; the server gets no connection. macOS: the profile denies it | Linux sandbox test with a server that binds after the spawn |
 | The folder at the path of a read path is another folder at the time of the overlay | No session starts (`ESTALE`) | the device and inode compare in the child |
+| A read path in another read path, in each order | Both start; each has its overlay | Linux sandbox test with both orders |
+| Any count of open descriptors in the engine | The overlay steps take free numbers only; the session starts | Linux sandbox test that takes each number below 20 to 44 |
 | A kernel that refuses an overlay or the mount API in a user namespace | No session starts with a read path folder; a session with none is not changed | not testable in CI (the CI kernel permits it) |
 | An AppArmor rule that limits user namespaces to programs with a profile (Ubuntu 24.04), and no profile for `iris` | The `unshare` gives a namespace with no capabilities, the mount fails, and no session starts with a read path folder; the error names the overlay | not testable in CI (no AppArmor in the CI kernel); known limit #518 |
 | A connection to a local port other than `allow_local` | Refused: no listener in the namespace (Linux), the profile denies it (macOS) | Linux sandbox test |

@@ -895,6 +895,74 @@ fn a_socket_made_in_a_read_path_after_the_checks_is_not_reached() {
     let _ = fs::remove_dir_all(&tool);
 }
 
+/// Runs `script` in a sandbox with the read paths `reads`, and gives
+/// its output.
+fn with_reads(session: i64, reads: &[PathBuf], script: &str) -> String {
+    let d = Data::new();
+    let iso = d.iso();
+    let c = iso.command(
+        session,
+        &d.ws,
+        None,
+        Path::new("/bin/sh"),
+        &["-c".into(), script.into()],
+        reads,
+        None,
+    );
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let child = iso.spawn_with(session, &mut cmd, None).unwrap();
+    String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+}
+
+/// A read path in another read path starts in each order: the child of
+/// the spawn checks each folder before it puts an overlay on one.
+#[test]
+fn read_paths_in_read_paths_start_in_each_order() {
+    let parent = tool_dir("nest");
+    let child = parent.join("plugin");
+    fs::create_dir(&child).unwrap();
+    fs::write(child.join("x"), "CHILD-MARKER").unwrap();
+    let script = format!(
+        "cat {p}/main.js; echo; cat {c}/x",
+        p = parent.display(),
+        c = child.display()
+    );
+    for (session, reads) in [
+        (25, [parent.clone(), child.clone()]),
+        (26, [child.clone(), parent.clone()]),
+    ] {
+        let out = with_reads(session, &reads, &script);
+        assert!(out.contains("TOOL-MARKER"), "{reads:?}: {out}");
+        assert!(out.contains("CHILD-MARKER"), "{reads:?}: {out}");
+    }
+    let _ = fs::remove_dir_all(&parent);
+}
+
+/// The overlay step takes the descriptors that the kernel gives, so a
+/// low descriptor number that is taken or free changes nothing. Each round
+/// takes each number below `top`, so the first free number of the child
+/// of the spawn moves over the range of the old fixed slots (40, 41).
+#[test]
+fn a_read_path_starts_when_the_low_descriptors_are_taken() {
+    let tool = tool_dir("lowfd");
+    let script = format!("cat {}/main.js", tool.display());
+    for top in 20..=44 {
+        let mut held = Vec::new();
+        while held.last().is_none_or(|f: &File| f.as_raw_fd() < top) {
+            held.push(File::open("/dev/null").unwrap());
+        }
+        let out = with_reads(27, std::slice::from_ref(&tool), &script);
+        drop(held);
+        assert!(out.contains("TOOL-MARKER"), "top {top}: {out}");
+    }
+    let _ = fs::remove_dir_all(&tool);
+}
+
 #[test]
 fn a_read_path_that_changes_after_the_launch_stops_the_start() {
     let d = Data::new();
@@ -1031,5 +1099,17 @@ fn identify_never_fails_on_a_process_that_ends_during_the_reads() {
             }
         }
         reaper.join().unwrap();
+    }
+}
+
+#[test]
+fn the_lowerdir_value_names_both_descriptors() {
+    let mut buf = [0xff; LOWER_LEN];
+    for (a, b) in [(0, 9), (41, 7), (i32::MAX, 1_000_000)] {
+        let v = lower_value(&mut buf, a, b);
+        assert_eq!(
+            v.to_str().unwrap(),
+            format!("/proc/self/fd/{a}:/proc/self/fd/{b}")
+        );
     }
 }
