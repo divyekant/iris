@@ -1377,7 +1377,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a stale nudge with a key",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.5', 0, 1, '{}'
                FROM message",
             at,
             true,
@@ -1386,7 +1386,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a ready nudge of another commitment",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.5', 0, 1, '{}'
                FROM message WHERE thread_id = ?1",
             at,
             true,
@@ -2271,8 +2271,12 @@ fn a_change_of_the_answerable_set_makes_the_draft_stale() {
 /// with the stem of a key word of the commitment.
 #[test]
 fn a_body_names_a_commitment_only_with_its_words() {
+    let none: &[String] = &[];
     let ask = serde_json::json!({"title": "Send the invoice", "quote": "can you send it?", "amount": "$1,200"});
-    assert_eq!(key_words(&ask), ["invoice", "200"]);
+    assert_eq!(
+        key_words(&ask, none),
+        (vec!["invoice".into(), "200".into()], true)
+    );
     for (body, ok) in [
         ("Hi Bo, any news on the invoices? D", true),
         ("Hi Bo, the 1,200 dollars? D", true),
@@ -2280,18 +2284,277 @@ fn a_body_names_a_commitment_only_with_its_words() {
         ("Hi Bo, any news? D", false),
         ("Hi Bo, can you send it? D", false),
     ] {
-        assert_eq!(names(body, &ask), ok, "{body}");
+        assert_eq!(names(body, &ask, none), ok, "{body}");
     }
     // An amount is an object: its values are words, its field names are not.
     let pay =
         serde_json::json!({"title": "Pay it", "amount": {"value": 312.77, "currency": "USD"}});
-    assert!(!names("Can you confirm the value and the currency?", &pay));
-    assert!(names("Hi Bo, the 312.77? D", &pay));
+    assert!(!names(
+        "Can you confirm the value and the currency?",
+        &pay,
+        none
+    ));
+    assert!(names("Hi Bo, the 312.77? D", &pay, none));
     // A commitment with no key word passes any body.
     assert!(names(
         "Hi",
-        &serde_json::json!({"title": "Do it", "quote": null})
+        &serde_json::json!({"title": "Do it", "quote": null}),
+        none
     ));
+}
+
+/// Issue #1154: a short commitment with no strong key word has weak key
+/// words (a 1-digit amount, a 3-letter word), and the body must hold one
+/// of them as a whole word.
+#[test]
+fn a_short_commitment_needs_its_short_words() {
+    let none: &[String] = &[];
+    let ask =
+        serde_json::json!({"title": "Pay $5", "quote": "I'll pay $5", "amount": {"value": 5}});
+    assert!(!key_words(&ask, none).1);
+    for (body, ok) in [
+        ("Hi", false),
+        ("Hi Bo, any news? D", false),
+        ("Hi Bo, the $50? D", false),
+        ("Hi Bo, can you pay the $5? D", true),
+        ("Hi Bo, the 5 dollars? D", true),
+    ] {
+        assert_eq!(names(body, &ask, none), ok, "{body}");
+    }
+    // A common word of 3 letters is no weak key word.
+    let ask = serde_json::json!({"title": "Can you pay?", "quote": "Can you pay it?"});
+    assert_eq!(key_words(&ask, none).0, ["pay", "pay"]);
+    assert!(!names("Can you update me?", &ask, none));
+}
+
+/// Issue #1146: a word of the name or the address of a person of the
+/// thread is no key word, so a greeting does not name the commitment.
+#[test]
+fn a_name_of_a_person_names_no_commitment() {
+    let people = people_words(&[
+        "dana@example.com".into(),
+        "Priya Raman".into(),
+        "priya@example.com".into(),
+    ]);
+    let ask = serde_json::json!({"title": "Priya to check", "quote": "Priya, can you check?"});
+    assert_eq!(
+        key_words(&ask, &people),
+        (vec!["check".into(), "check".into()], true)
+    );
+    assert!(!names("Hi Priya, how are you? Dana", &ask, &people));
+    assert!(names("Hi Priya, did you check it? Dana", &ask, &people));
+    // With no other word, a name leaves the commitment with no key word.
+    let only = serde_json::json!({"title": "Raman", "quote": null});
+    assert!(names("Hi", &only, &people));
+}
+
+/// Issue #1146: for any text of names and addresses, each of its words is a
+/// people word, so a commitment of only such words has no key word.
+#[test]
+fn each_word_of_a_name_is_a_people_word() {
+    let parts = [
+        "Priya",
+        "O'Brien",
+        "José",
+        "Ünal",
+        "李",
+        "bo",
+        "x1",
+        "dana@example.com",
+        ".",
+        " ",
+        ",",
+        "<",
+        ">",
+        "-",
+        "\"",
+        "Ⅷ",
+        "ß",
+    ];
+    let mut seed = 11u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    for _ in 0..2000 {
+        let text: String = (0..1 + next(8)).map(|_| parts[next(parts.len())]).collect();
+        let people = people_words(std::slice::from_ref(&text));
+        let ask = serde_json::json!({"title": text, "quote": text});
+        assert!(key_words(&ask, &people).0.is_empty(), "{text:?} {people:?}");
+        assert!(names("Hi", &ask, &people), "{text:?}");
+    }
+}
+
+/// Issue #1146: the name of a recipient comes from the mail that the
+/// recipient sent, because the header keeps only bare `To` addresses. A
+/// body that names only the recipient does not pass.
+#[test]
+fn a_nudge_that_names_only_the_recipient_is_not_saved() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-recipient-name");
+    let mut other = msg(
+        "from-ana",
+        "t-other",
+        500,
+        "INBOX",
+        "ana@example.org",
+        "me@example.com",
+        Some("Hello"),
+    );
+    other.header.from_name = Some("Ana Priyanka".into());
+    b.store.put_messages(1, &[other]).unwrap();
+    understood(&b.store);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET doc = json_set(doc, '$.title', 'Priyanka to send the slides')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    let fake = Fake::new(r#"{"body": "Hi Priyanka, any news? D", "named": [1]}"#);
+    assert!(matches!(
+        nudge(&b.store, &l, &fake, now),
+        Err(Error::BadAnswer(_))
+    ));
+    assert_eq!(saved(&b.store, t), None);
+    let fake = Fake::new(r#"{"body": "Hi Priyanka, the slides? D", "named": [1]}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
+}
+
+/// Issue #1146: each stored name of an address of the thread is a people
+/// word: also more than 8 names of one address, and a name of a sender
+/// who is only in an older message of the thread, from another thread.
+#[test]
+fn every_stored_name_of_a_thread_address_is_a_people_word() {
+    let (b, t) = asked("people-all-names");
+    // An older message of the thread from Cy, and the newest six from me.
+    let mut older = msg(
+        "cy-1",
+        "t-ask",
+        10,
+        "INBOX",
+        "cy@example.org",
+        "me@example.com",
+        Some("Hi"),
+    );
+    older.header.from_name = Some("Cy".into());
+    let mut msgs = vec![older];
+    for i in 0..THREAD_MESSAGES {
+        msgs.push(msg(
+            &format!("me-{i}"),
+            "t-ask",
+            20 + i as i64,
+            "SENT",
+            "me@example.com",
+            "ana@example.org",
+            Some("x"),
+        ));
+    }
+    // Other threads: 12 names of Ana, and one other name of Cy.
+    for i in 0..12 {
+        let mut m = msg(
+            &format!("ana-{i}"),
+            &format!("t-a{i}"),
+            5,
+            "INBOX",
+            "ana@example.org",
+            "me@example.com",
+            Some("Hello"),
+        );
+        m.header.from_name = Some(format!("Annaname{i}"));
+        msgs.push(m);
+    }
+    let mut cy = msg(
+        "cy-2",
+        "t-cy",
+        5,
+        "INBOX",
+        "cy@example.org",
+        "me@example.com",
+        Some("Hello"),
+    );
+    cy.header.from_name = Some("Cyrillus".into());
+    msgs.push(cy);
+    b.store.put_messages(1, &msgs).unwrap();
+    let snap = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    assert!(snap
+        .newest
+        .iter()
+        .all(|m| m.from_addr.as_deref() != Some("cy@example.org")));
+    let texts = b
+        .store
+        .read(|c| {
+            Ok(people_texts(
+                c,
+                t,
+                "me@example.com",
+                Some("ana@example.org"),
+                &snap.newest,
+            )?)
+        })
+        .unwrap();
+    let people = people_words(&texts);
+    for w in ["cyrillus", "annaname0", "annaname11"] {
+        assert!(
+            people.binary_search(&w.to_string()).is_ok(),
+            "{w} {people:?}"
+        );
+    }
+}
+
+/// Issue #1146: the stored name of each entry of a `To` or `Cc` list is a
+/// people word, also for a quoted local part with a comma in it.
+#[test]
+fn the_stored_name_of_each_list_entry_is_a_people_word() {
+    let (b, t) = asked("people-list-entries");
+    let locals = ["\"a,b\"", "\"c, d\"", "plain", "\"x\\\"y,z\""];
+    let mut seed = 5u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    let mut msgs = vec![];
+    let mut addrs = vec![];
+    for (i, l) in locals.iter().enumerate() {
+        let addr = format!("{l}@ex{i}.org");
+        let mut m = msg(
+            &format!("q-{i}"),
+            &format!("t-q{i}"),
+            5,
+            "INBOX",
+            &addr,
+            "me@example.com",
+            Some("Hi"),
+        );
+        m.header.from_name = Some(format!("Quotedname{i}"));
+        msgs.push(m);
+        addrs.push(addr);
+    }
+    b.store.put_messages(1, &msgs).unwrap();
+    for _ in 0..50 {
+        let mut list: Vec<String> = addrs.clone();
+        for i in (1..list.len()).rev() {
+            list.swap(i, next(i + 1));
+        }
+        let mut snap = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+        snap.newest[0].cc_addrs = Some(list.join(", "));
+        let texts = b
+            .store
+            .read(|c| Ok(people_texts(c, t, "me@example.com", None, &snap.newest)?))
+            .unwrap();
+        let people = people_words(&texts);
+        for i in 0..locals.len() {
+            let w = format!("quotedname{i}");
+            assert!(people.binary_search(&w).is_ok(), "{w} {list:?}");
+        }
+    }
 }
 
 /// Issue #1075: for any commitment, a body that holds one of its key words
@@ -2312,18 +2575,19 @@ fn a_body_with_a_key_word_names_its_commitment() {
     for _ in 0..2000 {
         let title: Vec<&str> = (0..1 + next(4)).map(|_| words[next(words.len())]).collect();
         let ask = serde_json::json!({"title": title.join(" "), "quote": null});
-        let keys = key_words(&ask);
+        let (keys, _) = key_words(&ask, &[]);
         assert!(keys
             .iter()
             .all(|k| title.iter().any(|w| w.to_lowercase() == *k)));
         if let Some(k) = keys.first() {
             assert!(names(
                 &format!("Hi, any news on the {}? D", k.to_uppercase()),
-                &ask
+                &ask,
+                &[]
             ));
-            assert!(!names("Hi, any news? D", &ask), "{ask}");
+            assert!(!names("Hi, any news? D", &ask, &[]), "{ask}");
         } else {
-            assert!(names("Hi", &ask));
+            assert!(names("Hi", &ask, &[]));
         }
     }
 }
