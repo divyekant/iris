@@ -412,11 +412,15 @@ again from the store, before each session, and keeps a `drafts/` folder that
 is there. A program of a session writes `drafts/`, and can change it during
 the copy. So the copy opens the job folder and `drafts/` with no link, and
 then opens each file relative to the opened `drafts/` folder, with no link
-and no wait on a FIFO. It copies a regular file of at most 1 MiB (a body has
-at most 256 KiB), and at most 256 files of each job, by name. The scan of a
-folder keeps at most 256 names in memory. So a session cannot make the
-backup large, grow the memory of the engine, or make the backup read a file
-outside its `drafts/` folder. The two limits have issue #1063. A
+and no wait on a FIFO. It copies each regular file, with no size limit and
+no count limit (issue #1152). The copy streams each name of a folder and
+the bytes of each file, so no list of names and no whole file is in the
+memory of the engine. A file that grows during the copy gives at most its
+size at the open, so the copy of one file ends. The copy holds only files
+that the session wrote to `drafts/`, so its size comes from the disk use of
+the session. A session that writes new names during the scan can make the
+scan longer, as before this change. So a session cannot grow the memory of
+the engine, or make the backup read a file outside its `drafts/` folder. A
 draft that the agent submits is in the store (specification 2) too. A copy
 of the whole folder while the engine is stopped copies `workspaces/` with
 all the files of the agent.
@@ -426,14 +430,13 @@ during the copy):
 
 | Input or event | Result |
 |---|---|
-| A regular file of at most 1 MiB, one of the first 256 names | Copied, mode 0600 |
-| A file over 1 MiB, or a name after the first 256 | Not copied |
+| A regular file, of any size | Copied, mode 0600 |
 | A link, a FIFO, a device, a socket or a subfolder in `drafts/` | Not copied |
 | `drafts/` or the job folder is a link | Nothing of that job is copied |
 | `drafts/` is renamed or replaced after the open | The copy reads the folder that it opened |
 | A file goes away, or becomes a link, before its open | Not copied |
-| A file changes during its read | The bytes of one read, at most 1 MiB |
-| A folder with very many entries | The scan keeps at most 256 names; the time grows with the count |
+| A file changes during its read | The bytes of one read, at most its size at the open |
+| A folder with very many entries | The scan keeps no name list; the time grows with the count and the bytes |
 | Any other error of the file system | The backup fails and says so. The folder of the failed backup is not a backup: use another one |
 
 The store keeps a copy of `notes.md`

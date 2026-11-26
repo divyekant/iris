@@ -15,13 +15,6 @@ use crate::{
 /// How long the store keeps the content of a gone message (section 4.5).
 pub const GONE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
-/// The largest file of `drafts/` that a backup copies. A larger file is not
-/// a draft of mail (a body has at most 256 KiB, `iris-compose`).
-pub const DRAFT_FILE_MAX: u64 = 1024 * 1024;
-
-/// The most files of one `drafts/` folder that a backup copies.
-pub const DRAFT_FILES_MAX: usize = 256;
-
 /// The most messages in one transaction of the cleanup.
 const CLEAN_BATCH: i64 = 500;
 
@@ -52,26 +45,11 @@ pub struct PolicyWrite {
     pub saved: Option<std::path::PathBuf>,
 }
 
-/// What [`Store::backup`] copied, and the drafts that it did not copy.
+/// What [`Store::backup`] copied.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Backup {
     /// The content files of the copy.
     pub files: u64,
-    /// Each `drafts/` folder of a job workspace with a file that the copy
-    /// did not take (issue #1063), by job name.
-    pub skipped: Vec<SkippedDrafts>,
-}
-
-/// The drafts of one job workspace that a backup did not copy.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct SkippedDrafts {
-    /// The `drafts/` folder in the data folder.
-    pub folder: std::path::PathBuf,
-    /// The names of the files over [`DRAFT_FILE_MAX`] bytes. At most
-    /// [`DRAFT_FILES_MAX`], because the copy reads only that many names.
-    pub large: Vec<std::ffi::OsString>,
-    /// The count of the files after the first [`DRAFT_FILES_MAX`] names.
-    pub more: u64,
 }
 
 /// What [`Store::clean_gone`] removed.
@@ -167,7 +145,7 @@ impl Store {
 
         // The drafts of each job workspace (issue #350): the build makes the
         // other files of a workspace again from the store.
-        let skipped = copy_drafts(&self.dir.join("workspaces"), &dest.join("workspaces"))?;
+        copy_drafts(&self.dir.join("workspaces"), &dest.join("workspaces"))?;
 
         // Without the key, the copy cannot decrypt the secrets.
         copy_private(&self.dir.join("key"), &dest.join("key"))?;
@@ -176,7 +154,7 @@ impl Store {
             copy_private(&policy, &dest.join("policy.toml"))?;
         }
         sync_dir(dest)?;
-        Ok(Backup { files, skipped })
+        Ok(Backup { files })
     }
 
     /// Puts `text` at `policy.toml` (section 5.1), or no file for `None`,
@@ -615,82 +593,74 @@ fn copy_attachments(src: &Path, dest: &Path) -> Result<()> {
 /// with no link at any level (`O_NOFOLLOW`), and opens each file relative to
 /// the handle of its `drafts/` folder. A rename of a folder after the open
 /// does not move the copy: it reads only the folder that it opened. The copy
-/// takes only regular files (no FIFO, no device, no subfolder), at most
-/// [`DRAFT_FILE_MAX`] bytes each, and the first [`DRAFT_FILES_MAX`] names (by
-/// byte order). The scan keeps at most [`DRAFT_FILES_MAX`] names in memory,
-/// so a folder with many entries does not grow the memory of the engine. A
-/// file that goes away, or that is not a regular file when the copy opens
-/// it, is not copied. A file that changes during the copy gives the bytes of
-/// one read, at most [`DRAFT_FILE_MAX`]. Gives the folders with a file
-/// that the copy did not take for its size or for the count.
+/// takes each regular file (no FIFO, no device, no subfolder). It streams
+/// each name of the folder and the bytes of each file, so no list of names
+/// and no file is in memory (issue #1152). A file that goes away, or that is
+/// not a regular file when the copy opens it, is not copied. A file that
+/// grows during the copy gives at most its size at the open, so the copy
+/// ends; a file that changes gives the bytes of one read.
 #[cfg(unix)]
-fn copy_drafts(src: &Path, dest: &Path) -> Result<Vec<SkippedDrafts>> {
+fn copy_drafts(src: &Path, dest: &Path) -> Result<()> {
     let Some(root) = dir_at(None, src.as_os_str())? else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     let mut any = false;
-    let mut skipped = Vec::new();
     // The engine makes each job folder; a session cannot add one here.
-    for job in smallest_names(&root, usize::MAX, true)?.0 {
-        let Some(job_dir) = dir_at(Some(&root), &job)? else {
-            continue;
+    each_name(&root, true, |job| {
+        let Some(job_dir) = dir_at(Some(&root), job)? else {
+            return Ok(());
         };
         let Some(drafts) = dir_at(Some(&job_dir), std::ffi::OsStr::new("drafts"))? else {
-            continue;
+            return Ok(());
         };
-        let to_job = dest.join(&job);
-        let (made, mut skip) = copy_from(&drafts, &to_job.join("drafts"))?;
-        if !skip.large.is_empty() || skip.more > 0 {
-            skip.folder = src.join(&job).join("drafts");
-            skipped.push(skip);
-        }
-        if made {
+        let to_job = dest.join(job);
+        if copy_from(&drafts, &to_job.join("drafts"))? {
             // The new `drafts` entry is in the job folder, and the new job
             // entry is in `dest`: sync both before the backup says done.
             sync_dir(&to_job)?;
             any = true;
         }
-    }
+        Ok(())
+    })?;
     if any {
         sync_dir(dest)?;
     }
-    Ok(skipped)
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn copy_drafts(_src: &Path, _dest: &Path) -> Result<Vec<SkippedDrafts>> {
-    Ok(Vec::new())
+fn copy_drafts(_src: &Path, _dest: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Copy the drafts of one opened `drafts/` folder to `to_dir`. True if the
-/// copy made `to_dir`, and the files that it did not take (with no folder).
+/// copy made `to_dir`.
 #[cfg(unix)]
-fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<(bool, SkippedDrafts)> {
+fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
+    use std::io::Read as _;
     let mut made = false;
-    let (names, more) = smallest_names(drafts, DRAFT_FILES_MAX, false)?;
-    let mut skip = SkippedDrafts {
-        more,
-        ..SkippedDrafts::default()
-    };
-    for name in names {
-        let bytes = match read_draft(drafts, &name)? {
-            Draft::Bytes(b) => b,
-            Draft::Large => {
-                skip.large.push(name);
-                continue;
-            }
-            Draft::None => continue,
+    each_name(drafts, false, |name| {
+        // The type check below refuses a folder, a FIFO and a device.
+        let Some(fd) = open_at(Some(drafts), name, 0)? else {
+            return Ok(());
         };
+        let file = File::from(fd);
+        let m = file.metadata()?;
+        if !m.is_file() {
+            return Ok(());
+        }
         make_private_dir(to_dir)?;
         made = true;
-        let to = to_dir.join(&name);
-        private_file(&to, true)?.write_all(&bytes)?;
-        sync_file(&to)?;
-    }
+        let to = to_dir.join(name);
+        let mut out = private_file(&to, true)?;
+        io::copy(&mut file.take(m.len()), &mut out)?;
+        out.sync_all()?;
+        Ok(())
+    })?;
     if made {
         sync_dir(to_dir)?;
     }
-    Ok((made, skip))
+    Ok(made)
 }
 
 /// Open the folder `name` relative to `parent` (or the path `name` with no
@@ -729,17 +699,16 @@ fn open_at(
     Ok(Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
 }
 
-/// The `max` smallest names (by byte order) of the entries of the folder
-/// `dir` that can be folders (`dirs`) or regular files, sorted, and the
-/// count of the other such entries. The scan keeps at most `max` names in
-/// memory. The caller checks the type again
-/// at the open, because an entry can change after the scan.
+/// Call `f` with the name of each entry of the folder `dir` that can be a
+/// folder (`dirs`) or a regular file, in the order of the folder. The scan
+/// keeps no name list in memory. The caller checks the type again at the
+/// open, because an entry can change after the scan.
 #[cfg(unix)]
-fn smallest_names(
+fn each_name(
     dir: &std::os::fd::OwnedFd,
-    max: usize,
     dirs: bool,
-) -> io::Result<(Vec<std::ffi::OsString>, u64)> {
+    mut f: impl FnMut(&std::ffi::OsStr) -> Result<()>,
+) -> Result<()> {
     use std::os::fd::IntoRawFd;
     use std::os::unix::ffi::OsStrExt;
     // `fdopendir` takes the descriptor, so give it a copy.
@@ -747,7 +716,7 @@ fn smallest_names(
     // SAFETY: `copy` is an open folder; `closedir` below closes it.
     let d = unsafe { libc::fdopendir(copy.into_raw_fd()) };
     if d.is_null() {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::last_os_error().into());
     }
     struct Close(*mut libc::DIR);
     impl Drop for Close {
@@ -760,8 +729,6 @@ fn smallest_names(
     // The copy shares the read offset of `dir`: start at the first entry.
     // SAFETY: `d.0` is an open DIR.
     unsafe { libc::rewinddir(d.0) };
-    let mut heap = std::collections::BinaryHeap::new();
-    let mut more = 0u64;
     loop {
         // `readdir` gives NULL at the end and on an error: only errno tells
         // the two apart, so a failed read does not look like the end.
@@ -771,9 +738,9 @@ fn smallest_names(
         if e.is_null() {
             let err = io::Error::last_os_error();
             if err.raw_os_error().is_some_and(|n| n != 0) {
-                return Err(err);
+                return Err(err.into());
             }
-            break;
+            return Ok(());
         }
         // SAFETY: `e` points to a valid entry until the next `readdir`.
         let (t, name) = unsafe {
@@ -791,18 +758,8 @@ fn smallest_names(
         if t != want && t != libc::DT_UNKNOWN {
             continue;
         }
-        heap.push(name);
-        if heap.len() > max {
-            heap.pop();
-            more += 1;
-        }
+        f(std::ffi::OsStr::from_bytes(&name))?;
     }
-    let names = heap
-        .into_sorted_vec()
-        .into_iter()
-        .map(|n| std::ffi::OsStr::from_bytes(&n).to_owned())
-        .collect();
-    Ok((names, more))
 }
 
 #[cfg(unix)]
@@ -818,40 +775,6 @@ fn set_errno(v: libc::c_int) {
             *libc::__error() = v;
         }
     }
-}
-
-/// A file of `drafts/` as the copy reads it.
-#[cfg(unix)]
-enum Draft {
-    Bytes(Vec<u8>),
-    /// A regular file of more than [`DRAFT_FILE_MAX`] bytes.
-    Large,
-    /// Gone, or not a regular file.
-    None,
-}
-
-/// The bytes of the file `name` of the opened folder `dir`.
-#[cfg(unix)]
-fn read_draft(dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> Result<Draft> {
-    use std::io::Read as _;
-    // The type check below refuses a folder, a FIFO and a device.
-    let Some(fd) = open_at(Some(dir), name, 0)? else {
-        return Ok(Draft::None);
-    };
-    let file = File::from(fd);
-    let m = file.metadata()?;
-    if !m.is_file() {
-        return Ok(Draft::None);
-    }
-    if m.len() > DRAFT_FILE_MAX {
-        return Ok(Draft::Large);
-    }
-    let mut bytes = Vec::new();
-    file.take(DRAFT_FILE_MAX + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > DRAFT_FILE_MAX {
-        return Ok(Draft::Large);
-    }
-    Ok(Draft::Bytes(bytes))
 }
 
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
@@ -896,29 +819,32 @@ mod tests {
         std::os::unix::fs::symlink(&data, &drafts).unwrap();
 
         let to = d.join("out/drafts");
-        assert!(copy_from(&pinned, &to).unwrap().0);
+        assert!(copy_from(&pinned, &to).unwrap());
         assert_eq!(fs::read(to.join("key")).unwrap(), b"draft");
         // A new open of the path refuses the link.
         assert!(dir_at(Some(&job), OsStr::new("drafts")).unwrap().is_none());
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// The scan keeps the smallest names only, and never more than `max`.
+    /// The scan gives each file once, and no folder (issue #1152: no name
+    /// limit).
     #[test]
-    fn the_scan_keeps_only_the_smallest_names() {
+    fn the_scan_gives_each_file() {
         let d = temp("scan");
-        for i in (0..600).rev() {
+        for i in 0..600 {
             fs::write(d.join(format!("{i:04}")), b"x").unwrap();
         }
         fs::create_dir(d.join("0000a")).unwrap();
         let dir = dir_at(None, d.as_os_str()).unwrap().unwrap();
-        let (names, more) = smallest_names(&dir, 3, false).unwrap();
-        // The folder `0000a` is not a file, so it takes no place.
-        assert_eq!(names, ["0000", "0001", "0002"]);
-        assert_eq!(more, 597);
-        let (names, more) = smallest_names(&dir, DRAFT_FILES_MAX, false).unwrap();
-        assert_eq!(names.len(), DRAFT_FILES_MAX);
-        assert_eq!(more, 600 - DRAFT_FILES_MAX as u64);
+        let mut names = vec![];
+        each_name(&dir, false, |n| {
+            names.push(n.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        names.sort();
+        let want: Vec<std::ffi::OsString> = (0..600).map(|i| format!("{i:04}").into()).collect();
+        assert_eq!(names, want);
         let _ = fs::remove_dir_all(&d);
     }
 }
