@@ -1178,7 +1178,7 @@ fn the_extension_reader_finds_each_hidden_name() {
             r.next(12) as usize,
             1 + r.next(600) as usize,
         );
-        let types = hello_extensions(&bytes).expect("a whole hello");
+        let types = types_of(&bytes).expect("a whole hello");
         for (t, _) in &extra {
             assert!(types.contains(t), "{t:#x} in {types:x?}");
         }
@@ -1198,16 +1198,22 @@ fn the_extension_reader_finds_each_hidden_name() {
         }
         // A cut or a changed byte: no panic, and no pass of a hidden name.
         let cut = &bytes[..r.next(bytes.len() as u64) as usize];
-        let _ = hello_extensions(cut);
+        let _ = types_of(cut);
         let mut bad = bytes.clone();
         let i = r.next(bad.len() as u64) as usize;
         bad[i] ^= 1 + r.next(255) as u8;
         // A changed byte can also change the type of the extension.
         if matches!(check_hello(&bad, "api.example.test"), Ok(true)) {
-            let types = hello_extensions(&bad).expect("a passed hello is whole");
+            let types = types_of(&bad).expect("a passed hello is whole");
             assert!(!types.iter().any(|t| HIDDEN_NAME.contains(t)), "{types:x?}");
         }
     }
+}
+
+/// The extension types of the ClientHello at the start of `buf`.
+fn types_of(buf: &[u8]) -> Option<Vec<u16>> {
+    let mut types = Vec::new();
+    hello_extensions(buf, |t| types.push(t)).map(|()| types)
 }
 
 /// A proxy of a Linux session on its socket pair, with a loopback server.

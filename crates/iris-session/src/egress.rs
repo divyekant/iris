@@ -1277,11 +1277,10 @@ fn check_hello(buf: &[u8], name: &str) -> Result<bool, Reason> {
             Some(sni) if sni.eq_ignore_ascii_case(name) => {
                 // With ECH, the SNI is only the outer name: the server can
                 // serve another site from the encrypted inner name.
-                match hello_extensions(buf) {
-                    Some(types) if types.iter().any(|t| HIDDEN_NAME.contains(t)) => {
-                        Err(Reason::Ech)
-                    }
-                    Some(_) => Ok(true),
+                let mut hidden = false;
+                match hello_extensions(buf, |t| hidden |= HIDDEN_NAME.contains(&t)) {
+                    Some(()) if hidden => Err(Reason::Ech),
+                    Some(()) => Ok(true),
                     None => Err(Reason::NotTls),
                 }
             }
@@ -1296,66 +1295,79 @@ fn check_hello(buf: &[u8], name: &str) -> Result<bool, Reason> {
 /// (`encrypted_server_name`).
 const HIDDEN_NAME: [u16; 2] = [0xfe0d, 0xffce];
 
-/// The extension types of the ClientHello at the start of `buf`, in order.
-/// The ClientHello can come in more than one TLS record. `None` if `buf`
-/// does not start with one whole ClientHello.
-fn hello_extensions(buf: &[u8]) -> Option<Vec<u16>> {
-    // Join the fragments of the handshake records until the message is
-    // whole.
-    let mut message = Vec::new();
-    let mut rest = buf;
-    let len = loop {
-        if let [_, a, b, c, ..] = message[..] {
-            let len = 4 + u32::from_be_bytes([0, a, b, c]) as usize;
-            if message.len() >= len {
-                break len;
-            }
-        }
-        let (head, tail) = rest.split_at_checked(5)?;
-        if head[0] != 22 {
-            return None;
-        }
-        let (fragment, tail) =
-            tail.split_at_checked(u16::from_be_bytes([head[3], head[4]]) as usize)?;
-        message.extend_from_slice(fragment);
-        rest = tail;
+/// Gives each extension type of the ClientHello at the start of `buf` to
+/// `each`, in order. The ClientHello can come in more than one TLS record.
+/// `None` if `buf` does not start with one whole ClientHello. It reads the
+/// records in place: no copy and no allocation.
+fn hello_extensions(buf: &[u8], mut each: impl FnMut(u16)) -> Option<()> {
+    let mut r = Records {
+        fragment: &[],
+        rest: buf,
+        at: 0,
+        end: 4,
     };
-    let mut r = Reader(message.get(..len)?);
-    if r.take(1)? != [1] {
+    if r.number(1)? != 1 {
         return None; // not a ClientHello
     }
-    r.take(3 + 2 + 32)?; // length, version, random
+    r.end = 4 + r.number(3)?;
+    r.skip(2 + 32)?; // version, random
     for width in [1, 2, 1] {
         // session ID, cipher suites, compression methods
-        r.vector(width)?;
+        let n = r.number(width)?;
+        r.skip(n)?;
     }
-    let mut ext = Reader(r.vector(2)?);
-    let mut types = Vec::new();
-    while !ext.0.is_empty() {
-        let t = ext.take(2)?;
-        types.push(u16::from_be_bytes([t[0], t[1]]));
-        ext.vector(2)?;
+    let list = r.number(2)?;
+    let list_end = r.at.checked_add(list).filter(|e| *e <= r.end)?;
+    while r.at < list_end {
+        each(r.number(2)? as u16);
+        let n = r.number(2)?;
+        r.skip(n)?;
     }
-    Some(types)
+    if r.at != list_end {
+        return None;
+    }
+    // The rest of the message must be in `buf` too.
+    r.skip(r.end - r.at)
 }
 
-/// A reader of TLS vectors.
-struct Reader<'a>(&'a [u8]);
+/// A reader of one handshake message over the fragments of its TLS
+/// records, in place.
+struct Records<'a> {
+    /// The unread part of the fragment of the current record.
+    fragment: &'a [u8],
+    /// The records after it.
+    rest: &'a [u8],
+    /// The bytes of the message read so far, and the length of the message.
+    at: usize,
+    end: usize,
+}
 
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let (a, b) = self.0.split_at_checked(n)?;
-        self.0 = b;
-        Some(a)
+impl Records<'_> {
+    fn byte(&mut self) -> Option<u8> {
+        if self.at >= self.end {
+            return None;
+        }
+        while self.fragment.is_empty() {
+            let (head, tail) = self.rest.split_at_checked(5)?;
+            if head[0] != 22 {
+                return None; // not a handshake record
+            }
+            let len = u16::from_be_bytes([head[3], head[4]]) as usize;
+            (self.fragment, self.rest) = tail.split_at_checked(len)?;
+        }
+        let (b, tail) = self.fragment.split_first()?;
+        self.fragment = tail;
+        self.at += 1;
+        Some(*b)
     }
 
-    /// A vector with a length of `width` bytes before it.
-    fn vector(&mut self, width: usize) -> Option<&'a [u8]> {
-        let len = self
-            .take(width)?
-            .iter()
-            .fold(0usize, |n, b| n << 8 | *b as usize);
-        self.take(len)
+    /// A big-endian number of `width` bytes.
+    fn number(&mut self, width: usize) -> Option<usize> {
+        (0..width).try_fold(0usize, |n, _| Some(n << 8 | self.byte()? as usize))
+    }
+
+    fn skip(&mut self, n: usize) -> Option<()> {
+        (0..n).try_for_each(|_| self.byte().map(drop))
     }
 }
 
