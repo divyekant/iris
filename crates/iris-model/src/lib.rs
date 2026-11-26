@@ -229,6 +229,10 @@ pub fn data_block(text: &str) -> String {
     format!("{DATA_START}\n{}\n{DATA_END}", text.replace("<<<", "‹‹‹"))
 }
 
+/// The longest name resolution, and the longest connect (TCP and TLS), of
+/// one model call.
+pub const SETUP_LIMIT: Duration = Duration::from_secs(10);
+
 /// The time between two reads of the cancel test of [`Client::ask_cancel`].
 pub const CANCEL_POLL: Duration = Duration::from_millis(50);
 
@@ -247,6 +251,11 @@ impl Client {
         // mail off the machine (docs/specs/2026-11-16-cost-control.md).
         let mut b = ureq::Agent::config_builder()
             .timeout_global(Some(config.timeout))
+            // A cancel cannot stop name resolution or a TCP connect (issue
+            // #1182): these bounds end the thread of a cancelled call sooner
+            // than the time limit of the call.
+            .timeout_resolve(Some(SETUP_LIMIT.min(config.timeout)))
+            .timeout_connect(Some(SETUP_LIMIT.min(config.timeout)))
             .http_status_as_error(false)
             .max_redirects(0);
         if config.provider == Provider::OpenAiCompatible {
@@ -269,8 +278,8 @@ impl Client {
     /// own agent. A cancel shuts that agent down, so the connection closes
     /// and the thread ends at once (issue #1158).
     // shortcut: a cancel does not stop name resolution or a TCP connect in
-    // progress (ureq `Agent::shutdown`); the thread ends at the time limit of
-    // the config at most. Change this if ureq can stop them.
+    // progress (ureq `Agent::shutdown`, issue #1182); the thread ends after
+    // `SETUP_LIMIT` for each at most. Change this if ureq can stop them.
     pub fn ask_cancel(
         &self,
         instruction: &str,
@@ -524,6 +533,18 @@ pub fn cost(u: Usage, p: Price) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #1182: name resolution and the connect of a call each end
+    /// after `SETUP_LIMIT`, or at the time limit of the call if it is shorter.
+    #[test]
+    fn setup_of_a_call_is_bounded() {
+        for (limit, want) in [(120, SETUP_LIMIT), (3, Duration::from_secs(3))] {
+            let mut config = Config::local("http://127.0.0.1:1/v1", "m");
+            config.timeout = Duration::from_secs(limit);
+            let t = Client::new(config).agent.config().timeouts();
+            assert_eq!((t.resolve, t.connect), (Some(want), Some(want)));
+        }
+    }
 
     #[test]
     fn data_cannot_close_the_block() {
