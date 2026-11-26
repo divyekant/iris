@@ -1914,13 +1914,68 @@ pub fn record_unknown_contexts(store: &Store) -> iris_store::Result<()> {
     Ok(())
 }
 
+/// The most addresses of `party_due` that one pass of
+/// [`queue_party_threads`] holds in memory.
+const PARTY_PAGE: i64 = 10_000;
+
+/// Issue 1135: puts in `talk_due` each thread with an address of
+/// `party_due` (store migration 71: a known person that was added, changed
+/// or removed) in `To` or `Cc` of a message, and clears those addresses.
+/// The triggers of migrations 40 and 69 queue the `From` threads. One read
+/// of the headers serves all addresses of a page, so a sender refresh that
+/// changes many senders costs one scan, not one scan for each sender.
+/// Gives the count of addresses.
+pub fn queue_party_threads(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    let mut done = 0;
+    loop {
+        let due: std::collections::HashSet<String> = tx
+            .prepare_cached("SELECT address FROM party_due ORDER BY address LIMIT ?1")?
+            .query_map([PARTY_PAGE], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if due.is_empty() {
+            return Ok(done);
+        }
+        let mut threads = std::collections::BTreeSet::new();
+        {
+            let mut st = tx.prepare_cached(
+                "SELECT m.thread_id, coalesce(h.to_addrs, ''), coalesce(h.cc_addrs, '')
+                 FROM header h JOIN message m ON m.id = h.message_id
+                 WHERE m.thread_id IS NOT NULL
+                   AND (h.to_addrs IS NOT NULL OR h.cc_addrs IS NOT NULL)",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let (to, cc): (String, String) = (r.get(1)?, r.get(2)?);
+                // The lists hold bare lowercase addresses, comma-separated.
+                if to.split(',').chain(cc.split(',')).any(|a| due.contains(a)) {
+                    threads.insert(r.get::<_, i64>(0)?);
+                }
+            }
+        }
+        for t in threads {
+            tx.prepare_cached("INSERT OR IGNORE INTO talk_due(thread_id) VALUES (?1)")?
+                .execute([t])?;
+        }
+        let mut del = tx.prepare_cached("DELETE FROM party_due WHERE address = ?1")?;
+        for a in &due {
+            del.execute([a])?;
+        }
+        done += due.len();
+    }
+}
+
 /// Issue 1049: records the context now of a page of understood messages
 /// from before migration 69 (context "?") whose thread is not in
 /// `talk_due`. No change since the migration reached such a thread, so the
 /// context now is the context of its last run, as far as Iris can know
 /// (limit #1119). A message whose thread is in `talk_due` keeps "?", and
 /// the check of the thread runs it again. Gives the count of rows.
-fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+#[doc(hidden)]
+pub fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    // A known party in `To` or `Cc` only puts its threads in `talk_due`
+    // first, in the same write, so no change of a sender between the two
+    // can become the record of the last run (issue 1135).
+    queue_party_threads(tx)?;
     let page: Vec<i64> = tx
         .prepare_cached(
             "SELECT m.id FROM message m WHERE m.context = '?'

@@ -79,8 +79,13 @@ pay again for the same mail.
 - The record ends with the thread and the date of the message itself
   ("@thread:date"). An item of a run names its thread, so a message that
   sync moves to another thread or date with the same content runs again.
-- Limit (issue #1135): a known person who is only in `To` or `Cc` of a
-  thread does not put the thread in `talk_due`. A check compares the
+- A known person who is only in `To` or `Cc` of a thread (issue #1135):
+  a new, changed or removed `person` row puts its address in `party_due`
+  (migration 71). Before the "?" records of each batch run and queue
+  step, one read of the headers puts each thread with such an address in
+  `To` or `Cc` in `talk_due`, and clears the addresses. Migration 71 puts
+  each known person in `party_due`, so a change before the upgrade is
+  checked once. A check compares the
   recorded context of an understood message with its context now, and
   clears `understood_at` where they differ. So a later message runs again
   only when the context that its last run used changed: an earlier
@@ -114,7 +119,10 @@ pay again for the same mail.
   thread again. So a change after the upgrade is never lost. A thread
   that was in `talk_due` at the upgrade runs its old messages once.
 - Limit (issue #1119): a change before the upgrade is not seen, because
-  the first record of a message is its context at that time.
+  the first record of a message is its context at that time. The store
+  holds no reliable evidence of such a change (a fetch time also changes
+  for a fetch of the same content), and `iris rebuild` runs each message
+  again.
 
 ## Not in scope
 
