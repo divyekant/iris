@@ -1152,7 +1152,8 @@ fn a_channel_proxy_stops_after_the_end_of_the_helper() {
 }
 
 /// A descriptor that is not a TCP connection is closed with no answer and
-/// no log line, and the proxy goes on.
+/// no log line, a message with no descriptor is dropped, and the proxy
+/// goes on.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_channel_proxy_closes_a_descriptor_that_is_not_tcp() {
@@ -1167,6 +1168,8 @@ fn a_channel_proxy_closes_a_descriptor_that_is_not_tcp() {
     mine.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mut b = [0u8; 1];
     assert_eq!(mine.read(&mut b).unwrap(), 0, "the proxy closed it");
+    // A message with no descriptor is dropped too; the pair still works.
+    (&helper).write_all(b"x").unwrap();
     let agent = hand_over(&helper).unwrap();
     let (_s, line) = send_on(agent, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
     assert!(line.starts_with("HTTP/1.1 200"), "{line}");

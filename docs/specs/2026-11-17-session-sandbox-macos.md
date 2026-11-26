@@ -318,8 +318,9 @@ proxy on macOS needs a secret of its session:
   environment of session B.
 
 So the proxy of B refuses each process of A before any byte goes out, with
-no timing assumption. The Linux proxy keeps the peer check and gets no
-token.
+no timing assumption. The Linux proxy has no port and no token: it takes
+its clients only from the socket pair of its session (Linux sandbox spec,
+"Egress on Linux", issue 507).
 
 ### Check
 

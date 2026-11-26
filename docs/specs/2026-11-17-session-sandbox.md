@@ -432,8 +432,8 @@ before the agent runs, or `ended` is false.
   `claude-code` adapter, also in the adapter rule of the launcher spec.
 - The launcher spec, "Model egress": at `ended_at` the engine closes the
   proxy of the session (`Proxy::close`, new in `egress.rs`: no tunnel and
-  no new connection), and the proxy keeps its port until the reap check
-  passes. R4-04e calls `close` and `stop`.
+  no new connection), and the proxy keeps its end of the pair (its port
+  on macOS) until the reap check passes. R4-04e calls `close` and `stop`.
 - The launcher spec, "The hold helper": the helper runs outside the
   sandbox, and the agent (`bwrap` on Linux) is its child.
 - `docs/spec/03-job-workspace.md` and the fixed text of `JOB.md` in

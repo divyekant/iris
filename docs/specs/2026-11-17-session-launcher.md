@@ -390,8 +390,9 @@ proxy started):
    takes no new request (exit code 3).
 2. Close the egress proxy of the session (`Proxy::close`, see "Model
    egress"). This comes before each wait: no step below keeps a tunnel
-   open. The proxy keeps its port bound. The engine stops the proxy
-   (`Proxy::stop`, which frees the port) only after the reap check of the
+   open. The proxy keeps its port bound (macOS) or its end of the socket
+   pair open (Linux). The engine stops the proxy (`Proxy::stop`, which
+   frees the port or closes the pair) only after the reap check of the
    session passes. A launch that fails before the helper starts closes
    and keeps its proxy in the same way, and the supervisor stops it after
    the reap check.
@@ -615,7 +616,8 @@ no network stops them. The engine gives each session one narrow path out:
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
   starts one proxy for each session that it registers, after the bind and
-  before the helper, with the log and the peer address of that session.
+  before the helper, with the log of that session: on macOS with the
+  peer address `127.0.0.1` and a new token, on Linux on a new socket pair.
   A revoke retry registers a second session, so it gets its own proxy. If
   the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
@@ -651,8 +653,9 @@ no network stops them. The engine gives each session one narrow path out:
   `iris job stop` or a revoke through the engine also wakes it. The close
   ends each open tunnel and each resolve in progress, and from then on
   the proxy answers each new connection with a close and the log line
-  `ended reason=stopped`. The close keeps the port bound, and the engine
-  stops the proxy (`Proxy::stop`, which frees the port) only when the
+  `ended reason=stopped`. The close keeps the port bound (macOS) or the
+  engine end of the pair open (Linux), and the engine stops the proxy
+  (`Proxy::stop`, which frees the port or closes the pair) only when the
   reap check of the session passes.
 - Known limit (issue): an end that a store trigger or another process
   writes is not in step with the proxy. Between the commit of `ended_at`
@@ -873,7 +876,7 @@ is refused before a row is written.
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process on Linux; on macOS the new engine calls `stop` at its start and on each turn, and reaps the session only when `ended` is true | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
-| A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
+| A connection to the egress port of another session | The other session is not reached. Linux: each listener exists only in the namespace of its session, and sends its connections only on the pair of its session. macOS: the isolation permits only its own port, and the proxy takes only the token of its session | R4-05 test; Linux handoff test; macOS token test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
 | An allowed host that resolves to a loopback, private or other reserved address | `403` with `address_not_public`; no connection | Proxy property test over the reserved ranges, with a test resolver |
 | A `pass_env` with a proxy name, in any case | Refused with the line | Parser test |

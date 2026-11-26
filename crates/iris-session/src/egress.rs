@@ -657,13 +657,22 @@ impl Source {
                 // Not a TCP connection: the descriptor closes here.
                 Ok(Some(_)) => Next::Nothing,
                 Ok(None) => Next::Ended,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Next::Nothing,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => Next::Nothing,
+                // Only the end of the pair or an error of the socket ends
+                // the source; a message with no descriptor is dropped.
+                Err(e) if NOT_ENDED.contains(&e.kind()) => Next::Nothing,
                 Err(_) => Next::Ended,
             },
         }
     }
 }
+
+/// The errors of [`recv_fd`] after which the pair still works.
+#[cfg(target_os = "linux")]
+const NOT_ENDED: [io::ErrorKind; 3] = [
+    io::ErrorKind::WouldBlock,
+    io::ErrorKind::Interrupted,
+    io::ErrorKind::InvalidData,
+];
 
 /// True if `fd` is a TCP stream socket.
 #[cfg(target_os = "linux")]
@@ -675,8 +684,8 @@ fn is_tcp_stream(fd: &OwnedFd) -> bool {
 
 /// Receives one message of [`send_fd`](crate::isolation_linux) from the
 /// Unix socket `sock`. Gives the file descriptor of the message, `None` at
-/// the end of the stream, or an error (also for a message with no
-/// descriptor). Each descriptor gets close-on-exec.
+/// the end of the stream, or an error: `InvalidData` for a message with no
+/// descriptor. Each descriptor gets close-on-exec.
 #[cfg(target_os = "linux")]
 pub(crate) fn recv_fd(sock: RawFd) -> io::Result<Option<OwnedFd>> {
     use std::os::fd::FromRawFd;
@@ -708,7 +717,10 @@ pub(crate) fn recv_fd(sock: RawFd) -> io::Result<Option<OwnedFd>> {
             return if n == 0 {
                 Ok(None)
             } else {
-                Err(io::Error::other("a message with no file descriptor"))
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a message with no file descriptor",
+                ))
             };
         }
         let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const RawFd);
