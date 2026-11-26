@@ -650,6 +650,9 @@ struct File<'a> {
     enc: Encoding,
     /// The MIME depth of the part. An attached message goes one level deeper.
     depth: usize,
+    /// An attached message of a version of `multipart/alternative` that the
+    /// text does not use: only its links count, it is not an attachment.
+    links_only: bool,
 }
 
 /// Step 1 of one message: walk the MIME tree, make the text of each body
@@ -747,7 +750,9 @@ impl<'a> Walker<'a> {
             self.body_part(part, enc, mime_type == "text/html", charset.as_deref());
             return;
         }
-        if self.links_only {
+        // A mail client can show any version, so an attached message of a
+        // version that the text does not use still gets its links checked.
+        if self.links_only && mime_type != "message/rfc822" {
             return;
         }
         self.files.push(File {
@@ -757,6 +762,7 @@ impl<'a> Walker<'a> {
             part,
             enc,
             depth,
+            links_only: self.links_only,
         });
     }
 
@@ -787,7 +793,17 @@ impl<'a> Walker<'a> {
             let texts;
             (texts, self.chars, self.cut, _) = before;
             self.texts.truncate(texts);
-            self.files.truncate(before.3);
+            // The version adds no attachment, but its attached messages keep
+            // their link check.
+            let tail = self.files.split_off(before.3);
+            self.files.extend(
+                tail.into_iter()
+                    .filter(|f| f.mime_type == "message/rfc822")
+                    .map(|f| File {
+                        links_only: true,
+                        ..f
+                    }),
+            );
         }
     }
 
@@ -879,6 +895,13 @@ fn attachment(
     attached: &mut Links,
     at_end: Option<usize>,
 ) {
+    // An attached message that only its links count for ([`File`]) adds no
+    // attachment and uses no budget.
+    let (mut no_budget, mut no_out) = (0, Vec::new());
+    let (attach_left, out) = match f.links_only {
+        true => (&mut no_budget, &mut no_out),
+        false => (attach_left, out),
+    };
     let body = f.part.raw_body();
     let enc = f.enc;
     let size = decoded_len(body, enc);

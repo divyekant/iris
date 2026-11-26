@@ -579,3 +579,178 @@ From: c@example.com\r\nSubject: z\r\nContent-Type: text/plain\r\n\r\nHi.\r\n--i-
         - 14;
     assert!(html_part_in(&raw[..start], &raw[start..]).unwrap());
 }
+
+/// Invariant: each attached message of the MIME tree gets its links
+/// checked, whichever version of a `multipart/alternative` gives the clean
+/// text. A version that the text does not use adds no attachment (review
+/// finding on #1122, issue #1140).
+#[test]
+fn an_attached_message_in_each_version_of_an_alternative_is_checked() {
+    let inner = "From: b@bank.example.com\r\nSubject: y\r\nContent-Type: text/html\r\n\r\n\
+<a href=\"https://evil.example.net/\">bank.example.com</a>";
+    let plain = "Content-Type: text/plain\r\n\r\nSee the mail.\r\n";
+    let attached = format!("Content-Type: message/rfc822\r\n\r\n{inner}\r\n");
+    // The attached message as the last version (no text, so the text uses
+    // the plain version), as the first version (the plain version is used
+    // first), and inside a nested multipart of a version that is not used.
+    let nested =
+        format!("Content-Type: multipart/mixed; boundary=n\r\n\r\n--n\r\n{attached}--n--\r\n");
+    for versions in [
+        vec![plain.to_string(), attached.clone()],
+        vec![attached.clone(), plain.to_string()],
+        vec![plain.to_string(), nested.clone()],
+        vec![nested.clone(), plain.to_string()],
+    ] {
+        let body: String = versions.iter().map(|v| format!("--a\r\n{v}")).collect();
+        let raw = format!(
+            "From: a@example.com\r\nSubject: x\r\n\
+Content-Type: multipart/alternative; boundary=a\r\n\r\n{body}--a--\r\n"
+        );
+        let c = clean(raw.as_bytes());
+        assert_eq!(c.text, "See the mail.", "{versions:?}");
+        assert_eq!(
+            c.attached_links,
+            vec![link("bank.example.com", "https://evil.example.net/")],
+            "{versions:?}"
+        );
+        assert!(c.attachments.is_empty(), "{versions:?}");
+    }
+}
+
+/// One part of a generated MIME tree.
+enum Node {
+    Plain,
+    Html,
+    /// An attached message with one deceptive link, number `k`.
+    Attached(usize),
+    /// A file attachment.
+    File,
+    Mixed(Vec<Node>),
+    Alt(Vec<Node>),
+}
+
+impl Node {
+    fn gen(r: &mut Rng, depth: usize, next: &mut usize) -> Node {
+        let leaf = depth >= 3 || r.below(3) == 0;
+        match (leaf, r.below(4)) {
+            (true, 0) => Node::Plain,
+            (true, 1) => Node::Html,
+            (true, 2) => {
+                *next += 1;
+                Node::Attached(*next)
+            }
+            (true, _) => Node::File,
+            (false, k) => {
+                let kids = (0..1 + r.below(3))
+                    .map(|_| Node::gen(r, depth + 1, next))
+                    .collect();
+                if k % 2 == 0 {
+                    Node::Mixed(kids)
+                } else {
+                    Node::Alt(kids)
+                }
+            }
+        }
+    }
+
+    fn has_text(&self) -> bool {
+        match self {
+            Node::Plain | Node::Html => true,
+            Node::Attached(_) | Node::File => false,
+            Node::Mixed(k) | Node::Alt(k) => k.iter().any(Node::has_text),
+        }
+    }
+
+    /// Each attached message (`all`), and the attachment names that the
+    /// message lists (`shown`): an unused version of an alternative lists
+    /// none. The last version with text is the used one.
+    fn expect(&self, used: bool, all: &mut Vec<usize>, shown: &mut Vec<String>) {
+        match self {
+            Node::Plain | Node::Html => {}
+            Node::Attached(k) => {
+                all.push(*k);
+                if used {
+                    shown.push(format!("s{k}"));
+                }
+            }
+            Node::File => {
+                if used {
+                    shown.push("f.bin".into());
+                }
+            }
+            Node::Mixed(kids) => kids.iter().for_each(|n| n.expect(used, all, shown)),
+            Node::Alt(kids) => {
+                let pick = kids.iter().rposition(Node::has_text);
+                for (i, n) in kids.iter().enumerate() {
+                    n.expect(used && pick == Some(i), all, shown);
+                }
+            }
+        }
+    }
+
+    fn mime(&self, b: &mut usize) -> String {
+        match self {
+            Node::Plain => "Content-Type: text/plain\r\n\r\nPlain words.\r\n".into(),
+            Node::Html => "Content-Type: text/html\r\n\r\n<p>Html words.</p>\r\n".into(),
+            Node::Attached(k) => format!(
+                "Content-Type: message/rfc822\r\n\r\nFrom: b@example.com\r\nSubject: s{k}\r\n\
+Content-Type: text/html\r\n\r\n<a href=\"https://evil{k}.example.net/\">bank{k}.example.com</a>\r\n"
+            ),
+            Node::File => "Content-Type: application/octet-stream\r\n\
+Content-Disposition: attachment; filename=f.bin\r\n\r\nxyz\r\n"
+                .into(),
+            Node::Mixed(kids) | Node::Alt(kids) => {
+                *b += 1;
+                let id = *b;
+                let sub = if matches!(self, Node::Mixed(_)) {
+                    "mixed"
+                } else {
+                    "alternative"
+                };
+                let body: String = kids
+                    .iter()
+                    .map(|n| format!("--b{id}\r\n{}", n.mime(b)))
+                    .collect();
+                format!("Content-Type: multipart/{sub}; boundary=b{id}\r\n\r\n{body}--b{id}--\r\n")
+            }
+        }
+    }
+}
+
+/// Generated trees of `multipart/alternative` and `multipart/mixed` parts:
+/// each attached message gets its links checked, in a used version or not,
+/// and only the used versions list attachments (issue #1140).
+#[test]
+fn generated_alternatives_check_each_attached_message() {
+    let mut r = Rng(0x1140_2026_1125);
+    for round in 0..400 {
+        let mut next = 0;
+        let tree = Node::Alt(
+            (0..1 + r.below(3))
+                .map(|_| Node::gen(&mut r, 1, &mut next))
+                .collect(),
+        );
+        let raw = format!("From: a@example.com\r\nSubject: x\r\n{}", tree.mime(&mut 0));
+        let (mut all, mut shown) = (Vec::new(), Vec::new());
+        tree.expect(true, &mut all, &mut shown);
+        let c = clean(raw.as_bytes());
+        assert!(!c.links_cut, "{round}: {raw}");
+        let mut got: Vec<Link> = c.attached_links.clone();
+        got.sort_by(|a, b| a.href.cmp(&b.href));
+        let mut want: Vec<Link> = all
+            .iter()
+            .map(|k| {
+                link(
+                    &format!("bank{k}.example.com"),
+                    &format!("https://evil{k}.example.net/"),
+                )
+            })
+            .collect();
+        want.sort_by(|a, b| a.href.cmp(&b.href));
+        assert_eq!(got, want, "{round}: {raw}");
+        let mut names: Vec<String> = c.attachments.iter().map(|a| a.name.clone()).collect();
+        names.sort();
+        shown.sort();
+        assert_eq!(names, shown, "{round}: {raw}");
+    }
+}
