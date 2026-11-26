@@ -619,15 +619,15 @@ fn a_notice_of_mail_the_model_did_not_read_shows_no_mail_words() {
         Ok(())
     })
     .unwrap();
+    // The words that a read of the notices shows.
     let words = |id: i64| -> (String, String) {
-        s.read(|c| {
-            Ok(c.query_row(
-                "SELECT title, text FROM notice WHERE message_id = ?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap()
+        let n = s
+            .read(notice::list)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.message_id == Some(id))
+            .unwrap();
+        (n.title, n.text)
     };
     let unchecked = (
         notice::UNCHECKED_TITLE.to_string(),
@@ -657,7 +657,16 @@ fn a_notice_of_mail_the_model_did_not_read_shows_no_mail_words() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(notices_now(&s), [refused, failed]);
+    let new = notice::refresh(&s, NOW).unwrap();
+    assert_eq!(
+        new.iter()
+            .map(|n| n.message_id.unwrap())
+            .collect::<Vec<_>>(),
+        [refused, failed]
+    );
+    // The system notice shows no words of the mail either.
+    assert!(new.iter().all(|n| (n.title.as_str(), n.text.as_str())
+        == (notice::UNCHECKED_TITLE, notice::UNCHECKED_TEXT)));
     assert_eq!(words(refused), unchecked);
     assert_eq!(words(failed), unchecked);
     // A model error wait (`retry_failures`) ends the wait of each mail.
@@ -693,4 +702,43 @@ fn a_notice_of_mail_the_model_did_not_read_shows_no_mail_words() {
     .unwrap();
     assert!(notices_now(&s).is_empty());
     assert_eq!(words(failed).1, "Lunch?");
+}
+
+/// Issue #1045: the words of a notice depend on the check at each read. A
+/// notice from a time with no model shows no words of the mail after a
+/// model is set, until the understanding of the mail finishes.
+#[test]
+fn a_model_set_after_the_notice_hides_the_words_of_unchecked_mail() {
+    let (_d, s) = store("model-later");
+    activate(&s, ANN);
+    let m = put(&s, &mail(), 0);
+    assert_eq!(notices_now(&s), [m]);
+    let shown = || {
+        let n = s.read(notice::list).unwrap().remove(0);
+        (n.title, n.text)
+    };
+    assert_eq!(shown().1, "Lunch?");
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(shown().1, notice::UNCHECKED_TEXT);
+    assert_eq!(
+        s.read(|c| notice::after(c, 0, 10)).unwrap()[0].text,
+        notice::UNCHECKED_TEXT
+    );
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET understood_at = ?2 WHERE id = ?1",
+            params![m, NOW],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(shown().1, "Lunch?");
 }

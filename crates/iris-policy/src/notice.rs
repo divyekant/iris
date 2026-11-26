@@ -66,14 +66,11 @@ pub struct Notice {
 /// after its fetch, for a model `phishing` mark, while the model can read
 /// it (`iris_store::model_can_read!`). The notice of a mail whose
 /// understanding did not finish shows no words of the mail, until it
-/// finishes ([`CHECKED`]). Each guard reads the store in the
+/// finishes ([`CHECKED`], [`shown_words`]). Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
     store.write(|tx| {
-        // Before each other step: a notice that a removed rule gave stays
-        // open, and gets its words too.
-        fill_checked(tx)?;
         let active = crate::active(tx)?;
         let Some(version) = active.version else {
             return Ok(Vec::new());
@@ -125,7 +122,14 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                 .iter()
                 .find(|r| r.id == rule)
                 .map_or(String::new(), |r| r.name.clone());
-            let (title, text) = words(tx, id, checked_mail(tx, id)?)?;
+            // The row keeps the words of the mail. Each read shows them only
+            // while the mail is checked ([`shown_words`]).
+            let (title, text) = words(tx, id)?;
+            let (shown_title, shown_text) = if checked_mail(tx, id)? {
+                (title.clone(), text.clone())
+            } else {
+                (UNCHECKED_TITLE.to_string(), UNCHECKED_TEXT.to_string())
+            };
             let added = tx.execute(
                 "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(message_id) DO NOTHING",
@@ -138,8 +142,8 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                     rule: Some(rule),
                     job_id: None,
                     rule_name,
-                    title,
-                    text,
+                    title: shown_title,
+                    text: shown_text,
                     created_at: now_ms,
                 });
             }
@@ -150,7 +154,7 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
 
 /// The SQL condition "the notice of message `m` can show the words of the
 /// mail": no model is set, or the understanding of `m` finished
-/// (`understood_at`). The understanding finishes after the model read the
+/// (`understood_at`). [`shown_words`] is the same condition for a read. The understanding finishes after the model read the
 /// mail, or with no model call when a fixed rule completes it or the
 /// sender is a declined stranger (spec 1 section 7.3, decision D29): the
 /// same end of understanding that guard 4 waits for (issue #321).
@@ -169,37 +173,8 @@ fn checked_mail(tx: &Connection, id: i64) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// Writes the words of the mail into each notice with the words
-/// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`] whose mail is [`CHECKED`]
-/// now. A hostile mail keeps the neutral words: its notice is not open.
-fn fill_checked(tx: &Connection) -> Result<()> {
-    let ids: Vec<i64> = tx
-        .prepare(&format!(
-            "SELECT m.id FROM notice n JOIN message m ON m.id = n.message_id
-             WHERE n.title = ?1 AND n.text = ?2 AND {CHECKED}
-               AND NOT {} AND NOT {}",
-            iris_store::may_be_hostile!(),
-            iris_store::hostile_mail!()
-        ))?
-        .query_map(params![UNCHECKED_TITLE, UNCHECKED_TEXT], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for id in ids {
-        let (title, text) = words(tx, id, true)?;
-        tx.execute(
-            "UPDATE notice SET title = ?2, text = ?3 WHERE message_id = ?1",
-            params![id, title, text],
-        )?;
-    }
-    Ok(())
-}
-
-/// The sender and the subject of a message, one line each. A mail that is
-/// not `checked` gives [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`]: a mail
-/// that only the model can mark as phishing shows no words in a notice.
-fn words(tx: &Connection, id: i64, checked: bool) -> Result<(String, String)> {
-    if !checked {
-        return Ok((UNCHECKED_TITLE.into(), UNCHECKED_TEXT.into()));
-    }
+/// The sender and the subject of a message, one line each.
+fn words(tx: &Connection, id: i64) -> Result<(String, String)> {
     let (name, addr, subject): (Option<String>, Option<String>, Option<String>) = tx
         .query_row(
             "SELECT h.from_name, h.from_addr, coalesce(h.subject, b.subject)
@@ -318,10 +293,25 @@ pub fn counts(conn: &Connection) -> Result<(i64, i64)> {
     )?)
 }
 
+/// The columns of the title and the text that a read of the notices shows: the words of
+/// the row while the mail of a rule notice is [`CHECKED`] now, else
+/// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`]. The check runs at each read,
+/// so a model that is set after the notice, or a notice from before
+/// issue #1045, shows no words of a mail whose understanding did not finish.
+/// A job notice shows its words.
+fn shown_words() -> String {
+    format!(
+        "(notice.message_id IS NULL
+          OR EXISTS (SELECT 1 FROM message m WHERE m.id = notice.message_id AND {CHECKED})),
+         title, text"
+    )
+}
+
 fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec<Notice>> {
     let rows = conn
         .prepare(&format!(
-            "SELECT id, message_id, rule, job_id, rule_name, title, text, created_at FROM notice {rest}"
+            "SELECT id, message_id, rule, job_id, rule_name, {}, created_at FROM notice {rest}",
+            shown_words()
         ))?
         .query_map(p, |r| {
             let job_id: Option<i64> = r.get(3)?;
@@ -329,15 +319,21 @@ fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec
             // with no cut (the store keeps at most 2,000 characters). The
             // system notice cuts its own text.
             let one = |s: String| if job_id.is_some() { one_line(&s) } else { s };
+            let checked: bool = r.get(5)?;
+            let (title, text) = if checked {
+                (one(r.get(6)?), one(r.get(7)?))
+            } else {
+                (UNCHECKED_TITLE.to_string(), UNCHECKED_TEXT.to_string())
+            };
             Ok(Notice {
                 id: r.get(0)?,
                 message_id: r.get(1)?,
                 rule: r.get(2)?,
                 job_id,
                 rule_name: r.get(4)?,
-                title: one(r.get(5)?),
-                text: one(r.get(6)?),
-                created_at: r.get(7)?,
+                title,
+                text,
+                created_at: r.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
