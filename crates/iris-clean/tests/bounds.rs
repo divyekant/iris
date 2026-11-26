@@ -122,6 +122,23 @@ fn memory_and_time_stay_bounded() {
     assert_eq!(c.attachments[0].text.as_deref(), Some(want.as_str()));
     assert!(peak < 12 * 1024 * 1024, "peak {peak}");
 
+    // The same raw stream of 9 MiB, encrypted with RC4 (issue #52): the
+    // decryption works in place, so it adds no copy of the stream.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let pdf =
+        rc4_pdf(format!("BT (Hello raw words) Tj ET{}", " ".repeat(9 * 1024 * 1024)).into_bytes());
+    for chunk in pdf.chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, c) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (encrypted PDF with a raw stream of 9 MiB)");
+    assert_eq!(c.attachments[0].text.as_deref(), Some(want.as_str()));
+    assert!(peak < 12 * 1024 * 1024, "peak {peak}");
+
     // A PDF stream of 4 MiB with many short text lines.
     let mut raw = message(1000, 0);
     raw.truncate(raw.len() - b"--m--\r\n".len());
@@ -421,4 +438,73 @@ fn b64_line(chunk: &[u8]) -> String {
         }
     }
     out
+}
+
+/// RC4 of `data` with `key`, in place.
+fn rc4(key: &[u8], data: &mut [u8]) {
+    let mut s: [u8; 256] = std::array::from_fn(|i| i as u8);
+    let mut j = 0u8;
+    for i in 0..256 {
+        j = j.wrapping_add(s[i]).wrapping_add(key[i % key.len()]);
+        s.swap(i, j as usize);
+    }
+    let (mut i, mut j) = (0u8, 0u8);
+    for b in data {
+        i = i.wrapping_add(1);
+        j = j.wrapping_add(s[i as usize]);
+        s.swap(i as usize, j as usize);
+        *b ^= s[s[i as usize].wrapping_add(s[j as usize]) as usize];
+    }
+}
+
+/// A PDF with one raw content stream (object 1), encrypted with RC4 of 40
+/// bits (`/V 1`, `/R 2`) and the empty user password: algorithms 1, 2 and 4
+/// of ISO 32000.
+fn rc4_pdf(mut content: Vec<u8>) -> Vec<u8> {
+    use md5::{Digest, Md5};
+    const PAD: [u8; 32] = [
+        0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01,
+        0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53,
+        0x69, 0x7A,
+    ];
+    let o = [0x11u8; 32];
+    let id = b"0123456789abcdef";
+    let p: i32 = -4;
+    let mut h = Md5::new();
+    h.update(PAD);
+    h.update(o);
+    h.update(p.to_le_bytes());
+    h.update(id);
+    let key = h.finalize()[..5].to_vec();
+    let mut u = PAD;
+    rc4(&key, &mut u);
+    let mut h = Md5::new();
+    h.update(&key);
+    h.update([1, 0, 0, 0, 0]);
+    let obj_key = h.finalize()[..10].to_vec();
+    rc4(&obj_key, &mut content);
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let mut pdf = format!(
+        "%PDF-1.4\n1 0 obj\n<< /Length {} >>\nstream\n",
+        content.len()
+    )
+    .into_bytes();
+    pdf.extend_from_slice(&content);
+    drop(content);
+    let enc = pdf.len() + 18;
+    pdf.extend_from_slice(
+        format!(
+            "\nendstream\nendobj\n2 0 obj\n<< /Filter /Standard /V 1 /R 2 /O <{}> /U <{}> /P {p} >>\nendobj\n\
+             xref\n0 3\n0000000000 65535 f \n0000000009 00000 n \n{enc:010} 00000 n \n\
+             trailer\n<< /Size 3 /Encrypt 2 0 R /ID [<{}> <{}>] >>\n",
+            hex(&o),
+            hex(&u),
+            hex(id),
+            hex(id)
+        )
+        .as_bytes(),
+    );
+    let xref = pdf.len() - pdf.windows(4).rev().position(|w| w == b"xref").unwrap() - 4;
+    pdf.extend_from_slice(format!("startxref\n{xref}\n%%EOF\n").as_bytes());
+    pdf
 }

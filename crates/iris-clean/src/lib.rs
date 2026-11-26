@@ -992,7 +992,7 @@ fn attachment(
             let (bytes, _) = decode_capped(body, enc, PDF_LIMIT as usize);
             // The quality check needs some text, also when little budget is
             // left. One byte more than the budget shows a cut.
-            let (found, stopped) = pdf::text_cut(&bytes, (*attach_left + 1).max(PDF_CHECK_TEXT));
+            let (found, stopped) = pdf::text_of(bytes, (*attach_left + 1).max(PDF_CHECK_TEXT));
             if let Some(mut t) = found {
                 cut = stopped;
                 if t.len() > *attach_left {

@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::glyphs::GLYPHS;
 
+mod crypt;
+
 /// The most bytes of one decompressed stream.
 const STREAM_LIMIT: usize = 4 * 1024 * 1024;
 /// The most bytes of decompressed streams for one PDF.
@@ -54,15 +56,29 @@ pub fn is_pdf(start: &[u8]) -> bool {
 /// The text, at most `limit` bytes, and true if the reader stopped at a limit
 /// before the end. `None` if the file has no text that this module can read.
 /// Trimmed white space can make the text shorter than the limit.
+#[cfg(test)]
 pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
-    if !is_pdf(pdf) {
+    text_of(pdf.into(), limit)
+}
+
+/// [`text_cut`] of a file that the caller can give away. An encrypted file
+/// is decrypted in place, stream by stream, so an owned file costs no copy
+/// (a borrowed file is copied once).
+pub fn text_of(mut pdf: std::borrow::Cow<'_, [u8]>, limit: usize) -> (Option<String>, bool) {
+    if !is_pdf(&pdf) {
         return (None, false);
     }
+    // An encrypted file opens only with the empty user password (issue #52).
+    let crypt = match crypt::setup(&pdf) {
+        crypt::Setup::Plain => None,
+        crypt::Setup::Open(c) => Some(c),
+        crypt::Setup::Locked => return (None, false),
+    };
     let mut doc = Doc::new(limit);
     let mut stopped = false;
     let mut total = 0;
     let mut at = 0;
-    while let Some(item) = next_item(pdf, at) {
+    while let Some(item) = next_item(&pdf, at) {
         let (kw, start, header) = match item {
             Item::Object { num, body, end } => {
                 doc.keep(num, &pdf[body.0..body.1]);
@@ -78,25 +94,40 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         }
         // The dictionary is the text from the object header to the keyword.
         // A longer dictionary than 4 KiB is not read.
-        let dict = header
+        // A copy (at most 4 KiB): the decryption below changes the file.
+        let dict_buf = header
             .map(|h| h.0)
             .filter(|&h| kw - h <= DICT_LIMIT)
-            .map_or(&b""[..], |h| &pdf[h..kw]);
+            .map_or(Vec::new(), |h| pdf[h..kw].to_vec());
+        let dict = &dict_buf[..];
         // A direct `/Length` gives the end, so `endstream` inside the data
         // does not cut the stream. Without it, search for the keyword.
-        let len = match declared_len(dict).filter(|&n| ends_at(pdf, start, n)) {
+        let len = match declared_len(dict).filter(|&n| ends_at(&pdf, start, n)) {
             Some(n) => n,
             None => match find(&pdf[start..], b"endstream") {
                 Some(n) => n,
                 None => break,
             },
         };
-        let data = &pdf[start..start + len];
-        at = start + len;
+        let mut range = start..start + len;
+        at = range.end;
         let objects = get(dict, b"/Type") == Some(Val::Name(b"/ObjStm"));
         if !objects && !is_content(dict) {
             continue;
         }
+        // The key of an encrypted stream needs its object number and
+        // generation. A stream that Iris cannot decrypt is not read.
+        if let Some(c) = &crypt {
+            let Some((h, Some(n))) = header else {
+                continue;
+            };
+            let gen = generation(&pdf[..h]);
+            match c.stream(n, gen, &mut pdf.to_mut()[range.clone()]) {
+                Some(r) => range = start + r.start..start + r.end,
+                None => continue,
+            }
+        }
+        let data = &pdf[range];
         // Each stream gets at most the rest of the budget of the PDF.
         let cap = STREAM_LIMIT.min(TOTAL_LIMIT - total);
         let mut more = false;
@@ -379,6 +410,21 @@ fn object_number(before: &[u8]) -> Option<Option<u32>> {
     rest.last()
         .is_none_or(|b| b.is_ascii_whitespace())
         .then(|| std::str::from_utf8(first).ok()?.parse().ok())
+}
+
+/// The generation number of the object header that ends at the end of
+/// `upto` (`<number> <number> obj`), or 0 if Iris cannot read it.
+fn generation(upto: &[u8]) -> u16 {
+    let before = upto.strip_suffix(b"obj").unwrap_or(upto).trim_ascii_end();
+    let digits = before
+        .iter()
+        .rev()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    std::str::from_utf8(&before[before.len() - digits..])
+        .ok()
+        .and_then(|g| g.parse().ok())
+        .unwrap_or(0)
 }
 
 /// False for streams that are not page content: images, fonts, metadata,
@@ -1620,6 +1666,30 @@ fn entries(d: &[u8]) -> impl Iterator<Item = (&[u8], Val<'_>)> {
     })
 }
 
+/// The object number and generation of the reference `key` (with its `/`)
+/// in the dictionary `d`: `<n> <g> R`. [`Val::Ref`] keeps the number only.
+fn reference(d: &[u8], key: &[u8]) -> Option<(u32, u32)> {
+    let mut lx = Lexer::new(d);
+    while lx.next()? != Tok::Open {}
+    loop {
+        match lx.next()? {
+            Tok::Close => return None,
+            Tok::Name(k) if k == key => {
+                return match (lx.next()?, lx.next()?, lx.next()?) {
+                    (Tok::Word(n), Tok::Word(g), Tok::Word(b"R")) => {
+                        Some((u32::try_from(int(n)?).ok()?, u32::try_from(int(g)?).ok()?))
+                    }
+                    _ => None,
+                };
+            }
+            Tok::Name(_) => {
+                value(&mut lx)?;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The value of `key` (with its `/`) in the dictionary `d`.
 fn get<'a>(d: &'a [u8], key: &[u8]) -> Option<Val<'a>> {
     entries(d).find(|e| e.0 == key).map(|e| e.1)
@@ -1724,6 +1794,39 @@ fn readable(t: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_pdfs_with_an_empty_user_password_give_text() {
+        let want = "Invoice 2025-07 for Avel Torun\nTotal: 120.00 EUR";
+        for (name, pdf) in [
+            ("rc4-40", &include_bytes!("../tests/pdf/rc4-40.pdf")[..]),
+            ("rc4-128", include_bytes!("../tests/pdf/rc4-128.pdf")),
+            ("aes-128", include_bytes!("../tests/pdf/aes-128.pdf")),
+            ("aes-256", include_bytes!("../tests/pdf/aes-256.pdf")),
+            ("aes-256-r5", include_bytes!("../tests/pdf/aes-256-r5.pdf")),
+        ] {
+            assert_eq!(text(pdf, 1000).as_deref(), Some(want), "{name}");
+        }
+        // A user password: no text, and no garbage.
+        let locked = include_bytes!("../tests/pdf/aes-128-user.pdf");
+        assert_eq!(text_cut(locked, 1000), (None, false));
+        // Each prefix and each changed byte is safe.
+        for pdf in [
+            &include_bytes!("../tests/pdf/aes-256.pdf")[..],
+            include_bytes!("../tests/pdf/rc4-128.pdf"),
+        ] {
+            for cut in (0..pdf.len()).step_by(7) {
+                text_cut(&pdf[..cut], 1000);
+            }
+            // The AES-256 key check costs about 1 ms in a debug build: a
+            // step of 7 bytes keeps the test short.
+            for i in (0..pdf.len()).step_by(7) {
+                let mut bad = pdf.to_vec();
+                bad[i] ^= 0x5A;
+                text_cut(&bad, 1000);
+            }
+        }
+    }
 
     pub(crate) fn sample(content: &[u8], flate: bool) -> Vec<u8> {
         let (filter, data) = if flate {
