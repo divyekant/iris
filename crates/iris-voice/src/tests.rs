@@ -1377,7 +1377,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a stale nudge with a key",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.5', 0, 1, '{}'
                FROM message",
             at,
             true,
@@ -1386,7 +1386,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a ready nudge of another commitment",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.5', 0, 1, '{}'
                FROM message WHERE thread_id = ?1",
             at,
             true,
@@ -2271,8 +2271,12 @@ fn a_change_of_the_answerable_set_makes_the_draft_stale() {
 /// with the stem of a key word of the commitment.
 #[test]
 fn a_body_names_a_commitment_only_with_its_words() {
+    let none: &[String] = &[];
     let ask = serde_json::json!({"title": "Send the invoice", "quote": "can you send it?", "amount": "$1,200"});
-    assert_eq!(key_words(&ask), ["invoice", "200"]);
+    assert_eq!(
+        key_words(&ask, none),
+        (vec!["invoice".into(), "200".into()], true)
+    );
     for (body, ok) in [
         ("Hi Bo, any news on the invoices? D", true),
         ("Hi Bo, the 1,200 dollars? D", true),
@@ -2280,18 +2284,71 @@ fn a_body_names_a_commitment_only_with_its_words() {
         ("Hi Bo, any news? D", false),
         ("Hi Bo, can you send it? D", false),
     ] {
-        assert_eq!(names(body, &ask), ok, "{body}");
+        assert_eq!(names(body, &ask, none), ok, "{body}");
     }
     // An amount is an object: its values are words, its field names are not.
     let pay =
         serde_json::json!({"title": "Pay it", "amount": {"value": 312.77, "currency": "USD"}});
-    assert!(!names("Can you confirm the value and the currency?", &pay));
-    assert!(names("Hi Bo, the 312.77? D", &pay));
+    assert!(!names(
+        "Can you confirm the value and the currency?",
+        &pay,
+        none
+    ));
+    assert!(names("Hi Bo, the 312.77? D", &pay, none));
     // A commitment with no key word passes any body.
     assert!(names(
         "Hi",
-        &serde_json::json!({"title": "Do it", "quote": null})
+        &serde_json::json!({"title": "Do it", "quote": null}),
+        none
     ));
+}
+
+/// Issue #1154: a short commitment with no strong key word has weak key
+/// words (a 1-digit amount, a 3-letter word), and the body must hold one
+/// of them as a whole word.
+#[test]
+fn a_short_commitment_needs_its_short_words() {
+    let none: &[String] = &[];
+    let ask =
+        serde_json::json!({"title": "Pay $5", "quote": "I'll pay $5", "amount": {"value": 5}});
+    assert_eq!(key_words(&ask, none).1, false);
+    for (body, ok) in [
+        ("Hi", false),
+        ("Hi Bo, any news? D", false),
+        ("Hi Bo, the $50? D", false),
+        ("Hi Bo, can you pay the $5? D", true),
+        ("Hi Bo, the 5 dollars? D", true),
+    ] {
+        assert_eq!(names(body, &ask, none), ok, "{body}");
+    }
+}
+
+/// Issue #1146: a word of the name or the address of a person of the
+/// thread is no key word, so a greeting does not name the commitment.
+#[test]
+fn a_name_of_a_person_names_no_commitment() {
+    let msgs = [Msg {
+        id: 1,
+        from_addr: Some("priya@example.com".into()),
+        from_name: Some("Priya Raman".into()),
+        to_addrs: Some("Dana <dana@example.com>".into()),
+        cc_addrs: None,
+        subject: "x".into(),
+        text: None,
+        sent: false,
+        sent_to: vec![],
+    }];
+    let people = people_words("dana@example.com", Some("priya@example.com"), &msgs);
+    let ask = serde_json::json!({"title": "Priya to check", "quote": "Priya, can you check?"});
+    assert_eq!(
+        key_words(&ask, &people),
+        (vec!["check".into(), "check".into()], true)
+    );
+    assert!(!names("Hi Priya, how are you? Dana", &ask, &people));
+    assert!(names("Hi Priya, did you check it? Dana", &ask, &people));
+    // With no other word, a name leaves the commitment with no key word.
+    let only = serde_json::json!({"title": "Raman", "quote": null});
+    assert!(names("Hi", &only, &people));
 }
 
 /// Issue #1075: for any commitment, a body that holds one of its key words
@@ -2312,18 +2369,19 @@ fn a_body_with_a_key_word_names_its_commitment() {
     for _ in 0..2000 {
         let title: Vec<&str> = (0..1 + next(4)).map(|_| words[next(words.len())]).collect();
         let ask = serde_json::json!({"title": title.join(" "), "quote": null});
-        let keys = key_words(&ask);
+        let (keys, _) = key_words(&ask, &[]);
         assert!(keys
             .iter()
             .all(|k| title.iter().any(|w| w.to_lowercase() == *k)));
         if let Some(k) = keys.first() {
             assert!(names(
                 &format!("Hi, any news on the {}? D", k.to_uppercase()),
-                &ask
+                &ask,
+                &[]
             ));
-            assert!(!names("Hi, any news? D", &ask), "{ask}");
+            assert!(!names("Hi, any news? D", &ask, &[]), "{ask}");
         } else {
-            assert!(names("Hi", &ask));
+            assert!(names("Hi", &ask, &[]));
         }
     }
 }
