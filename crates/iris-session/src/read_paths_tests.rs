@@ -104,9 +104,18 @@ fn a_home_folder_is_refused_also_with_no_home_variable() {
     // The data folder must be outside the home folder. If not, the rule of
     // the data folder refuses first, as on a CI runner with the checkout in
     // the home folder.
-    let data = std::env::temp_dir().join(format!("iris-read-paths-home-{}", std::process::id()));
-    fs::create_dir_all(&data).unwrap();
-    let data = fs::canonicalize(&data).unwrap();
+    // create_dir fails on any path that exists (also a link), so the test
+    // removes only the folder that it made.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let made = std::env::temp_dir().join(format!(
+        "iris-read-paths-home-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir(&made).unwrap();
+    let data = fs::canonicalize(&made).unwrap();
     // SAFETY: getpwuid and geteuid only read; one test thread reads it.
     let mine = homes(None).unwrap()[0].clone();
     if mine.exists() && mine != Path::new("/") && !data.starts_with(&mine) {
@@ -115,7 +124,7 @@ fn a_home_folder_is_refused_also_with_no_home_variable() {
             assert!(check(parent, &data, None).is_err(), "{}", parent.display());
         }
     }
-    let _ = fs::remove_dir_all(&data);
+    let _ = fs::remove_dir(&made);
     // HOME names one more home folder.
     let (_d2, tool, data2) = setup("home-env");
     refused(check(&tool, &data2, Some(tool.as_os_str())), "home folder");
