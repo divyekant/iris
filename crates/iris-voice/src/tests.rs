@@ -2380,7 +2380,7 @@ fn each_word_of_a_name_is_a_people_word() {
     };
     for _ in 0..2000 {
         let text: String = (0..1 + next(8)).map(|_| parts[next(parts.len())]).collect();
-        let people = people_words(&[text.clone()]);
+        let people = people_words(std::slice::from_ref(&text));
         let ask = serde_json::json!({"title": text, "quote": text});
         assert!(key_words(&ask, &people).0.is_empty(), "{text:?} {people:?}");
         assert!(names("Hi", &ask, &people), "{text:?}");
