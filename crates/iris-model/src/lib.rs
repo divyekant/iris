@@ -263,12 +263,14 @@ impl Client {
         self.send(&url, body)
     }
 
-    /// [`Client::ask`], but the caller stops the wait when `cancel` gives
+    /// [`Client::ask`], but the caller stops the call when `cancel` gives
     /// true (issue #1126): it reads `cancel` each [`CANCEL_POLL`] and then
-    /// gives [`Error::Cancelled`]. The call runs on its own thread.
-    // shortcut: a cancelled call is not stopped (issue #1158). Its thread ends with the
-    // answer or at the time limit of the config, and drops the answer. ureq
-    // has no stable API to stop a call in flight; change this when it has one.
+    /// gives [`Error::Cancelled`]. The call runs on its own thread, with its
+    /// own agent. A cancel shuts that agent down, so the connection closes
+    /// and the thread ends at once (issue #1158).
+    // shortcut: a cancel does not stop name resolution or a TCP connect in
+    // progress (ureq `Agent::shutdown`); the thread ends at the time limit of
+    // the config at most. Change this if ureq can stop them.
     pub fn ask_cancel(
         &self,
         instruction: &str,
@@ -276,7 +278,10 @@ impl Client {
         cancel: &dyn Fn() -> bool,
     ) -> Result<Reply, Error> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let client = self.clone();
+        // A shutdown closes each connection of the agent and its clones, so
+        // this call gets an agent of its own, with no pooled connection.
+        let client = Client::new(self.config.clone());
+        let agent = client.agent.clone();
         let (instruction, data) = (instruction.to_string(), data.to_string());
         std::thread::Builder::new()
             .name("iris-model-call".into())
@@ -292,7 +297,8 @@ impl Client {
                     return Err(Error::Transport("the call thread stopped".into()))
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) if cancel() => {
-                    return Err(Error::Cancelled)
+                    agent.shutdown();
+                    return Err(Error::Cancelled);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             }
