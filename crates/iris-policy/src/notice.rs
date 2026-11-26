@@ -15,12 +15,18 @@ pub const WINDOW_MS: i64 = 3_600_000;
 /// after its fetch. After that, the interrupt comes too late to help.
 pub const LATE_MS: i64 = 24 * WINDOW_MS;
 
-/// When a model is set, a mail waits up to this time after its fetch for
-/// understanding, so that a `phishing` mark that only the model finds can
-/// stop the notice first (issue #321). After that time, the notice does not
-/// wait more: a model that is slow, out of budget or failing does not hold
-/// each notice.
+/// When a model is set and can read the mail (`iris_store::model_can_read!`),
+/// the mail waits up to this time after its fetch for understanding, so that
+/// a `phishing` mark that only the model finds can stop the notice first
+/// (issue #321). A mail that the model cannot read does not wait. After the
+/// wait, the notice shows [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`], not
+/// the words of the mail (issue #1045).
 pub const MODEL_WAIT_MS: i64 = 5 * 60_000;
+
+/// The title of a notice of a mail that the model did not read yet.
+pub const UNCHECKED_TITLE: &str = "Mail not checked yet";
+/// The text of a notice of a mail that the model did not read yet.
+pub const UNCHECKED_TEXT: &str = "Iris shows the sender and the subject after the phishing check.";
 
 /// The most characters of the title and of the text of a notice.
 pub const WORDS_MAX: usize = 200;
@@ -57,7 +63,9 @@ pub struct Notice {
 /// hostile check writes with the body. A mail with a `link_check` row waits
 /// too: its link check did not run yet (migration 20). When a model is set,
 /// a mail that understanding did not read yet waits up to [`MODEL_WAIT_MS`]
-/// after its fetch, for a model `phishing` mark. Each guard reads the store in the
+/// after its fetch, for a model `phishing` mark, while the model can read
+/// it (`iris_store::model_can_read!`). The notice of a mail that the model
+/// did not read shows no words of the mail, until the model reads it. Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
@@ -89,7 +97,8 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                    AND NOT ", iris_store::draft_or_copy!("m"), "
                    AND (m.understood_at IS NOT NULL
                         OR NOT EXISTS (SELECT 1 FROM model_setting)
-                        OR m.fetched_at <= ?4)
+                        OR m.fetched_at <= ?4
+                        OR NOT ", iris_store::model_can_read!(), ")
                  ORDER BY m.id",
             ))?
             .query_map(
@@ -97,6 +106,25 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                 |r| r.get(0),
             )?
             .collect::<rusqlite::Result<_>>()?;
+        // A notice of a mail that the model read after the notice gets the
+        // words of the mail. A hostile mail keeps the words of the notice:
+        // its notice is not open.
+        let checked: Vec<i64> = tx
+            .prepare(concat!(
+                "SELECT m.id FROM notice n JOIN message m ON m.id = n.message_id
+                 WHERE n.title = ?1 AND n.text = ?2 AND m.understood_at IS NOT NULL
+                   AND NOT ", iris_store::may_be_hostile!(), "
+                   AND NOT ", iris_store::hostile_mail!(),
+            ))?
+            .query_map(params![UNCHECKED_TITLE, UNCHECKED_TEXT], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in checked {
+            let (title, text) = words(tx, id, true)?;
+            tx.execute(
+                "UPDATE notice SET title = ?2, text = ?3 WHERE message_id = ?1",
+                params![id, title, text],
+            )?;
+        }
         let now = now_ms.div_euclid(1000);
         let mut out = Vec::new();
         for id in ids {
@@ -112,7 +140,7 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                 .iter()
                 .find(|r| r.id == rule)
                 .map_or(String::new(), |r| r.name.clone());
-            let (title, text) = words(tx, id)?;
+            let (title, text) = words(tx, id, checked_mail(tx, id)?)?;
             let added = tx.execute(
                 "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(message_id) DO NOTHING",
@@ -135,8 +163,24 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
     })
 }
 
-/// The sender and the subject of a message, one line each.
-fn words(tx: &Connection, id: i64) -> Result<(String, String)> {
+/// True if no model is set or the model read message `id`: its notice can
+/// show the words of the mail.
+fn checked_mail(tx: &Connection, id: i64) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM model_setting)
+             OR EXISTS (SELECT 1 FROM message WHERE id = ?1 AND understood_at IS NOT NULL)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
+
+/// The sender and the subject of a message, one line each. A mail that is
+/// not `checked` gives [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`]: a mail
+/// that only the model can mark as phishing shows no words in a notice.
+fn words(tx: &Connection, id: i64, checked: bool) -> Result<(String, String)> {
+    if !checked {
+        return Ok((UNCHECKED_TITLE.into(), UNCHECKED_TEXT.into()));
+    }
     let (name, addr, subject): (Option<String>, Option<String>, Option<String>) = tx
         .query_row(
             "SELECT h.from_name, h.from_addr, coalesce(h.subject, b.subject)

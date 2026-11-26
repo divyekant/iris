@@ -19,6 +19,19 @@ macro_rules! may_be_hostile {
     };
 }
 
+/// The SQL condition "the model can read message `m` now": the model
+/// health signal (issue #1045). A model is set, it is not in the wait after
+/// model errors (`model_setting.retry_failures` is 0: no failed run since
+/// its last answer), the budget or the model row did not refuse the mail
+/// (`waits_model`), and the mail has no failed try (`retry_at`).
+#[macro_export]
+macro_rules! model_can_read {
+    () => {
+        "(EXISTS (SELECT 1 FROM model_setting WHERE retry_failures = 0)
+          AND m.waits_model = 0 AND m.retry_at IS NULL)"
+    };
+}
+
 /// The SQL condition "message `m` is hostile mail": a hostile mark, the
 /// label `SPAM`, or a `hostile` sender (specification 1, section 6.7).
 /// Understanding deletes the unpinned items of such a message. Each read

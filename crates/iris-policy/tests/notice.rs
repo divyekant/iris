@@ -601,3 +601,83 @@ fn notices_now(s: &Store) -> Vec<i64> {
         .filter_map(|n| n.message_id)
         .collect()
 }
+
+/// Issue #1045: the model health signal (`iris_store::model_can_read!`). A
+/// mail waits for the model only while the model can read it. A notice of
+/// a mail that the model did not read shows no words of the mail, and gets
+/// the words after the model reads the mail.
+#[test]
+fn a_notice_of_mail_the_model_did_not_read_shows_no_mail_words() {
+    let (_d, s) = store("model-health");
+    activate(&s, ANN);
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let words = |id: i64| -> (String, String) {
+        s.read(|c| {
+            Ok(c.query_row(
+                "SELECT title, text FROM notice WHERE message_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+    };
+    let unchecked = (
+        notice::UNCHECKED_TITLE.to_string(),
+        notice::UNCHECKED_TEXT.to_string(),
+    );
+    // The model can read: the new mail waits. A budget refusal (a mark
+    // `waits_model`) or a failed try (`retry_at`) of one mail ends its wait.
+    let waits = put(&s, &mail(), 0);
+    let refused = put(
+        &s,
+        &Mail {
+            subject: "Pay now".into(),
+            ..mail()
+        },
+        1,
+    );
+    let failed = put(&s, &mail(), 2);
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET waits_model = 1 WHERE id = ?1",
+            [refused],
+        )?;
+        tx.execute(
+            "UPDATE message SET retry_at = ?2 WHERE id = ?1",
+            params![failed, NOW + MIN],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(notices_now(&s), [refused, failed]);
+    assert_eq!(words(refused), unchecked);
+    assert_eq!(words(failed), unchecked);
+    // A model error wait (`retry_failures`) ends the wait of each mail.
+    s.write(|tx| {
+        tx.execute("UPDATE model_setting SET retry_failures = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(notices_now(&s), [waits]);
+    assert_eq!(words(waits), unchecked);
+    // The model reads one mail as safe: its notice gets the words of the mail.
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET understood_at = ?2 WHERE id = ?1",
+            params![refused, NOW],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notices_now(&s).is_empty());
+    assert_eq!(words(refused).1, "Pay now");
+    assert_eq!(words(failed), unchecked);
+}
