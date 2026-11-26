@@ -94,7 +94,7 @@ fn an_old_store_keeps_each_proposal_and_no_id_comes_again() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 72);
+        assert_eq!(iris_store::schema_version(tx)?, 73);
         let rows: Vec<(i64, String, String)> = tx
             .prepare("SELECT id, state, form FROM rule_proposal ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
