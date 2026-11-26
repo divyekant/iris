@@ -35,6 +35,6 @@ jobs:
           sudo apt-get install -y strace >/dev/null 2>&1 || true
           cargo test -p iris-session --lib --no-run 2>&1 | tail -2
           B=$(cargo test -p iris-session --lib --no-run --message-format=json 2>/dev/null | python3 -c "import sys,json;[print(m['executable']) for m in map(json.loads,sys.stdin) if m.get('executable')]")
-          for i in 1 2 3; do $B isolation::linux::tests::read_paths_in_read_paths --test-threads 1 2>&1 | tail -8; done
-          strace -f -s 200 -e trace=mount,move_mount,fsopen,fsconfig,fsmount,open_tree,unshare,write,openat -e signal=none -o /tmp/st $B isolation::linux::tests::read_paths_in_read_paths --test-threads 1 2>&1 | tail -5
-          grep -E 'bwrap|= -1|move_mount|fsmount|unshare|write\(2' /tmp/st | grep -v ENOENT | head -150
+          for i in 1 2 3; do $B isolation::linux::tests::read_paths_in_read_paths --test-threads 1 2>&1 | grep -v '^$' | head -12; done
+          strace -f -s 200 -e trace=execve,mount,move_mount,fsopen,fsconfig,fsmount,open_tree,unshare,write,openat -e signal=none -o /tmp/st $B isolation::linux::tests::read_paths_in_read_paths --test-threads 1 2>&1 | tail -5
+          grep -E 'bwrap|= -1|move_mount|fsmount|unshare|write\(2|execve|mount\(' /tmp/st | grep -v ENOENT | head -150

@@ -1047,8 +1047,8 @@ fn read_paths_in_read_paths_start_in_each_order() {
         c = child.display()
     );
     for (session, reads) in [
-        (25, [parent.clone(), child.clone()]),
         (26, [child.clone(), parent.clone()]),
+        (25, [parent.clone(), child.clone()]),
     ] {
         let out = with_reads(session, &reads, &script);
         assert!(out.contains("TOOL-MARKER"), "{reads:?}: {out}");
