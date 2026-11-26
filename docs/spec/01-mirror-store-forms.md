@@ -416,9 +416,12 @@ and no wait on a FIFO. It copies each regular file, with no size limit and
 no count limit (issue #1152). The copy streams each name of a folder and
 the bytes of each file, so no list of names and no whole file is in the
 memory of the engine. A file that grows during the copy gives at most its
-size at the open, so the copy of one file ends. The copy holds only files
-that the session wrote to `drafts/`, so its size comes from the disk use of
-the session. A session that writes new names during the scan can make the
+size at the open, so the copy of one file ends. The copy keeps each hole of
+a sparse file (`SEEK_DATA` and `SEEK_HOLE`), so a draft with a large size
+and few blocks takes few blocks in the backup too. So the size of the copy
+comes from the blocks that the session wrote to `drafts/`, if the file
+system of the data folder reports holes and the file system of the backup
+keeps them. A session that writes new names during the scan can make the
 scan longer, as before this change. So a session cannot grow the memory of
 the engine, or make the backup read a file outside its `drafts/` folder. A
 draft that the agent submits is in the store (specification 2) too. A copy
@@ -431,6 +434,7 @@ during the copy):
 | Input or event | Result |
 |---|---|
 | A regular file, of any size | Copied, mode 0600 |
+| A sparse file (a large size, few blocks) | Copied with its holes |
 | A link, a FIFO, a device, a socket or a subfolder in `drafts/` | Not copied |
 | `drafts/` or the job folder is a link | Nothing of that job is copied |
 | `drafts/` is renamed or replaced after the open | The copy reads the folder that it opened |

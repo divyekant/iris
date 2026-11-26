@@ -76,8 +76,7 @@ impl Store {
 
     /// Copy the data folder to `dest` while the engine runs (section 5.1).
     /// `dest` must not exist, or must be an empty folder. Gives the number
-    /// of content files in the copy, and the drafts that the copy did not
-    /// take. A content file that the database refers to and that is not
+    /// of content files in the copy. A content file that the database refers to and that is not
     /// there is an error: the copy is not complete.
     pub fn backup(&self, dest: &Path) -> Result<Backup> {
         let _lock = self.backup_lock()?;
@@ -637,7 +636,6 @@ fn copy_drafts(_src: &Path, _dest: &Path) -> Result<()> {
 /// copy made `to_dir`.
 #[cfg(unix)]
 fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
-    use std::io::Read as _;
     let mut made = false;
     each_name(drafts, false, |name| {
         // The type check below refuses a folder, a FIFO and a device.
@@ -653,7 +651,7 @@ fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
         made = true;
         let to = to_dir.join(name);
         let mut out = private_file(&to, true)?;
-        io::copy(&mut file.take(m.len()), &mut out)?;
+        copy_data(&file, &mut out, m.len())?;
         out.sync_all()?;
         Ok(())
     })?;
@@ -661,6 +659,51 @@ fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
         sync_dir(to_dir)?;
     }
     Ok(made)
+}
+
+/// Copy the data regions of the first `len` bytes of `file` to `out`, at
+/// the same offsets, and give `out` the length `len`. A hole of `file`
+/// (`SEEK_HOLE`) stays a hole of `out`, so a sparse draft with a large
+/// size and few blocks does not fill the disk of the backup. A file system
+/// that reports no holes gives one data region: a full copy.
+#[cfg(unix)]
+fn copy_data(file: &File, out: &mut File, len: u64) -> io::Result<()> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::os::fd::AsRawFd;
+    let fd = file.as_raw_fd();
+    let seek = |at: u64, whence: libc::c_int| -> io::Result<Option<u64>> {
+        // SAFETY: `fd` is the open descriptor of `file`.
+        let r = unsafe { libc::lseek(fd, at as libc::off_t, whence) };
+        if r < 0 {
+            let e = io::Error::last_os_error();
+            // ENXIO: no data at or after `at`.
+            return match e.raw_os_error() {
+                Some(libc::ENXIO) => Ok(None),
+                _ => Err(e),
+            };
+        }
+        Ok(Some(r as u64))
+    };
+    let mut at = 0;
+    while at < len {
+        let Some(start) = seek(at, libc::SEEK_DATA)? else {
+            break;
+        };
+        if start >= len {
+            break;
+        }
+        let end = seek(start, libc::SEEK_HOLE)?.unwrap_or(len).min(len);
+        let mut src = file;
+        src.seek(SeekFrom::Start(start))?;
+        out.seek(SeekFrom::Start(start))?;
+        // A file that gets shorter during the copy gives fewer bytes.
+        let n = io::copy(&mut src.take(end - start), out)?;
+        if n < end - start {
+            break;
+        }
+        at = end;
+    }
+    out.set_len(len)
 }
 
 /// Open the folder `name` relative to `parent` (or the path `name` with no
@@ -823,6 +866,42 @@ mod tests {
         assert_eq!(fs::read(to.join("key")).unwrap(), b"draft");
         // A new open of the path refuses the link.
         assert!(dir_at(Some(&job), OsStr::new("drafts")).unwrap().is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A sparse draft stays sparse in the copy, with the same bytes.
+    #[test]
+    fn a_sparse_draft_stays_sparse() {
+        use std::os::unix::fs::MetadataExt;
+        let d = temp("sparse");
+        let drafts = d.join("job/drafts");
+        fs::create_dir_all(&drafts).unwrap();
+        let f = File::create(drafts.join("big")).unwrap();
+        let size: u64 = 64 << 30;
+        f.set_len(size).unwrap();
+        use std::os::unix::fs::FileExt;
+        f.write_all_at(b"head", 0).unwrap();
+        f.write_all_at(b"tail", size - 4).unwrap();
+        drop(f);
+        let job = dir_at(None, d.join("job").as_os_str()).unwrap().unwrap();
+        let pinned = dir_at(Some(&job), OsStr::new("drafts")).unwrap().unwrap();
+        let to = d.join("out/drafts");
+        assert!(copy_from(&pinned, &to).unwrap());
+        let m = fs::metadata(to.join("big")).unwrap();
+        assert_eq!(m.len(), size);
+        // 64 GiB of zeros would need 128 Mi blocks of 512 bytes.
+        assert!(m.blocks() < 1 << 16, "{} blocks", m.blocks());
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut c = File::open(to.join("big")).unwrap();
+        let mut b = [0u8; 4];
+        c.read_exact(&mut b).unwrap();
+        assert_eq!(&b, b"head");
+        c.seek(SeekFrom::Start(size - 4)).unwrap();
+        c.read_exact(&mut b).unwrap();
+        assert_eq!(&b, b"tail");
+        c.seek(SeekFrom::Start(1 << 30)).unwrap();
+        c.read_exact(&mut b).unwrap();
+        assert_eq!(b, [0; 4]);
         let _ = fs::remove_dir_all(&d);
     }
 
