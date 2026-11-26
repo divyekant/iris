@@ -666,12 +666,17 @@ no network stops them. The engine gives each session one narrow path out:
   reads `ended_at` in its transaction). It does not call back what the
   agent sent before. A gate in each tunnel that reads the store for each
   byte costs more than this window is worth.
-  The relay of the Linux sandbox (`docs/specs/2026-11-17-session-sandbox.md`)
-  connects to the port while the helper lives, and the reap check
-  confirms that the helper ended. So the port number cannot go to the
-  proxy of another session while a process of this session can reach it.
+  On macOS, the agent connects to the port while the helper lives, and
+  the reap check confirms that the helper ended. So, while the engine
+  runs, the port number cannot go to the proxy of another session while a
+  process of this session can reach it (after an engine crash: issue
+  #1159). On Linux, the proxy has no host port: the helper sends each
+  connection on the socket pair of the session, and the engine closes its
+  end of the pair only after the reap check
+  (`docs/specs/2026-11-17-session-sandbox.md`, "Egress on Linux").
 
-The engine knows the session from the port, never from the request. An
+The engine knows the session from the port (macOS) or from the pair
+(Linux), never from the request. An
 adapter with no allowed host gets no egress port and no `HTTPS_PROXY`.
 
 The agent sends the files of the workspace, which hold granted mail, to
