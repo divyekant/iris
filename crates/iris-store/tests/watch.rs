@@ -393,7 +393,10 @@ fn the_cleanup_keeps_a_hostile_match_hidden() {
         ("safe", "UPDATE message SET understood_at = 1 WHERE id = ?1"),
         // Issue #1168: safe mail that the model did not read keeps its
         // watch match, and its notice is settled.
-        ("unread", "UPDATE message SET hostile = hostile WHERE id = ?1"),
+        (
+            "unread",
+            "UPDATE message SET hostile = hostile WHERE id = ?1",
+        ),
     ];
     let notice = |id: i64| {
         store
