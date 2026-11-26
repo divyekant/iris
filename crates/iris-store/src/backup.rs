@@ -662,7 +662,8 @@ fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
 }
 
 /// Copy the data regions of the first `len` bytes of `file` to `out`, at
-/// the same offsets, and give `out` the length `len`. A hole of `file`
+/// the same offsets, and give `out` the length `len`, or the size of `file`
+/// at the end of the copy if that is smaller. A hole of `file`
 /// (`SEEK_HOLE`) stays a hole of `out`, so a sparse draft with a large
 /// size and few blocks does not fill the disk of the backup. A file system
 /// that reports no holes gives one data region: a full copy.
@@ -703,7 +704,9 @@ fn copy_data(file: &File, out: &mut File, len: u64) -> io::Result<()> {
         }
         at = end;
     }
-    out.set_len(len)
+    // A file that got shorter during the copy keeps its new size: no zero
+    // byte past its end comes into the copy.
+    out.set_len(len.min(file.metadata()?.len()))
 }
 
 /// Open the folder `name` relative to `parent` (or the path `name` with no
@@ -902,6 +905,21 @@ mod tests {
         c.seek(SeekFrom::Start(1 << 30)).unwrap();
         c.read_exact(&mut b).unwrap();
         assert_eq!(b, [0; 4]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A draft that gets shorter after its size was read gives no zero bytes
+    /// past its new end.
+    #[test]
+    fn a_shorter_draft_gives_no_zeros_past_its_end() {
+        let d = temp("short");
+        let p = d.join("draft");
+        fs::write(&p, b"short text").unwrap();
+        let file = File::open(&p).unwrap();
+        let mut out = File::create(d.join("copy")).unwrap();
+        // The size that the copy read before the truncation.
+        copy_data(&file, &mut out, 1 << 20).unwrap();
+        assert_eq!(fs::read(d.join("copy")).unwrap(), b"short text");
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -440,6 +440,7 @@ during the copy):
 | `drafts/` is renamed or replaced after the open | The copy reads the folder that it opened |
 | A file goes away, or becomes a link, before its open | Not copied |
 | A file changes during its read | The bytes of one read, at most its size at the open |
+| A file gets shorter during its read | The bytes up to its new end, no zero bytes after it |
 | A folder with very many entries | The scan keeps no name list; the time grows with the count and the bytes |
 | Any other error of the file system | The backup fails and says so. The folder of the failed backup is not a backup: use another one |
 
