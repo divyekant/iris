@@ -1257,3 +1257,43 @@ fn the_overlay_step_refuses_a_folder_that_changed_after_the_checks() {
     let _ = fs::remove_dir_all(&tool);
     let _ = fs::remove_dir_all(&old);
 }
+
+/// The overlay of an inner read path folder goes on its path through the
+/// overlay of the outer folder. If a link takes that path after the
+/// identity checks of the overlay step, the step stops (`ELOOP`) and puts
+/// no overlay outside the outer folder.
+#[test]
+fn the_overlay_step_refuses_a_link_at_an_inner_path() {
+    let parent = tool_dir("ovlinner");
+    let child = parent.join("plugin");
+    fs::create_dir(&child).unwrap();
+    let opened: Vec<(OwnedFd, PathBuf)> = [&parent, &child]
+        .iter()
+        .map(|p| (File::open(p).unwrap().into(), (*p).clone()))
+        .collect();
+    let mut o = Overlays::plan(&opened).unwrap().unwrap();
+    let c = |p: &Path| cstr(p.as_os_str()).unwrap();
+    let outside = tool_dir("ovloutside");
+    o.swap = Some((c(&child), c(&parent.join("plugin.old")), c(&outside)));
+    // The slots hold the read paths, as in a spawn, so no step gets them.
+    let null = File::open("/dev/null").unwrap();
+    // SAFETY: the child runs only system calls (dup2, apply), then _exit.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        for i in 0..2 {
+            unsafe { libc::dup2(null.as_raw_fd(), READ_FD + i) };
+        }
+        let code = match unsafe { o.apply() } {
+            Ok(()) => 0,
+            Err(e) => e.raw_os_error().unwrap_or(1),
+        };
+        unsafe { libc::_exit(code) };
+    }
+    let mut status = 0;
+    // SAFETY: waitpid writes only `status`.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(libc::WIFEXITED(status), "{status}");
+    assert_eq!(libc::WEXITSTATUS(status), libc::ELOOP);
+    let _ = fs::remove_dir_all(&parent);
+    let _ = fs::remove_dir_all(&outside);
+}

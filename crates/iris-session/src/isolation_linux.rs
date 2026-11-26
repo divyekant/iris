@@ -582,8 +582,13 @@ struct Overlays {
     /// and inode.
     /// The outer folders come first.
     dirs: Vec<(usize, CString, (u64, u64))>,
-    /// For each folder: true if another read path folder holds it.
-    inner: Vec<bool>,
+    /// For each folder that another read path folder holds: the index in
+    /// `dirs` of the nearest such folder, and the path from it.
+    inner: Vec<Option<(usize, CString)>>,
+    /// Test only: after the identity checks of `apply` and before the
+    /// overlays, move the folder `.0` to `.1` and put a link to `.2` at `.0`.
+    #[cfg(test)]
+    swap: Option<(CString, CString, CString)>,
     /// For each folder, written in the child with no allocation: its
     /// descriptor in the new namespace, and the `lowerdir` value.
     fds: Vec<RawFd>,
@@ -603,10 +608,22 @@ impl Overlays {
             return Ok(None);
         }
         found.sort_by_key(|(_, path, _)| path.components().count());
-        let inner = found
-            .iter()
-            .map(|(_, p, _)| found.iter().any(|(_, o, _)| o != p && p.starts_with(o)))
-            .collect();
+        let mut inner = Vec::new();
+        for (_, p, _) in &found {
+            // The outer folders come first, so the last one that holds `p`
+            // is the nearest.
+            let outer = found
+                .iter()
+                .enumerate()
+                .rfind(|(_, (_, o, _))| o != p && p.starts_with(o));
+            inner.push(match outer {
+                Some((o, (_, op, _))) => {
+                    let rel = p.strip_prefix(op).map_err(io::Error::other)?;
+                    Some((o, cstr(rel.as_os_str())?))
+                }
+                None => None,
+            });
+        }
         let dirs = found
             .into_iter()
             .map(|(i, path, id)| Ok((i, cstr(path.as_os_str())?, id)))
@@ -624,6 +641,8 @@ impl Overlays {
             lower: vec![[0; LOWER_LEN]; dirs.len()],
             dirs,
             inner,
+            #[cfg(test)]
+            swap: None,
         }))
     }
 
@@ -683,6 +702,14 @@ impl Overlays {
                 return Err(io::Error::from_raw_os_error(libc::ESTALE));
             }
         }
+        #[cfg(test)]
+        if let Some((from, to, link)) = &self.swap {
+            if libc::rename(from.as_ptr(), to.as_ptr()) != 0
+                || libc::symlink(link.as_ptr(), from.as_ptr()) != 0
+            {
+                return err();
+            }
+        }
         let empty = fs_mount(c"tmpfs", None)?;
         for k in 0..self.dirs.len() {
             let (lo, slot) = (self.fds[k], READ_FD + self.dirs[k].0 as RawFd);
@@ -692,16 +719,29 @@ impl Overlays {
             // its root to bwrap in the place of the folder. The slot holds
             // the checked folder, so the kernel never gives its number.
             // bwrap 0.11 binds the path of the descriptor, not the object,
-            // so an inner folder goes on the overlay of its outer folder,
-            // which is on its path now. bwrap refuses a mount that is not
-            // at the path.
-            let target = if self.inner[k] {
-                libc::open(
-                    self.dirs[k].1.as_ptr(),
-                    libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-                )
-            } else {
-                lo
+            // and refuses a mount that is not at the path. So an inner
+            // folder goes on its path in the overlay of its outer folder,
+            // which is on the path now (the outer folders come first). The
+            // open stays in that overlay: no link, no other mount. A folder
+            // that took the path after the checks is in the view of the
+            // outer folder already, so the inner overlay shows no more.
+            let target = match &self.inner[k] {
+                Some((o, rel)) => {
+                    let mut how: libc::open_how = std::mem::zeroed();
+                    how.flags = (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64;
+                    how.resolve = libc::RESOLVE_BENEATH
+                        | libc::RESOLVE_NO_SYMLINKS
+                        | libc::RESOLVE_NO_MAGICLINKS
+                        | libc::RESOLVE_NO_XDEV;
+                    libc::syscall(
+                        libc::SYS_openat2,
+                        READ_FD + self.dirs[*o].0 as RawFd,
+                        rel.as_ptr(),
+                        &how as *const libc::open_how,
+                        std::mem::size_of::<libc::open_how>(),
+                    ) as RawFd
+                }
+                None => lo,
             };
             if target < 0 {
                 return err();
