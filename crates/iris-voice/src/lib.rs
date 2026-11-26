@@ -841,8 +841,10 @@ const COMMON: &[&str] = &[
 /// owner `me`, the person `to` of the nudge, the `From`, `To` and `Cc` of
 /// each message of the snapshot `msgs`, the `From` of each message of the
 /// thread, and each display name that the store has for one of these
-/// addresses. The header keeps only bare `To` and `Cc` addresses, so the
-/// name of a recipient comes from the mail that the recipient sent.
+/// addresses (also for a sender of an older message of the thread). The
+/// header keeps only bare `To` and `Cc` addresses, so the name of a
+/// recipient comes from the mail that the recipient sent. The memory grows
+/// with the count of distinct names of these addresses.
 fn people_texts(
     c: &Connection,
     thread: i64,
@@ -874,13 +876,14 @@ fn people_texts(
     })? {
         let (name, addr) = r?;
         out.extend(name);
+        addrs.push(addr.to_lowercase());
         out.push(addr);
     }
     addrs.sort();
     addrs.dedup();
     let mut st = c.prepare_cached(
         "SELECT DISTINCT from_name FROM header
-         WHERE from_addr = ?1 AND from_name IS NOT NULL LIMIT 8",
+         WHERE from_addr = ?1 AND from_name IS NOT NULL",
     )?;
     for a in addrs.iter().filter(|a| !a.is_empty()) {
         for n in st.query_map([a], |r| r.get::<_, String>(0))? {

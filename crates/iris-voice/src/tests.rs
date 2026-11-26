@@ -2426,6 +2426,87 @@ fn a_nudge_that_names_only_the_recipient_is_not_saved() {
     nudge(&b.store, &l, &fake, now).unwrap();
 }
 
+/// Issue #1146: each stored name of an address of the thread is a people
+/// word: also more than 8 names of one address, and a name of a sender
+/// who is only in an older message of the thread, from another thread.
+#[test]
+fn every_stored_name_of_a_thread_address_is_a_people_word() {
+    let (b, t) = asked("people-all-names");
+    // An older message of the thread from Cy, and the newest six from me.
+    let mut older = msg(
+        "cy-1",
+        "t-ask",
+        10,
+        "INBOX",
+        "cy@example.org",
+        "me@example.com",
+        Some("Hi"),
+    );
+    older.header.from_name = Some("Cy".into());
+    let mut msgs = vec![older];
+    for i in 0..THREAD_MESSAGES {
+        msgs.push(msg(
+            &format!("me-{i}"),
+            "t-ask",
+            20 + i as i64,
+            "SENT",
+            "me@example.com",
+            "ana@example.org",
+            Some("x"),
+        ));
+    }
+    // Other threads: 12 names of Ana, and one other name of Cy.
+    for i in 0..12 {
+        let mut m = msg(
+            &format!("ana-{i}"),
+            &format!("t-a{i}"),
+            5,
+            "INBOX",
+            "ana@example.org",
+            "me@example.com",
+            Some("Hello"),
+        );
+        m.header.from_name = Some(format!("Annaname{i}"));
+        msgs.push(m);
+    }
+    let mut cy = msg(
+        "cy-2",
+        "t-cy",
+        5,
+        "INBOX",
+        "cy@example.org",
+        "me@example.com",
+        Some("Hello"),
+    );
+    cy.header.from_name = Some("Cyrillus".into());
+    msgs.push(cy);
+    b.store.put_messages(1, &msgs).unwrap();
+    let snap = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    assert!(snap
+        .newest
+        .iter()
+        .all(|m| m.from_addr.as_deref() != Some("cy@example.org")));
+    let texts = b
+        .store
+        .read(|c| {
+            Ok(people_texts(
+                c,
+                t,
+                "me@example.com",
+                Some("ana@example.org"),
+                &snap.newest,
+            )?)
+        })
+        .unwrap();
+    let people = people_words(&texts);
+    for w in ["cyrillus", "annaname0", "annaname11"] {
+        assert!(
+            people.binary_search(&w.to_string()).is_ok(),
+            "{w} {people:?}"
+        );
+    }
+}
+
 /// Issue #1075: for any commitment, a body that holds one of its key words
 /// names it, and a body of only common words names it only when it has no
 /// key word.
