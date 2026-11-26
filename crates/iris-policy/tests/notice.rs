@@ -601,3 +601,206 @@ fn notices_now(s: &Store) -> Vec<i64> {
         .filter_map(|n| n.message_id)
         .collect()
 }
+
+/// Issue #1045: the model health signal (`iris_store::model_can_read!`). A
+/// mail waits for the model only while the model can read it. A notice of
+/// a mail that the model did not read shows no words of the mail, and gets
+/// the words after the model reads the mail.
+#[test]
+fn a_notice_of_mail_the_model_did_not_read_shows_no_mail_words() {
+    let (_d, s) = store("model-health");
+    activate(&s, ANN);
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    // The words that a read of the notices shows.
+    let words = |id: i64| -> (String, String) {
+        let n = s
+            .read(notice::list)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.message_id == Some(id))
+            .unwrap();
+        (n.title, n.text)
+    };
+    let unchecked = (
+        notice::UNCHECKED_TITLE.to_string(),
+        notice::UNCHECKED_TEXT.to_string(),
+    );
+    // The model can read: the new mail waits. A budget refusal (a mark
+    // `waits_model`) or a failed try (`retry_at`) of one mail ends its wait.
+    let waits = put(&s, &mail(), 0);
+    let refused = put(
+        &s,
+        &Mail {
+            subject: "Pay now".into(),
+            ..mail()
+        },
+        1,
+    );
+    let failed = put(&s, &mail(), 2);
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET waits_model = 1 WHERE id = ?1",
+            [refused],
+        )?;
+        tx.execute(
+            "UPDATE message SET retry_at = ?2 WHERE id = ?1",
+            params![failed, NOW + MIN],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let new = notice::refresh(&s, NOW).unwrap();
+    assert_eq!(
+        new.iter()
+            .map(|n| n.message_id.unwrap())
+            .collect::<Vec<_>>(),
+        [refused, failed]
+    );
+    // The system notice shows no words of the mail either.
+    assert!(new.iter().all(|n| (n.title.as_str(), n.text.as_str())
+        == (notice::UNCHECKED_TITLE, notice::UNCHECKED_TEXT)));
+    assert_eq!(words(refused), unchecked);
+    assert_eq!(words(failed), unchecked);
+    // A model error wait that ended ("Try now", or its time passed) and a
+    // failed try whose retry time passed: the model can read, the mail waits.
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE model_setting SET retry_failures = 1, retry_at = ?1",
+            [NOW],
+        )?;
+        tx.execute(
+            "UPDATE message SET tries = 1, retry_at = ?1, waits_model = 2 WHERE id = ?2",
+            params![NOW - MIN, waits],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notices_now(&s).is_empty());
+    // A running model error wait ends the wait of each mail.
+    s.write(|tx| {
+        tx.execute("UPDATE model_setting SET retry_at = ?1", [NOW + MIN])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(notices_now(&s), [waits]);
+    assert_eq!(words(waits), unchecked);
+    // The model reads one mail as safe: its notice gets the words of the mail.
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET understood_at = ?2 WHERE id = ?1",
+            params![refused, NOW],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notices_now(&s).is_empty());
+    assert_eq!(words(refused).1, "Pay now");
+    assert_eq!(words(failed), unchecked);
+    // With no notify rule left, the pass still writes the words of a
+    // notice whose understanding finished.
+    activate(&s, &ANN.replace("notify", "hide"));
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET understood_at = ?2 WHERE id = ?1",
+            params![failed, NOW],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notices_now(&s).is_empty());
+    assert_eq!(words(failed).1, "Lunch?");
+}
+
+/// Issue #1045: the words of a notice depend on the check at each read. A
+/// notice from a time with no model shows no words of the mail after a
+/// model is set, until the understanding of the mail finishes.
+#[test]
+fn a_model_set_after_the_notice_hides_the_words_of_unchecked_mail() {
+    let (_d, s) = store("model-later");
+    activate(&s, ANN);
+    let m = put(&s, &mail(), 0);
+    assert_eq!(notices_now(&s), [m]);
+    let shown = || {
+        let n = s.read(notice::list).unwrap().remove(0);
+        (n.title, n.text)
+    };
+    assert_eq!(shown().1, "Lunch?");
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(shown().1, notice::UNCHECKED_TEXT);
+    assert_eq!(
+        s.read(|c| notice::after(c, 0, 10)).unwrap()[0].text,
+        notice::UNCHECKED_TEXT
+    );
+    // The system notice reads the notice again at the show.
+    let id = s.read(notice::list).unwrap()[0].id;
+    let again = s.read(|c| notice::get_open(c, id)).unwrap().unwrap();
+    assert_eq!(
+        (again.text.as_str(), again.checked),
+        (notice::UNCHECKED_TEXT, false)
+    );
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET understood_at = ?2 WHERE id = ?1",
+            params![m, NOW],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(shown().1, "Lunch?");
+}
+
+/// Issue #1045: the content cleanup of gone mail marks done an open notice
+/// of mail that is not checked, before it deletes the evidence, and leaves
+/// a checked notice with its words.
+#[test]
+fn the_cleanup_of_gone_mail_settles_unchecked_notices() {
+    let (_d, s) = store("model-clean");
+    activate(&s, ANN);
+    let checked = put(&s, &mail(), 0);
+    let unchecked = put(
+        &s,
+        &Mail {
+            subject: "Pay now".into(),
+            ..mail()
+        },
+        1,
+    );
+    assert_eq!(notices_now(&s), [checked, unchecked]);
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        tx.execute("UPDATE message SET understood_at = ?2 WHERE id = ?1", params![checked, NOW])?;
+        tx.execute("UPDATE message SET gone_at = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    s.clean_gone(NOW + iris_store::GONE_KEEP_MS)
+        .unwrap()
+        .unwrap();
+    let left: Vec<(Option<i64>, String)> = s
+        .read(notice::list)
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.message_id, n.text))
+        .collect();
+    assert_eq!(left, [(Some(checked), "Lunch?".to_string())]);
+}
