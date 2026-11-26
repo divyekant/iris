@@ -42,9 +42,16 @@ impl Drop for Data {
 }
 
 /// Runs `program args` in the sandbox of `session` and gives its output.
-fn run(d: &Data, session: i64, port: Option<u16>, program: &str, args: &[&str]) -> String {
+fn run(
+    d: &Data,
+    session: i64,
+    egress: Option<(u16, OwnedFd)>,
+    program: &str,
+    args: &[&str],
+) -> String {
     let iso = d.iso();
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let port = egress.as_ref().map(|e| e.0);
     let c = iso.command(session, &d.ws, port, Path::new(program), &args, &[], None);
     let mut cmd = std::process::Command::new(&c.program);
     cmd.args(&c.args)
@@ -52,7 +59,7 @@ fn run(d: &Data, session: i64, port: Option<u16>, program: &str, args: &[&str]) 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    let child = iso.spawn_with(session, &mut cmd, port).unwrap();
+    let child = iso.spawn_with(session, &mut cmd, egress).unwrap();
     let out = child.wait_with_output().unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -234,12 +241,13 @@ fn a_program_inside_the_data_folder_does_not_show_the_data_folder() {
 #[test]
 fn the_network_is_only_the_egress_port() {
     let d = Data::new();
-    let egress = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = egress.local_addr().unwrap().port();
+    // The engine end of the pair gets each connection of the agent.
+    let (engine, helper) = std::os::unix::net::UnixStream::pair().unwrap();
+    let port = crate::egress::EGRESS_PORT;
     let other = TcpListener::bind("127.0.0.1:0").unwrap();
     let other_port = other.local_addr().unwrap().port();
     let got = thread::spawn(move || {
-        let (mut s, _) = egress.accept().unwrap();
+        let mut s = TcpStream::from(recv_fd(&engine, Duration::from_secs(10)).unwrap());
         let mut b = [0u8; 2];
         s.read_exact(&mut b).unwrap();
         s.write_all(b"ok").unwrap();
@@ -257,7 +265,13 @@ fn the_network_is_only_the_egress_port() {
          \x20   u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.sendto(b'x', ('8.8.8.8', 53)); print('REACHED udp')\n\
          except OSError: print('blocked udp')\n"
     );
-    let out = run(&d, 2, Some(port), "/usr/bin/python3", &["-c", &script]);
+    let out = run(
+        &d,
+        2,
+        Some((port, helper.into())),
+        "/usr/bin/python3",
+        &["-c", &script],
+    );
     assert_eq!(&got.join().unwrap(), b"hi");
     assert!(out.contains("egress ok"), "{out}");
     assert!(!out.contains("REACHED"), "{out}");
@@ -512,7 +526,7 @@ fn the_relay_closes_a_ninth_connection() {
     let inner = TcpListener::bind("127.0.0.1:0").unwrap();
     let inner_port = inner.local_addr().unwrap().port();
     let engine = pidfd_open(std::process::id() as i32).unwrap();
-    let from = crate::egress::session_peer(3).unwrap();
+    let from = Ipv4Addr::LOCALHOST;
     start_relay(inner, port, from, engine).unwrap();
     let mut open = Vec::new();
     for _ in 0..RELAY_MAX {
@@ -530,7 +544,7 @@ fn the_relay_closes_a_ninth_connection() {
     // Bytes pass in both directions on an open connection.
     open[0].write_all(b"a").unwrap();
     let mut far = held.lock().unwrap().remove(0);
-    // Each connection comes from the session address.
+    // Each connection comes from the address of the relay.
     assert_eq!(far.peer_addr().unwrap().ip(), std::net::IpAddr::V4(from));
     let mut got = [0u8; 1];
     far.read_exact(&mut got).unwrap();
@@ -552,7 +566,7 @@ fn the_relay_stops_at_the_end_of_its_engine() {
     let engine = pidfd_open(fake.id() as i32).unwrap();
     let inner = TcpListener::bind("127.0.0.1:0").unwrap();
     let inner_port = inner.local_addr().unwrap().port();
-    let from = crate::egress::session_peer(4).unwrap();
+    let from = Ipv4Addr::LOCALHOST;
     start_relay(inner, port, from, engine).unwrap();
     // While the engine runs, a connection goes through.
     let _a = TcpStream::connect(("127.0.0.1", inner_port)).unwrap();
@@ -628,42 +642,135 @@ fn the_info_parser_takes_only_a_valid_line() {
     }
 }
 
-/// After an engine crash, the port of session 7 can go to the proxy of
-/// session 8. The relay of session 7 then reaches that proxy, which refuses
-/// it: no timing makes the relay reach another session.
+/// Issue 507: the egress handoff makes no connection on the host. While the
+/// engine end of the pair is open, each connection goes to it; after the
+/// end of the engine, a new connection reaches no process, and the
+/// listener closes. No host port is in the path, so no process that takes a
+/// port can get the bytes.
 #[test]
-fn a_relay_reaches_no_proxy_of_another_session() {
-    use crate::egress::{session_peer, Proxy, SystemResolver};
-    let log = std::env::temp_dir().join(format!("iris-sbx-peer-{}.log", std::process::id()));
-    let _ = fs::remove_file(&log);
-    let file = OpenOptions::new()
-        .create_new(true)
-        .append(true)
-        .open(&log)
-        .unwrap();
-    let other = Proxy::start(
-        vec!["api.example.test".into()],
-        file,
-        Box::new(SystemResolver),
-        session_peer(8).unwrap(),
-        None,
-    )
-    .unwrap();
+fn the_handoff_reaches_only_the_engine_end_of_its_pair() {
+    let (engine, helper) = std::os::unix::net::UnixStream::pair().unwrap();
     let inner = TcpListener::bind("127.0.0.1:0").unwrap();
     let inner_port = inner.local_addr().unwrap().port();
-    let engine = pidfd_open(std::process::id() as i32).unwrap();
-    start_relay(inner, other.port(), session_peer(7).unwrap(), engine).unwrap();
-    let mut s = TcpStream::connect(("127.0.0.1", inner_port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n")
-        .unwrap();
-    let mut line = String::new();
-    std::io::BufReader::new(s).read_line(&mut line).unwrap();
-    assert!(line.starts_with("HTTP/1.1 403"), "{line}");
-    other.stop().unwrap();
-    let text = fs::read_to_string(&log).unwrap();
-    let _ = fs::remove_file(&log);
-    assert!(text.contains("refused reason=not_session"), "{text}");
+    start_handoff(inner, helper.into()).unwrap();
+    let mut a = TcpStream::connect(("127.0.0.1", inner_port)).unwrap();
+    let mut far = TcpStream::from(recv_fd(&engine, Duration::from_secs(5)).unwrap());
+    a.write_all(b"a").unwrap();
+    let mut got = [0u8; 1];
+    far.read_exact(&mut got).unwrap();
+    far.write_all(b"b").unwrap();
+    a.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"b");
+    // The engine ends.
+    drop(engine);
+    if let Ok(mut b) = TcpStream::connect(("127.0.0.1", inner_port)) {
+        b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut x = [0u8; 1];
+        assert_eq!(b.read(&mut x).unwrap_or(0), 0, "closed with no byte");
+    }
+    assert!(wait_for(
+        || TcpStream::connect(("127.0.0.1", inner_port)).is_err(),
+        5
+    ));
+    // A connection that the engine got before its end keeps working.
+    far.write_all(b"c").unwrap();
+    a.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"c");
+}
+
+/// The helper of the egress test: started by the test below as a second
+/// process, with the helper end of a socket pair at the descriptor of the
+/// launch and `HTTPS_PROXY` in its environment, as the launch starts it.
+#[test]
+#[ignore = "run by the_helper_takes_its_pair_and_hands_over_each_connection"]
+fn egress_helper() {
+    let Some(dir) = std::env::var_os("IRIS_SBX_EGRESS_DATA") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let iso = Bwrap::new(&dir).unwrap();
+    // The agent: no socket is open in it at its start (not the pair), and its one
+    // connection to the egress port reaches the test.
+    let script = "import os, socket\n\
+         def link(f):\n\
+         \x20   try: return os.readlink('/proc/self/fd/' + f)\n\
+         \x20   except OSError: return ''\n\
+         n = sum(link(f).startswith('socket:') for f in os.listdir('/proc/self/fd'))\n\
+         s = socket.create_connection(('127.0.0.1', 3128), timeout=5)\n\
+         s.sendall(b'hi'); open('out', 'w').write(f'{n} {s.recv(2).decode()}')\n";
+    let c = iso.command(
+        12,
+        &dir.join("workspaces/j-1"),
+        Some(3128),
+        Path::new("/usr/bin/python3"),
+        &["-c".into(), script.into()],
+        &[],
+        None,
+    );
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args).process_group(0).stdin(Stdio::null());
+    match iso.spawn(12, &mut cmd) {
+        Ok(child) => {
+            let out = child.wait_with_output().unwrap();
+            println!("ended {}", out.status);
+        }
+        Err(e) => println!("refused {e}"),
+    }
+}
+
+/// Issue 507, the real helper path: [`Isolation::spawn`] takes the pair
+/// from its descriptor, the agent connects to the egress port in its
+/// namespace, and the connection arrives at the engine end of the pair. The
+/// pair does not reach the agent. A helper with no pair refuses the start.
+#[test]
+fn the_helper_takes_its_pair_and_hands_over_each_connection() {
+    let d = Data::new();
+    let helper = |pair: Option<RawFd>| {
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args([
+            "--ignored",
+            "--exact",
+            "isolation::linux::tests::egress_helper",
+            "--nocapture",
+        ])
+        .env("IRIS_SBX_EGRESS_DATA", &d.dir)
+        .env("HTTPS_PROXY", "http://127.0.0.1:3128")
+        .stdout(Stdio::piped());
+        if let Some(fd) = pair {
+            // SAFETY: dup2 only, between fork and exec.
+            unsafe {
+                c.pre_exec(move || {
+                    if libc::dup2(fd, crate::egress::EGRESS_FD) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        c.spawn().unwrap()
+    };
+    let (engine, ours) = std::os::unix::net::UnixStream::pair().unwrap();
+    let h = helper(Some(ours.as_raw_fd()));
+    drop(ours);
+    let mut s = TcpStream::from(recv_fd(&engine, Duration::from_secs(20)).unwrap());
+    let mut b = [0u8; 2];
+    s.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"hi");
+    s.write_all(b"ok").unwrap();
+    let out = h.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("ended exit status: 0"), "{text}");
+    assert_eq!(fs::read_to_string(d.ws.join("out")).unwrap(), "0 ok");
+    // No pair at the descriptor: the helper refuses the start.
+    let _ = fs::remove_file(d.ws.join("out"));
+    let h = helper(None);
+    let out = h.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("refused the helper has no egress channel"),
+        "{text}"
+    );
+    assert!(!d.ws.join("out").exists());
 }
 
 /// A data folder that is a link: each mount of the view uses the real
@@ -843,6 +950,126 @@ fn a_read_path_is_readable_and_not_writable() {
     let _ = fs::remove_dir_all(&tool);
 }
 
+/// Issue 996: a program of the person makes a socket in a read path after
+/// the launch checked it. The view shows each read path through a
+/// read-only overlay, so a connection to that socket is refused: the
+/// kernel finds a socket by its inode, and the overlay has its own inodes.
+#[test]
+fn a_socket_made_in_a_read_path_after_the_checks_is_not_reached() {
+    let d = Data::new();
+    let iso = d.iso();
+    let tool = tool_dir("latesock");
+    let sock = tool.join("late.sock");
+    let script = format!(
+        "import os, socket, time\n\
+         for _ in range(200):\n\
+         \x20   if os.path.exists('{s}'): break\n\
+         \x20   time.sleep(0.05)\n\
+         print(open('{t}/main.js').read())\n\
+         c = socket.socket(socket.AF_UNIX)\n\
+         try:\n\
+         \x20   c.connect('{s}'); print('REACHED')\n\
+         except OSError as e: print('refused', e.errno)\n",
+        s = sock.display(),
+        t = tool.display()
+    );
+    let c = iso.command(
+        24,
+        &d.ws,
+        None,
+        Path::new("/usr/bin/python3"),
+        &["-c".into(), script],
+        std::slice::from_ref(&tool),
+        None,
+    );
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let child = iso.spawn_with(24, &mut cmd, None).unwrap();
+    // After the checks of the spawn: a server of the person.
+    let server = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    fs::set_permissions(&sock, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+    server.set_nonblocking(true).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("TOOL-MARKER"), "{out}");
+    assert!(out.contains("refused"), "{out}");
+    assert!(!out.contains("REACHED"), "{out}");
+    assert!(server.accept().is_err(), "no connection reached the server");
+    let _ = fs::remove_dir_all(&tool);
+}
+
+/// Runs `script` in a sandbox with the read paths `reads`, and gives
+/// its output.
+fn with_reads(session: i64, reads: &[PathBuf], script: &str) -> String {
+    let d = Data::new();
+    let iso = d.iso();
+    let c = iso.command(
+        session,
+        &d.ws,
+        None,
+        Path::new("/bin/sh"),
+        &["-c".into(), script.into()],
+        reads,
+        None,
+    );
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let child = iso.spawn_with(session, &mut cmd, None).unwrap();
+    String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+}
+
+/// A read path in another read path starts in each order: the child of
+/// the spawn checks each folder before it puts an overlay on one.
+#[test]
+fn read_paths_in_read_paths_start_in_each_order() {
+    let parent = tool_dir("nest");
+    let child = parent.join("plugin");
+    fs::create_dir(&child).unwrap();
+    fs::write(child.join("x"), "CHILD-MARKER").unwrap();
+    let script = format!(
+        "cat {p}/main.js; echo; cat {c}/x",
+        p = parent.display(),
+        c = child.display()
+    );
+    for (session, reads) in [
+        (25, [parent.clone(), child.clone()]),
+        (26, [child.clone(), parent.clone()]),
+    ] {
+        let out = with_reads(session, &reads, &script);
+        assert!(out.contains("TOOL-MARKER"), "{reads:?}: {out}");
+        assert!(out.contains("CHILD-MARKER"), "{reads:?}: {out}");
+    }
+    let _ = fs::remove_dir_all(&parent);
+}
+
+/// The overlay step takes the descriptors that the kernel gives, so a
+/// low descriptor number that is taken or free changes nothing. Each round
+/// takes each number below `top`, so the first free number of the child
+/// of the spawn moves over the range of the old fixed slots (40, 41).
+#[test]
+fn a_read_path_starts_when_the_low_descriptors_are_taken() {
+    let tool = tool_dir("lowfd");
+    let script = format!("cat {}/main.js", tool.display());
+    for top in 20..=44 {
+        let mut held = Vec::new();
+        while held.last().is_none_or(|f: &File| f.as_raw_fd() < top) {
+            held.push(File::open("/dev/null").unwrap());
+        }
+        let out = with_reads(27, std::slice::from_ref(&tool), &script);
+        drop(held);
+        assert!(out.contains("TOOL-MARKER"), "top {top}: {out}");
+    }
+    let _ = fs::remove_dir_all(&tool);
+}
+
 #[test]
 fn a_read_path_that_changes_after_the_launch_stops_the_start() {
     let d = Data::new();
@@ -980,4 +1207,46 @@ fn identify_never_fails_on_a_process_that_ends_during_the_reads() {
         }
         reaper.join().unwrap();
     }
+}
+
+#[test]
+fn the_lowerdir_value_names_both_descriptors() {
+    let mut buf = [0xff; LOWER_LEN];
+    for (a, b) in [(0, 9), (41, 7), (i32::MAX, 1_000_000)] {
+        let v = lower_value(&mut buf, a, b);
+        assert_eq!(
+            v.to_str().unwrap(),
+            format!("/proc/self/fd/{a}:/proc/self/fd/{b}")
+        );
+    }
+}
+
+/// The child of the spawn opens each folder again by its path. If the
+/// folder at the path is another folder than the one that the checks
+/// opened, the overlay step stops with `ESTALE` and shows nothing.
+#[test]
+fn the_overlay_step_refuses_a_folder_that_changed_after_the_checks() {
+    let tool = tool_dir("ovlswap");
+    let fd: OwnedFd = File::open(&tool).unwrap().into();
+    let mut o = Overlays::plan(&[(fd, tool.clone())]).unwrap().unwrap();
+    let old = tool.with_extension("old");
+    let _ = fs::remove_dir_all(&old);
+    fs::rename(&tool, &old).unwrap();
+    fs::create_dir(&tool).unwrap();
+    // SAFETY: the child runs only system calls (apply), then _exit.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let code = match unsafe { o.apply() } {
+            Ok(()) => 0,
+            Err(e) => e.raw_os_error().unwrap_or(1),
+        };
+        unsafe { libc::_exit(code) };
+    }
+    let mut status = 0;
+    // SAFETY: waitpid writes only `status`.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(libc::WIFEXITED(status), "{status}");
+    assert_eq!(libc::WEXITSTATUS(status), libc::ESTALE);
+    let _ = fs::remove_dir_all(&tool);
+    let _ = fs::remove_dir_all(&old);
 }

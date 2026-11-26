@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Read;
+#[cfg(not(target_os = "linux"))]
 use std::net::Ipv4Addr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
@@ -23,7 +24,11 @@ use std::time::{Duration, Instant};
 use iris_changeset::{Author, AuthorKind};
 use iris_job::{format_session_id, EndReason, Session};
 use iris_session::config::Adapter;
-use iris_session::egress::{new_token, session_peer, Endpoint, Proxy, SystemResolver};
+#[cfg(not(target_os = "linux"))]
+use iris_session::egress::new_token;
+#[cfg(target_os = "linux")]
+use iris_session::egress::sandbox_port;
+use iris_session::egress::{Endpoint, Proxy, SystemResolver};
 use iris_session::isolation::Isolation;
 use iris_session::launch::{Egress, Launcher, Outcome, Step};
 use iris_session::reap::reap_check;
@@ -502,8 +507,7 @@ impl Sessions {
             if adapter.allow_hosts.is_empty() {
                 return Ok(None);
             }
-            let p = self.egress(session, adapter.allow_hosts.clone())?;
-            let end = p.endpoint();
+            let (p, end) = self.egress(session, adapter)?;
             proxies.borrow_mut().insert(session, p);
             Ok(Some(end))
         };
@@ -559,8 +563,12 @@ impl Sessions {
         }
     }
 
-    /// The egress proxy of a session, with its log.
-    fn egress(&self, session: i64, allowed: Vec<String>) -> Result<Proxy, String> {
+    /// The egress proxy of a session, with its log, and the endpoint of
+    /// the agent. Linux: the proxy takes its clients from a new socket pair
+    /// (the endpoint holds the helper end). macOS: a port of 127.0.0.1 and
+    /// a new token of the session tell its processes from all others.
+    fn egress(&self, session: i64, adapter: &Adapter) -> Result<(Proxy, Endpoint), String> {
+        let allowed = adapter.allow_hosts.clone();
         let dir = self.data_dir().join("sessions");
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -572,8 +580,31 @@ impl Sessions {
             .mode(0o600)
             .open(self.egress_log(session))
             .map_err(|e| e.to_string())?;
-        let (peer, token) = egress_identity(session, cfg!(target_os = "macos"))?;
-        Proxy::start(allowed, log, Box::new(SystemResolver), peer, token).map_err(|e| e.to_string())
+        #[cfg(target_os = "linux")]
+        {
+            let port = sandbox_port(adapter.allow_local);
+            let (p, helper) = Proxy::start_channel(allowed, log, Box::new(SystemResolver), port)
+                .map_err(|e| e.to_string())?;
+            let end = Endpoint {
+                channel: Some(Arc::new(helper)),
+                ..p.endpoint()
+            };
+            Ok((p, end))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let token = new_token().map_err(|e| format!("no token: {e}"))?;
+            let p = Proxy::start(
+                allowed,
+                log,
+                Box::new(SystemResolver),
+                Ipv4Addr::LOCALHOST,
+                Some(token),
+            )
+            .map_err(|e| e.to_string())?;
+            let end = p.endpoint();
+            Ok((p, end))
+        }
     }
 
     fn egress_log(&self, session: i64) -> PathBuf {
@@ -1075,19 +1106,6 @@ pub fn state(s: &Session) -> String {
     }
 }
 
-/// The client address and the token of the proxy of `session`. macOS has
-/// no session address: the peer is 127.0.0.1, and a new token of the
-/// session tells its processes from all others. Linux has the session
-/// address and no token.
-fn egress_identity(session: i64, macos: bool) -> Result<(Ipv4Addr, Option<String>), String> {
-    if macos {
-        let token = new_token().map_err(|e| format!("no token: {e}"))?;
-        return Ok((Ipv4Addr::LOCALHOST, Some(token)));
-    }
-    let peer = session_peer(session).ok_or("the session ID has no peer address")?;
-    Ok((peer, None))
-}
-
 #[cfg(test)]
 mod egress_tests {
     use super::*;
@@ -1149,21 +1167,5 @@ mod egress_tests {
         let minutes: Vec<i64> = (1..=10).map(|f| retry_wait(f) / 60_000).collect();
         assert_eq!(minutes, [1, 2, 4, 8, 16, 32, 60, 60, 60, 60]);
         assert_eq!(retry_wait(u32::MAX), 3_600_000);
-    }
-
-    #[test]
-    fn macos_gets_a_new_token_and_linux_the_session_address() {
-        let (peer, a) = egress_identity(5, true).unwrap();
-        assert_eq!(peer, Ipv4Addr::LOCALHOST);
-        let a = a.unwrap();
-        assert_eq!(a.len(), 64);
-        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
-        let (_, b) = egress_identity(5, true).unwrap();
-        assert_ne!(Some(a), b, "each session gets its own token");
-        assert_eq!(
-            egress_identity(5, false).unwrap(),
-            (session_peer(5).unwrap(), None)
-        );
-        assert!(egress_identity(0, false).is_err());
     }
 }
