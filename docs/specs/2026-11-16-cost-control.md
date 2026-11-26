@@ -79,8 +79,13 @@ pay again for the same mail.
 - The record ends with the thread and the date of the message itself
   ("@thread:date"). An item of a run names its thread, so a message that
   sync moves to another thread or date with the same content runs again.
-- Limit (issue #1135): a known person who is only in `To` or `Cc` of a
-  thread does not put the thread in `talk_due`. A check compares the
+- A known person who is only in `To` or `Cc` of a thread (issue #1135):
+  a new, changed or removed `person` row puts its address in `party_due`
+  (migration 71). Before the "?" records of each batch run and queue
+  step, one read of the headers puts each thread with such an address in
+  `To` or `Cc` in `talk_due`, and clears the addresses. Migration 71 puts
+  each known person in `party_due`, so a change before the upgrade is
+  checked once. A check compares the
   recorded context of an understood message with its context now, and
   clears `understood_at` where they differ. So a later message runs again
   only when the context that its last run used changed: an earlier
@@ -113,8 +118,18 @@ pay again for the same mail.
   `talk_due` before that, and the check runs each "?" message of the
   thread again. So a change after the upgrade is never lost. A thread
   that was in `talk_due` at the upgrade runs its old messages once.
-- Limit (issue #1119): a change before the upgrade is not seen, because
-  the first record of a message is its context at that time.
+- Before the first record of a "?" message (issue #1119), the step
+  looks for an earlier message of its thread (in the order of the runs)
+  that was fetched or went away after the end of the batch run that
+  understood it (`understand_run.ended_at` of the run whose `started_at`
+  is the `understood_at` of the message). Such a change came after the
+  model call, so the message runs again. A change during that run is not
+  evidence: the call can have read it.
+- Limit (issue #1173): a change before the upgrade with no time in the
+  store is not seen for a "?" message: a `SPAM` or `TRASH` label that went
+  away, a hostile mark, a fetch or a removal during its run, or a message
+  that a run outside the batch runner understood. Its first record is its
+  context at that time. `iris rebuild` runs each message again.
 
 ## Not in scope
 

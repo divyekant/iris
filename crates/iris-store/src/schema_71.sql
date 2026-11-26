@@ -38,3 +38,11 @@ BEGIN
   INSERT INTO party_due(address) SELECT lower(OLD.address)
     WHERE NOT EXISTS (SELECT 1 FROM party_due d WHERE d.address = lower(OLD.address));
 END;
+
+-- A known person who changed before this migration: each one goes in the
+-- queue once, so the first pass checks each thread with a known person in
+-- `To` or `Cc`. The check runs a message again only where its recorded
+-- context differs.
+INSERT INTO party_due(address)
+  SELECT DISTINCT lower(address) FROM sender WHERE kind = 'person'
+     AND lower(address) NOT IN (SELECT address FROM party_due);

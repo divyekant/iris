@@ -4035,14 +4035,45 @@ fn an_old_message_whose_earlier_mail_moved_after_its_run_runs_again() {
         let mut last = std::collections::HashMap::new();
         drain(&b, &fake, &mut last);
         let calls = fake.calls.borrow().len();
-        // Before migration 69: no record, and then a change of m1 after
-        // the run of m2, which no check saw.
+        // Before migration 69: no record. The batch run that understood
+        // m2 started at its `understood_at` and ended 10 ms later.
         b.store
             .write(|tx| {
                 tx.execute("UPDATE message SET context = '?'", [])?;
                 tx.execute(
-                    &format!("UPDATE message SET {change} = understood_at + 1 WHERE id = ?1"),
-                    [m1],
+                    "INSERT INTO understand_run(started_at, ended_at, model, prompt)
+                     SELECT understood_at, understood_at + 10, 'fake', 'p' FROM message
+                      WHERE id = ?1",
+                    [m2],
+                )?;
+                // A change during the run: its call can have read it.
+                tx.execute(
+                    &format!(
+                        "UPDATE message SET {change} =
+                           (SELECT understood_at + 5 FROM message WHERE id = ?2) WHERE id = ?1"
+                    ),
+                    [m1, m2],
+                )?;
+                tx.execute("DELETE FROM talk_due", [])?;
+                Ok(())
+            })
+            .unwrap();
+        iris_understand::store::record_unknown_contexts(&b.store).unwrap();
+        let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+        assert!(
+            understood.is_some(),
+            "{change}: a change during the run is no evidence"
+        );
+        // A change after the end of the run, which no check saw.
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE message SET context = '?' WHERE id = ?1", [m2])?;
+                tx.execute(
+                    &format!(
+                        "UPDATE message SET {change} =
+                           (SELECT understood_at + 11 FROM message WHERE id = ?2) WHERE id = ?1"
+                    ),
+                    [m1, m2],
                 )?;
                 tx.execute("DELETE FROM talk_due", [])?;
                 Ok(())
@@ -4099,4 +4130,48 @@ fn a_name_change_after_the_cut_of_a_party_runs_nothing_again() {
         fake.calls.borrow().len() > calls,
         "the later mail runs again"
     );
+}
+
+/// Issue 1135, review of #1172: a person in `Cc` who became known before
+/// store migration 71 (no `party_due` then) runs the later mail once after
+/// the upgrade: the migration queues each known person.
+#[test]
+fn a_cc_party_known_before_migration_71_runs_the_later_mail_after_the_upgrade() {
+    let b = store("context-parties-upgrade");
+    let cc = "From: x1@example.net\nTo: owner@example.com\nCc: dee@example.org\nSubject: S\n\nWords k1k.\n";
+    b.add_in("1", "t", NOW - 2 * DAY, cc, &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // The store before migration 71, and the person becomes known there.
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER party_due_sender_add; DROP TRIGGER party_due_sender;
+                 DROP TRIGGER party_due_sender_remove; DROP TABLE party_due;
+                 INSERT INTO sender(address, name, kind, decided_by)
+                   VALUES ('dee@example.org', 'Dee', 'person', 'person')
+                   ON CONFLICT(address) DO UPDATE SET name = 'Dee', kind = 'person',
+                     decided_by = 'person';
+                 DELETE FROM talk_due;",
+            )?;
+            let v: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            tx.execute_batch(&format!("PRAGMA user_version = {};", v - 1))?;
+            Ok(())
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+    };
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Dee <dee@example.org>"), "{}", last[&m2]);
 }
