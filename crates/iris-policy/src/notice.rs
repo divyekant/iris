@@ -23,10 +23,12 @@ pub const LATE_MS: i64 = 24 * WINDOW_MS;
 /// the words of the mail (issue #1045).
 pub const MODEL_WAIT_MS: i64 = 5 * 60_000;
 
-/// The title of a notice of a mail whose understanding did not finish ([`checked_sql`]).
-pub const UNCHECKED_TITLE: &str = "Mail not checked yet";
-/// The text of a notice of a mail whose understanding did not finish.
-pub const UNCHECKED_TEXT: &str = "Iris shows the sender and the subject after the phishing check.";
+/// The title of a notice of a mail that the model did not read, while a
+/// model is set ([`checked_sql`]). Mail that a fixed rule completes never
+/// gets a model read, so the words do not promise one (issue #1163).
+pub const UNCHECKED_TITLE: &str = "Mail not checked by the model";
+/// The text of a notice of a mail that the model did not read.
+pub const UNCHECKED_TEXT: &str = "Open Iris to see the sender and the subject.";
 
 /// The most characters of the title and of the text of a notice.
 pub const WORDS_MAX: usize = 200;
@@ -53,7 +55,7 @@ pub struct Notice {
     /// Milliseconds since 1970-01-01 UTC.
     pub created_at: i64,
     /// False for a rule notice whose mail is not checked now
-    /// ([`checked_sql`], issue #1045): `title` and `text` are then
+    /// ([`checked_sql`], issues #1045, #1163): `title` and `text` are then
     /// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`], and each output that adds
     /// words of the mail to the notice (a sender, a subject) must leave them
     /// out. True for a job notice.
@@ -168,20 +170,21 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
 
 /// The SQL condition "the notice of the message with the row ID `id` (an
 /// SQL term) can show the words of the mail": no model is set, or the
-/// understanding of the message finished
-/// (`understood_at`). [`shown_words`] and [`checked_mail`] read it. The
-/// understanding finishes after the model read the
-/// mail, or with no model call when a fixed rule completes it or the
-/// sender is a declined stranger (spec 1 section 7.3, decision D29): the
-/// same end of understanding that guard 4 waits for (issue #321).
+/// model read the mail (`iris_store::model_read!`). [`shown_words`] and
+/// [`checked_mail`] read it. Mail that a fixed rule completes, or whose
+/// sender is a declined stranger, gets no model `phishing` check (spec 1
+/// section 7.3, decision D29), so its notice shows no words while a model
+/// is set (issue #1163).
 ///
 /// A notice whose message row is gone shows its words: before the content
 /// cleanup deletes the row of gone mail, it marks done each open notice of
-/// such mail that is not checked (`Store::clean_gone`).
+/// such mail that the model did not read, with or without a model set
+/// (`Store::clean_gone`, issue #1168).
 fn checked_sql(id: &str) -> String {
     format!(
         "(NOT EXISTS (SELECT 1 FROM model_setting)
-          OR NOT EXISTS (SELECT 1 FROM message cm WHERE cm.id = {id} AND cm.understood_at IS NULL))"
+          OR NOT EXISTS (SELECT 1 FROM message cm WHERE cm.id = {id} AND NOT {}))",
+        iris_store::model_read!("cm")
     )
 }
 

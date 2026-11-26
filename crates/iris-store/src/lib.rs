@@ -44,6 +44,30 @@ macro_rules! model_can_read {
     };
 }
 
+/// The SQL condition "the model read message `$m`" (an SQL alias with the
+/// columns of `message`): its understanding finished after a model call.
+/// The understanding writes `fixed_rules` with `understood_at`
+/// (`iris_understand::store`, migration 58): NULL when the model made an
+/// item, `[]` when no rule and no model item came. The other ends of
+/// understanding had no model call, so the model read no word of the mail:
+/// - a fixed rule completed it (`fixed_rules` names a rule, spec 1
+///   section 7.3), or the backfill did not know (`unknown`);
+/// - the sender is a declined stranger (`model_declined`, decision D29).
+///
+/// Hostile mail can end with `[]` and no model call. Each gate of hostile
+/// mail ([`hostile_mail!`]) reads it apart. The notices use this condition
+/// to show the words of a mail (issues #1163, #1168).
+#[macro_export]
+macro_rules! model_read {
+    ($m:literal) => {
+        concat!(
+            "(", $m, ".understood_at IS NOT NULL AND coalesce(", $m,
+            ".fixed_rules, '[]') = '[]' AND NOT EXISTS (SELECT 1 FROM model_declined mrd WHERE mrd.message_id = ",
+            $m, ".id))"
+        )
+    };
+}
+
 /// The SQL condition "message `m` is hostile mail": a hostile mark, the
 /// label `SPAM`, or a `hostile` sender (specification 1, section 6.7).
 /// Understanding deletes the unpinned items of such a message. Each read

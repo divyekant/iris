@@ -493,10 +493,11 @@ SELECT DISTINCT sha FROM hashes WHERE sha IS NOT NULL";
 /// names the sender, then the message row with its marks and labels), it
 /// keeps the last verdict of each notice and each watch match on such mail
 /// (decision D33). An open notice on hostile mail is marked done, so it
-/// stays hidden. With a model set, an open notice on mail whose
-/// understanding did not finish is marked done too: the notice shows no
-/// words of such mail, and a notice with no message row shows its words
-/// (issue #1045, `iris_policy::notice`). A watch whose match is hostile mail, a draft or a copy
+/// stays hidden. An open notice on mail that the model did not read
+/// ([`crate::model_read!`]) is marked done too, with or without a model set:
+/// with a model, the notice shows no words of such mail, and a notice with
+/// no message row shows its words (issues #1045, #1168,
+/// `iris_policy::notice`). A watch whose match is hostile mail, a draft or a copy
 /// waits again. A safe notice or match stays as it is.
 fn settle_hostile(tx: &rusqlite::Transaction, cutoff: i64, now: i64) -> Result<()> {
     tx.execute(
@@ -507,7 +508,9 @@ fn settle_hostile(tx: &rusqlite::Transaction, cutoff: i64, now: i64) -> Result<(
             crate::hostile_mail!(),
             " OR ",
             crate::may_be_hostile!(),
-            " OR (m.understood_at IS NULL AND EXISTS (SELECT 1 FROM model_setting))))"
+            " OR NOT ",
+            crate::model_read!("m"),
+            "))"
         ),
         params![cutoff, now],
     )?;
