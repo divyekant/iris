@@ -4088,8 +4088,8 @@ fn a_cc_party_known_before_migration_71_runs_the_later_mail_after_the_upgrade() 
                      decided_by = 'person';
                  DELETE FROM talk_due;",
             )?;
-            let v: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            tx.execute_batch(&format!("PRAGMA user_version = {};", v - 1))?;
+            // Migration 71 and the later ones run again at the open.
+            tx.execute_batch("PRAGMA user_version = 70;")?;
             Ok(())
         })
         .unwrap();

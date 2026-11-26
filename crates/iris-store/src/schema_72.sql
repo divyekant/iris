@@ -16,4 +16,5 @@ CREATE TABLE IF NOT EXISTS link_recheck (
 INSERT INTO link_recheck(message_id)
   SELECT m.id FROM message m
    WHERE m.gone_at IS NULL AND m.content_sha256 IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM link_check l WHERE l.message_id = m.id);
+     AND NOT EXISTS (SELECT 1 FROM link_check l WHERE l.message_id = m.id)
+     AND NOT EXISTS (SELECT 1 FROM link_recheck r WHERE r.message_id = m.id);
