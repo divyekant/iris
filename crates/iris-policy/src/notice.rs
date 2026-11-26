@@ -15,12 +15,18 @@ pub const WINDOW_MS: i64 = 3_600_000;
 /// after its fetch. After that, the interrupt comes too late to help.
 pub const LATE_MS: i64 = 24 * WINDOW_MS;
 
-/// When a model is set, a mail waits up to this time after its fetch for
-/// understanding, so that a `phishing` mark that only the model finds can
-/// stop the notice first (issue #321). After that time, the notice does not
-/// wait more: a model that is slow, out of budget or failing does not hold
-/// each notice.
+/// When a model is set and can read the mail (`iris_store::model_can_read!`),
+/// the mail waits up to this time after its fetch for understanding, so that
+/// a `phishing` mark that only the model finds can stop the notice first
+/// (issue #321). A mail that the model cannot read does not wait. After the
+/// wait, the notice shows [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`], not
+/// the words of the mail (issue #1045).
 pub const MODEL_WAIT_MS: i64 = 5 * 60_000;
+
+/// The title of a notice of a mail whose understanding did not finish ([`checked_sql`]).
+pub const UNCHECKED_TITLE: &str = "Mail not checked yet";
+/// The text of a notice of a mail whose understanding did not finish.
+pub const UNCHECKED_TEXT: &str = "Iris shows the sender and the subject after the phishing check.";
 
 /// The most characters of the title and of the text of a notice.
 pub const WORDS_MAX: usize = 200;
@@ -46,6 +52,12 @@ pub struct Notice {
     pub text: String,
     /// Milliseconds since 1970-01-01 UTC.
     pub created_at: i64,
+    /// False for a rule notice whose mail is not checked now
+    /// ([`checked_sql`], issue #1045): `title` and `text` are then
+    /// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`], and each output that adds
+    /// words of the mail to the notice (a sender, a subject) must leave them
+    /// out. True for a job notice.
+    pub checked: bool,
 }
 
 /// Adds a notice for each new mail that a `notify` rule of the active
@@ -57,7 +69,10 @@ pub struct Notice {
 /// hostile check writes with the body. A mail with a `link_check` row waits
 /// too: its link check did not run yet (migration 20). When a model is set,
 /// a mail that understanding did not read yet waits up to [`MODEL_WAIT_MS`]
-/// after its fetch, for a model `phishing` mark. Each guard reads the store in the
+/// after its fetch, for a model `phishing` mark, while the model can read
+/// it (`iris_store::model_can_read!`). The notice of a mail whose
+/// understanding did not finish shows no words of the mail, until it
+/// finishes ([`checked_sql`], [`shown_words`]). Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
@@ -89,11 +104,18 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                    AND NOT ", iris_store::draft_or_copy!("m"), "
                    AND (m.understood_at IS NOT NULL
                         OR NOT EXISTS (SELECT 1 FROM model_setting)
-                        OR m.fetched_at <= ?4)
+                        OR m.fetched_at <= ?4
+                        OR NOT ", iris_store::model_can_read!("?5"), ")
                  ORDER BY m.id",
             ))?
             .query_map(
-                params![now_ms - WINDOW_MS, WINDOW_MS, now_ms - LATE_MS, now_ms - MODEL_WAIT_MS],
+                params![
+                    now_ms - WINDOW_MS,
+                    WINDOW_MS,
+                    now_ms - LATE_MS,
+                    now_ms - MODEL_WAIT_MS,
+                    now_ms
+                ],
                 |r| r.get(0),
             )?
             .collect::<rusqlite::Result<_>>()?;
@@ -112,7 +134,15 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                 .iter()
                 .find(|r| r.id == rule)
                 .map_or(String::new(), |r| r.name.clone());
+            // The row keeps the words of the mail. Each read shows them only
+            // while the mail is checked ([`shown_words`]).
             let (title, text) = words(tx, id)?;
+            let checked = checked_mail(tx, id)?;
+            let (shown_title, shown_text) = if checked {
+                (title.clone(), text.clone())
+            } else {
+                (UNCHECKED_TITLE.to_string(), UNCHECKED_TEXT.to_string())
+            };
             let added = tx.execute(
                 "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(message_id) DO NOTHING",
@@ -125,14 +155,40 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                     rule: Some(rule),
                     job_id: None,
                     rule_name,
-                    title,
-                    text,
+                    title: shown_title,
+                    text: shown_text,
                     created_at: now_ms,
+                    checked,
                 });
             }
         }
         Ok(out)
     })
+}
+
+/// The SQL condition "the notice of the message with the row ID `id` (an
+/// SQL term) can show the words of the mail": no model is set, or the
+/// understanding of the message finished
+/// (`understood_at`). [`shown_words`] and [`checked_mail`] read it. The
+/// understanding finishes after the model read the
+/// mail, or with no model call when a fixed rule completes it or the
+/// sender is a declined stranger (spec 1 section 7.3, decision D29): the
+/// same end of understanding that guard 4 waits for (issue #321).
+///
+/// A notice whose message row is gone shows its words: before the content
+/// cleanup deletes the row of gone mail, it marks done each open notice of
+/// such mail that is not checked (`Store::clean_gone`).
+fn checked_sql(id: &str) -> String {
+    format!(
+        "(NOT EXISTS (SELECT 1 FROM model_setting)
+          OR NOT EXISTS (SELECT 1 FROM message cm WHERE cm.id = {id} AND cm.understood_at IS NULL))"
+    )
+}
+
+/// True if the notice of message `id` can show the words of the mail
+/// ([`checked_sql`]).
+fn checked_mail(tx: &Connection, id: i64) -> Result<bool> {
+    Ok(tx.query_row(&format!("SELECT {}", checked_sql("?1")), [id], |r| r.get(0))?)
 }
 
 /// The sender and the subject of a message, one line each.
@@ -201,9 +257,16 @@ const OPEN: &str = concat!(
 const INTERRUPTS: &str = "(notice.job_event_id IS NULL OR EXISTS (SELECT 1 FROM job_event e \
      WHERE e.id = notice.job_event_id AND e.by = 'engine'))";
 
-/// True while notice `id` is open ([`OPEN`]). The engine checks it again
-/// just before it shows a system notice, because a notice can wait in the
-/// queue while the mail becomes hostile.
+/// The notice `id` as a read shows it now, or `None` if it is not open
+/// ([`OPEN`]). The engine reads it again just before it shows a system
+/// notice, because a notice can wait in the queue while the mail becomes
+/// hostile, or while its check changes (issue #1045): the show uses the
+/// words of this read.
+pub fn get_open(conn: &Connection, id: i64) -> Result<Option<Notice>> {
+    Ok(select(conn, &format!("WHERE id = ?1 AND {OPEN}"), [id])?.pop())
+}
+
+/// True while notice `id` is open ([`OPEN`]).
 pub fn is_open(conn: &Connection, id: i64) -> Result<bool> {
     Ok(conn.query_row(
         &format!("SELECT EXISTS (SELECT 1 FROM notice WHERE id = ?1 AND {OPEN})"),
@@ -255,10 +318,24 @@ pub fn counts(conn: &Connection) -> Result<(i64, i64)> {
     )?)
 }
 
+/// The columns of the title and the text that a read of the notices shows: the words of
+/// the row while the mail of a rule notice is [`checked_sql`] now, else
+/// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`]. The check runs at each read,
+/// so a model that is set after the notice, or a notice from before
+/// issue #1045, shows no words of a mail whose understanding did not finish.
+/// A job notice shows its words.
+fn shown_words() -> String {
+    format!(
+        "(notice.message_id IS NULL OR {}), title, text",
+        checked_sql("notice.message_id")
+    )
+}
+
 fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec<Notice>> {
     let rows = conn
         .prepare(&format!(
-            "SELECT id, message_id, rule, job_id, rule_name, title, text, created_at FROM notice {rest}"
+            "SELECT id, message_id, rule, job_id, rule_name, {}, created_at FROM notice {rest}",
+            shown_words()
         ))?
         .query_map(p, |r| {
             let job_id: Option<i64> = r.get(3)?;
@@ -266,15 +343,22 @@ fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec
             // with no cut (the store keeps at most 2,000 characters). The
             // system notice cuts its own text.
             let one = |s: String| if job_id.is_some() { one_line(&s) } else { s };
+            let checked: bool = r.get(5)?;
+            let (title, text) = if checked {
+                (one(r.get(6)?), one(r.get(7)?))
+            } else {
+                (UNCHECKED_TITLE.to_string(), UNCHECKED_TEXT.to_string())
+            };
             Ok(Notice {
                 id: r.get(0)?,
                 message_id: r.get(1)?,
                 rule: r.get(2)?,
                 job_id,
                 rule_name: r.get(4)?,
-                title: one(r.get(5)?),
-                text: one(r.get(6)?),
-                created_at: r.get(7)?,
+                title,
+                text,
+                created_at: r.get(8)?,
+                checked,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

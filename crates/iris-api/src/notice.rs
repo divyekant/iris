@@ -22,6 +22,8 @@ pub struct Notice {
     pub text: String,
     pub created: String,
     /// The mail. `None` for a job notice, and after the sync marked it gone.
+    /// For a mail that is not checked yet (issue #1045), the sender and the
+    /// subject are empty: the notice shows no words of such a mail.
     pub message: Option<MessageSummary>,
 }
 
@@ -73,7 +75,14 @@ fn shape(
             text: n.text,
             created: rfc3339(n.created_at),
             message: match n.message_id {
-                Some(m) => summaries(c, &[m])?.pop(),
+                Some(m) => summaries(c, &[m])?.pop().map(|mut s| {
+                    if !n.checked {
+                        s.from.name = None;
+                        s.from.address = None;
+                        s.subject = None;
+                    }
+                    s
+                }),
                 None => None,
             },
         });

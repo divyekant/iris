@@ -86,3 +86,81 @@ async fn list_and_mark_a_notice_done() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Issue #1045: with a model set, both notice outputs of the API (`GET
+/// /api/notices` and the page of the Mac app) show no sender and no
+/// subject of a mail whose understanding did not finish, and show them
+/// after it finished.
+#[tokio::test]
+async fn a_notice_of_unchecked_mail_shows_no_mail_words() {
+    let dir =
+        std::env::temp_dir().join(format!("iris-api-notice-unchecked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = Arc::new(Store::open(&dir).unwrap());
+    let a = s.add_account("gmail", "owner@example.com").unwrap();
+    let m = NewMessage {
+        provider_id: "g1".into(),
+        thread_provider_id: "gt1".into(),
+        internal_date: Some(1_000),
+        header: iris_store::Header {
+            from_addr: Some("lee@clinic.example".into()),
+            from_name: Some("Dr Lee".into()),
+            subject: Some("Results".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    s.put_messages(a, &[m]).unwrap();
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+               VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30);
+             INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
+               VALUES (1, 7, 'Clinic', 1, 'Dr Lee', 'Results', 0);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let words = |n: &Value| -> Vec<Value> {
+        vec![
+            n["title"].clone(),
+            n["text"].clone(),
+            n["message"]["from"]["name"].clone(),
+            n["message"]["from"]["address"].clone(),
+            n["message"]["subject"].clone(),
+        ]
+    };
+    let (_, list) = call(&s, Method::GET, "/api/notices").await;
+    let shown = &list[0];
+    assert_eq!(shown["message"]["id"], json!("m-1"));
+    assert_eq!(
+        words(shown),
+        [
+            json!(iris_policy::notice::UNCHECKED_TITLE),
+            json!(iris_policy::notice::UNCHECKED_TEXT),
+            Value::Null,
+            Value::Null,
+            Value::Null
+        ]
+    );
+    let app =
+        serde_json::to_value(&iris_api::notices_after(&s, 0, 10).unwrap().notices[0].1).unwrap();
+    assert_eq!(words(&app), words(shown));
+    s.write(|tx| {
+        tx.execute("UPDATE message SET understood_at = 1 WHERE id = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, list) = call(&s, Method::GET, "/api/notices").await;
+    assert_eq!(
+        words(&list[0]),
+        [
+            json!("Dr Lee"),
+            json!("Results"),
+            json!("Dr Lee"),
+            json!("lee@clinic.example"),
+            json!("Results")
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

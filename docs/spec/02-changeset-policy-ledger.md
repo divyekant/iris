@@ -1061,14 +1061,22 @@ person in the thread, at most 10. A late commitment of another person
 waits for the next nudge. The data numbers each commitment (`n`).
 The answer of the model must list each number in `named`, or Iris asks
 one more time and then saves no draft (issue #950). The body must also
-name each commitment in words: one word of the body starts with the
-first 5 characters of a key word of the commitment (a word of its title,
-quote or amount with 4 letters or more that is not a common word, or a
-word with a digit). If not, Iris asks one more time in the same way
-(issue #1075). A commitment with no key word passes. The check is
-generous on purpose, so it cannot prove that the body says the right
-thing about the commitment (limit #1146). The prompt version of a nudge is
-`nudge/0.4`. A saved nudge of another version is not ready, so each
+name each commitment in words. A key word of a commitment is a word of
+its title, quote or amount that is not a word of the name or the address
+of a person of the thread (issue #1146): the owner, the person of the
+nudge, the `From`, `To` and `Cc` of the messages that the model reads, the
+`From` of each message of the thread, and each display name that the
+store has for one of these addresses. A strong key word has 4 letters
+or more and is not a common word, or has a digit and 2 characters or
+more. One word of the body must start with the first 5 characters of a
+strong key word. If the commitment has no strong key word, a weak key
+word counts: a word with a digit, or a word of 3 letters that is not a
+common word (issue #1154). Then one word of the body must be the same
+word. If not, Iris asks one more time in the same way
+(issue #1075). A commitment with no key word passes (limit #1157). The
+check is generous on purpose, so it cannot prove that the body says the
+right thing about the commitment. The prompt version of a nudge is
+`nudge/0.5`. A saved nudge of another version is not ready, so each
 nudge of an older build is stale and the late thread gets a new one. The person reads each nudge before a send. The owner decided that the nudge stays a
 prepared reply (decision D8, `docs/decisions.md` entry D12). So the verb
 `nudge` and `iris nudge <c-id>` are not built.
