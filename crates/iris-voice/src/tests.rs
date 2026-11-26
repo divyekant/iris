@@ -2295,12 +2295,10 @@ fn a_body_names_a_commitment_only_with_its_words() {
         none
     ));
     assert!(names("Hi Bo, the 312.77? D", &pay, none));
-    // A commitment with no key word passes any body.
-    assert!(names(
-        "Hi",
-        &serde_json::json!({"title": "Do it", "quote": null}),
-        none
-    ));
+    // A commitment with no key word needs its title (issue #1157).
+    let it = serde_json::json!({"title": "Do it", "quote": null});
+    assert!(!names("Hi", &it, none));
+    assert!(names("Hi, can you do it? D", &it, none));
 }
 
 /// Issue #1154: a short commitment with no strong key word has weak key
@@ -2343,9 +2341,11 @@ fn a_name_of_a_person_names_no_commitment() {
     );
     assert!(!names("Hi Priya, how are you? Dana", &ask, &people));
     assert!(names("Hi Priya, did you check it? Dana", &ask, &people));
-    // With no other word, a name leaves the commitment with no key word.
+    // With no other word, a name leaves the commitment with no key word:
+    // the body needs its title (issue #1157).
     let only = serde_json::json!({"title": "Raman", "quote": null});
-    assert!(names("Hi", &only, &people));
+    assert!(!names("Hi", &only, &people));
+    assert!(names("Hi Raman. Dana", &only, &people));
 }
 
 /// Issue #1146: for any text of names and addresses, each of its words is a
@@ -2383,7 +2383,8 @@ fn each_word_of_a_name_is_a_people_word() {
         let people = people_words(std::slice::from_ref(&text));
         let ask = serde_json::json!({"title": text, "quote": text});
         assert!(key_words(&ask, &people).0.is_empty(), "{text:?} {people:?}");
-        assert!(names("Hi", &ask, &people), "{text:?}");
+        // Issue #1157: the body needs the words of the title.
+        assert!(names(&format!("Hi {text}"), &ask, &people), "{text:?}");
     }
 }
 
@@ -2587,7 +2588,41 @@ fn a_body_with_a_key_word_names_its_commitment() {
             ));
             assert!(!names("Hi, any news? D", &ask, &[]), "{ask}");
         } else {
-            assert!(names("Hi", &ask, &[]));
+            // Issue #1157: no key word, so the body must hold the title.
+            let t = title.join(" ");
+            assert!(names(
+                &format!("Hi, any news? {}. D", t.to_uppercase()),
+                &ask,
+                &[]
+            ));
+            assert!(!names("Hi, any news? D", &ask, &[]), "{ask}");
         }
+    }
+}
+
+/// Issue #1157: a commitment with no key word is named only by all the
+/// words of its title or quote, in order and next to each other. A
+/// commitment with no word at all passes.
+#[test]
+fn a_commitment_with_no_key_word_is_named_by_its_title_or_quote() {
+    let ask = serde_json::json!({"title": "Do it", "quote": "you ask Bo"});
+    let people = vec!["bo".to_string()];
+    assert!(key_words(&ask, &people).0.is_empty());
+    for (body, named) in [
+        ("Hi Bo, can you do it this week? D", true),
+        ("Hi, did you DO-IT? D", true),
+        ("Hi, you ask Bo, I think. D", true),
+        ("Hi Bo, any news? D", false),
+        ("Hi, it do? D", false),
+        ("Hi, do you have it? D", false),
+        ("Hi, you ask now. D", false),
+    ] {
+        assert_eq!(names(body, &ask, &people), named, "{body}");
+    }
+    for ask in [
+        serde_json::json!({"title": "", "quote": null}),
+        serde_json::json!({"title": "?!", "quote": " "}),
+    ] {
+        assert!(names("Hi", &ask, &[]), "{ask}");
     }
 }

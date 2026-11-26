@@ -1073,10 +1073,12 @@ strong key word. If the commitment has no strong key word, a weak key
 word counts: a word with a digit, or a word of 3 letters that is not a
 common word (issue #1154). Then one word of the body must be the same
 word. If not, Iris asks one more time in the same way
-(issue #1075). A commitment with no key word passes (limit #1157). The
+(issue #1075). A commitment with no key word (as "Do it") is named only
+by all the words of its title or of its quote, in the same order and next
+to each other (issue #1157). A commitment with no word at all passes. The
 check is generous on purpose, so it cannot prove that the body says the
 right thing about the commitment. The prompt version of a nudge is
-`nudge/0.5`. A saved nudge of another version is not ready, so each
+`nudge/0.6`. A saved nudge of another version is not ready, so each
 nudge of an older build is stale and the late thread gets a new one. The person reads each nudge before a send. The owner decided that the nudge stays a
 prepared reply (decision D8, `docs/decisions.md` entry D12). So the verb
 `nudge` and `iris nudge <c-id>` are not built.

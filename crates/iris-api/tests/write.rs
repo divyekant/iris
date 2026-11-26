@@ -57,16 +57,39 @@ fn store(dir: &TempDir) -> Arc<Store> {
 }
 
 /// Each message of the test store has raw content, and understanding read
-/// its header from it (migration 70): the reply form uses the header.
+/// its header from it (migration 70): the reply form uses the header. The
+/// raw file of each one has no `Reply-To` (issue #1174).
 fn read_all(s: &Store) {
+    let ids: Vec<i64> = s
+        .read(|c| {
+            let mut st = c.prepare("SELECT id FROM message")?;
+            let v = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })
+        .unwrap();
+    let raw: Vec<(i64, String)> = ids
+        .into_iter()
+        .map(|id| {
+            let mail = format!("Message-ID: <{id}@test>\r\nSubject: Q4\r\n\r\nHi\r\n");
+            (id, s.put_content(mail.as_bytes()).unwrap())
+        })
+        .collect();
     s.write(|tx| {
+        tx.execute_batch("CREATE TEMP TABLE raw(id INTEGER PRIMARY KEY, sha TEXT)")?;
+        for (id, sha) in &raw {
+            tx.execute("INSERT INTO raw VALUES (?1, ?2)", rusqlite::params![id, sha])?;
+        }
         tx.execute_batch(
             "CREATE TEMP TABLE was AS SELECT id, understood_at FROM message m
                WHERE content_sha256 IS NULL AND EXISTS (SELECT 1 FROM header h WHERE h.message_id = m.id)
                  AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                                  WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT');
              CREATE TEMP TABLE checks AS SELECT message_id FROM link_check;
-             UPDATE message SET content_sha256 = 'c' || id WHERE id IN (SELECT id FROM was);
+             UPDATE message SET content_sha256 = (SELECT sha FROM raw WHERE raw.id = message.id)
+               WHERE id IN (SELECT id FROM was);
+             DROP TABLE raw;
              -- The test state stays: the same link checks and understanding.
              DELETE FROM link_check WHERE message_id IN (SELECT id FROM was)
                AND message_id NOT IN (SELECT message_id FROM checks);
@@ -514,6 +537,13 @@ async fn a_reply_to_old_mail_reads_reply_to_from_the_raw_content() {
     .unwrap();
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["to"], json!(["x@example.org"]));
+    // Issue #1174: with no row value and no readable raw file, the form
+    // does not open. It does not give `From` in place of the `Reply-To`.
+    s.write(|tx| Ok(tx.execute_batch("UPDATE header SET reply_to = NULL WHERE message_id = 2")?))
+        .unwrap();
+    std::fs::remove_file(s.content_path(&sha).unwrap()).unwrap();
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
 }
 
 /// The reply form gives recipients only from a header row of the content
@@ -535,8 +565,11 @@ async fn a_reply_waits_for_the_read_of_new_content() {
             "UPDATE header SET content_sha256 = NULL WHERE message_id = 2",
             StatusCode::CONFLICT,
         ),
+        // The raw file 'b' does not exist: a row value of `reply_to`
+        // means that the form does not read it.
         (
-            "UPDATE header SET content_sha256 = 'b' WHERE message_id = 2",
+            "UPDATE header SET content_sha256 = 'b', reply_to = 'priya@example.com'
+             WHERE message_id = 2",
             StatusCode::OK,
         ),
         // A message with no raw content: neither row has a hash.
