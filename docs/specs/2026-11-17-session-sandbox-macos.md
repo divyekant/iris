@@ -295,8 +295,9 @@ and the `allow_local` port of the adapter, if the person lists one
 (`docs/specs/2026-11-25-agents-read-paths-local-port.md`). The agent gets that port in `IRIS_LOCAL_PORT`.
 The proxy of the session takes clients from `127.0.0.1` on macOS: the
 engine passes `Ipv4Addr::LOCALHOST` as the peer (`sessions.rs`). macOS has
-only `127.0.0.1` on the loopback interface, so `session_peer` addresses do
-not work there.
+only `127.0.0.1` on the loopback interface, so a session address of each
+session does not work there. (Linux had such addresses until issue 507;
+now its proxy has no port at all.)
 
 Invariant: a process of a session reaches only the proxy of its own
 session, also after an engine crash and with another data folder. A port
@@ -317,8 +318,9 @@ proxy on macOS needs a secret of its session:
   environment of session B.
 
 So the proxy of B refuses each process of A before any byte goes out, with
-no timing assumption. The Linux proxy keeps the peer check and gets no
-token.
+no timing assumption. The Linux proxy has no port and no token: it takes
+its clients only from the socket pair of its session (Linux sandbox spec,
+"Egress on Linux", issue 507).
 
 ### Check
 

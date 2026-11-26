@@ -13,6 +13,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, ChildStderr, ChildStdin, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -478,7 +479,31 @@ impl Launcher<'_> {
         let mut args: Vec<OsString> = vec![session.to_string().into(), command.program.into()];
         args.extend(command.args);
         let env = config::agent_env(adapter, egress, |n| (self.env)(n));
-        let mut child = (self.helper)(&args)
+        let mut helper = (self.helper)(&args);
+        if let Some(channel) = egress.and_then(|e| e.channel.as_ref()) {
+            let fd = channel.as_raw_fd();
+            // SAFETY: the closure runs in the child between fork and exec,
+            // and calls only dup2, which is async-signal-safe. dup2 clears
+            // close-on-exec on the new descriptor only, so only this helper
+            // gets the pair.
+            unsafe {
+                helper.pre_exec(move || {
+                    if fd == crate::egress::EGRESS_FD {
+                        // dup2 onto itself keeps close-on-exec: clear it.
+                        let flags = libc::fcntl(fd, libc::F_GETFD);
+                        if flags < 0
+                            || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                        {
+                            return Err(io::Error::last_os_error());
+                        }
+                    } else if libc::dup2(fd, crate::egress::EGRESS_FD) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let mut child = helper
             .current_dir(dir)
             .env_clear()
             .envs(env)

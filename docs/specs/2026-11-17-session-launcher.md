@@ -390,8 +390,9 @@ proxy started):
    takes no new request (exit code 3).
 2. Close the egress proxy of the session (`Proxy::close`, see "Model
    egress"). This comes before each wait: no step below keeps a tunnel
-   open. The proxy keeps its port bound. The engine stops the proxy
-   (`Proxy::stop`, which frees the port) only after the reap check of the
+   open. The proxy keeps its port bound (macOS) or its end of the socket
+   pair open (Linux). The engine stops the proxy (`Proxy::stop`, which
+   frees the port or closes the pair) only after the reap check of the
    session passes. A launch that fails before the helper starts closes
    and keeps its proxy in the same way, and the supervisor stops it after
    the reap check.
@@ -570,15 +571,16 @@ The built-in agent tools call their model over HTTPS: `claude-code` needs
 `api.anthropic.com`, and `codex` needs `api.openai.com`. An isolation with
 no network stops them. The engine gives each session one narrow path out:
 
-- The engine listens on one TCP port of `127.0.0.1` for each running
-  session, the egress port. The isolation permits a connection to this
-  port only. It blocks each other address, also DNS.
-- On Linux, the proxy takes a client only from the session address of
-  its session (`127.128.0.0` plus the session ID). The relay of the
-  sandbox connects from that address (sandbox spec, "Egress on Linux"). A
-  client from each other address gets `403` and the log word
-  `not_session`. The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and
-  the same value in `https_proxy`.
+- The engine runs one proxy for each running session. The agent reaches
+  it on one TCP port of `127.0.0.1`, the egress port. The isolation
+  permits a connection to this port only. It blocks each other address,
+  also DNS.
+- On Linux, the proxy has no port on the host (issue 507). It takes its
+  clients only from a socket pair of its session: the helper listens on
+  the egress port in the namespace of the session, and sends each
+  connection to the proxy as a file descriptor (sandbox spec, "Egress on
+  Linux"). The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and the
+  same value in `https_proxy`.
 - On macOS, the proxy takes a client only from `127.0.0.1`, and only with
   the token of its session in `Proxy-Authorization: Basic` (user `iris`).
   A client from another address gets `403`, and a `CONNECT` with no
@@ -614,7 +616,8 @@ no network stops them. The engine gives each session one narrow path out:
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
   starts one proxy for each session that it registers, after the bind and
-  before the helper, with the log and the peer address of that session.
+  before the helper, with the log of that session: on macOS with the
+  peer address `127.0.0.1` and a new token, on Linux on a new socket pair.
   A revoke retry registers a second session, so it gets its own proxy. If
   the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
@@ -625,8 +628,8 @@ no network stops them. The engine gives each session one narrow path out:
   ninth open connection or a resolver worker past the bound, `timeout`
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
   `sni_not_allowed`, `no_resources` when the engine has no file
-  descriptor or thread for the connection, `not_session` for a client
-  that is not at the session address) and no text of the request. For a connection that closes, or
+  descriptor or thread for the connection, `not_session` on macOS for a
+  client that is not from `127.0.0.1` or has no token of the session) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
   Only the proxy writes this file,
@@ -650,8 +653,9 @@ no network stops them. The engine gives each session one narrow path out:
   `iris job stop` or a revoke through the engine also wakes it. The close
   ends each open tunnel and each resolve in progress, and from then on
   the proxy answers each new connection with a close and the log line
-  `ended reason=stopped`. The close keeps the port bound, and the engine
-  stops the proxy (`Proxy::stop`, which frees the port) only when the
+  `ended reason=stopped`. The close keeps the port bound (macOS) or the
+  engine end of the pair open (Linux), and the engine stops the proxy
+  (`Proxy::stop`, which frees the port or closes the pair) only when the
   reap check of the session passes.
 - Known limit (issue): an end that a store trigger or another process
   writes is not in step with the proxy. Between the commit of `ended_at`
@@ -662,12 +666,17 @@ no network stops them. The engine gives each session one narrow path out:
   reads `ended_at` in its transaction). It does not call back what the
   agent sent before. A gate in each tunnel that reads the store for each
   byte costs more than this window is worth.
-  The relay of the Linux sandbox (`docs/specs/2026-11-17-session-sandbox.md`)
-  connects to the port while the helper lives, and the reap check
-  confirms that the helper ended. So the port number cannot go to the
-  proxy of another session while a process of this session can reach it.
+  On macOS, the agent connects to the port while the helper lives, and
+  the reap check confirms that the helper ended. So, while the engine
+  runs, the port number cannot go to the proxy of another session while a
+  process of this session can reach it (after an engine crash: issue
+  #1159). On Linux, the proxy has no host port: the helper sends each
+  connection on the socket pair of the session, and the engine closes its
+  end of the pair only after the reap check
+  (`docs/specs/2026-11-17-session-sandbox.md`, "Egress on Linux").
 
-The engine knows the session from the port, never from the request. An
+The engine knows the session from the port (macOS) or from the pair
+(Linux), never from the request. An
 adapter with no allowed host gets no egress port and no `HTTPS_PROXY`.
 
 The agent sends the files of the workspace, which hold granted mail, to
@@ -872,7 +881,7 @@ is refused before a row is written.
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process on Linux; on macOS the new engine calls `stop` at its start and on each turn, and reaps the session only when `ended` is true | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
-| A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
+| A connection to the egress port of another session | The other session is not reached. Linux: each listener exists only in the namespace of its session, and sends its connections only on the pair of its session. macOS: the isolation permits only its own port, and the proxy takes only the token of its session | R4-05 test; Linux handoff test; macOS token test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
 | An allowed host that resolves to a loopback, private or other reserved address | `403` with `address_not_public`; no connection | Proxy property test over the reserved ranges, with a test resolver |
 | A `pass_env` with a proxy name, in any case | Refused with the line | Parser test |
