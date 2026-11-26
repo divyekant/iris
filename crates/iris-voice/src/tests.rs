@@ -2311,7 +2311,7 @@ fn a_short_commitment_needs_its_short_words() {
     let none: &[String] = &[];
     let ask =
         serde_json::json!({"title": "Pay $5", "quote": "I'll pay $5", "amount": {"value": 5}});
-    assert_eq!(key_words(&ask, none).1, false);
+    assert!(!key_words(&ask, none).1);
     for (body, ok) in [
         ("Hi", false),
         ("Hi Bo, any news? D", false),
