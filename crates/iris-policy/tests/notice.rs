@@ -913,3 +913,24 @@ fn a_deleted_unread_message_does_not_make_its_notice_checked() {
         .collect();
     assert!(left.iter().all(|(t, _)| t != "Lunch?"), "{left:?}");
 }
+
+/// Issue #1168, data from before the fix: an open notice whose message row
+/// the old cleanup deleted with no model set. Migration 73 marks it done, so
+/// a model set later shows no words of the mail.
+#[test]
+fn migration_73_settles_an_old_notice_with_no_message_row() {
+    let (d, s) = store("orphan");
+    activate(&s, ANN);
+    let m = put(&s, &mail(), 0);
+    assert_eq!(notices_now(&s), [m]);
+    s.write(|tx| {
+        tx.execute("DELETE FROM message WHERE id = ?1", [m])?;
+        tx.execute_batch("PRAGMA user_version = 72")?;
+        Ok(())
+    })
+    .unwrap();
+    drop(s);
+    let s = Store::open(&d.0).unwrap();
+    set_model(&s);
+    assert!(s.read(notice::list).unwrap().is_empty());
+}
