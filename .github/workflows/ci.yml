@@ -19,5 +19,15 @@ jobs:
       - uses: actions/checkout@v4
       # The runner image has rustup (stable), node and python3.
       # rust-toolchain.toml selects the toolchain and its components.
+      # Ubuntu 24.04 lets a program without an AppArmor profile make a user
+      # namespace, but with no capabilities in it. Then the read-only overlay
+      # of a read path folder (iris-session) fails with EACCES. Iris needs the
+      # overlay (README.md, read paths), so the runner permits it.
+      - name: Permit an overlay in a user namespace
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Every area of starter.json
         run: python3 scripts/local-ci/local_ci.py --ci
