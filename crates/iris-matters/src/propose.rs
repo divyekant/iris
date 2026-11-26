@@ -204,11 +204,15 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
     // The wait starts at the end of the call, as in an understanding run.
     let ended = batch::clock_ms().max(now);
     // The outcome of the call decides each write below:
-    // - no call went out (the budget refused it): undo the attempt;
+    // - no call went out (the budget refused it, or a waiter came first):
+    //   undo the attempt;
     // - no answer of the known format, or an unknown result: the wait;
     // - an answer: the fingerprint, and proposals only from a complete one
     //   (`Some(Some(..))`); a refused or cut answer is `Some(None)`.
     let refused = matches!(reply, Err(iris_model::Error::Budget(_))) && !state.store_failed;
+    // A waiter of the run lock that came before the request: no request
+    // went out, so the attempt is undone as for a refusal (issue #1175).
+    let unsent = refused || (state.cancelled && !state.sent);
     let answer: Option<Option<Value>> = match &reply {
         Err(_) => None,
         Ok(r) if r.stop != Stop::End => Some(None),
@@ -231,7 +235,7 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             || state.unknown);
     let name = model.name().to_string();
     let (proposed, dropped, added) = write(store, |tx| {
-        if refused {
+        if unsent {
             tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
             tx.execute("UPDATE matter_run SET tried_at = ?1 WHERE id = 1", [before])?;
             return Ok((0, 0, 0));

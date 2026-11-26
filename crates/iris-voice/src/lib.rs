@@ -288,13 +288,15 @@ Ask when they can do them. Do not repeat all of the mail.";
 /// nudge (as the words check of #1075) makes each older nudge stale, and
 /// the late thread gets a new one. 0.5: the words check leaves out the
 /// names of the people and checks the short words of a short commitment.
-pub const NUDGE_PROMPT: &str = "nudge/0.5";
+/// 0.6: a commitment with no key word must be named by the words of its
+/// title or quote (issue #1157).
+pub const NUDGE_PROMPT: &str = "nudge/0.6";
 
 /// The instruction of a nudge.
 fn nudge_instruction() -> String {
     INSTRUCTION.replace(
         "\n\nAnswer with",
-        "\n- \"commitments\": only in a reminder. A list of what the person must do, from the mail. Each entry has \"n\" (its number), \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of each entry.\n\nAnswer with",
+        "\n- \"commitments\": only in a reminder. A list of what the person must do, from the mail. Each entry has \"n\" (its number), \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of each entry, with the words of its title.\n\nAnswer with",
     )
     .replace(
         r#"{"body": "..."}"#,
@@ -958,17 +960,31 @@ fn key_words(ask: &Value, people: &[String]) -> (Vec<String>, bool) {
 /// A strong key word matches a word of the body that starts with its
 /// first 5 characters, so "invoices" names "invoice". A weak key word
 /// matches only the same word. The model rewords each promise, so one key
-/// word is enough. A commitment with no key word passes.
+/// word is enough. A commitment with no key word (as "Do it") is named
+/// only by all the words of its title or of its quote, in the same order
+/// and next to each other (issue #1157). A commitment with no word at all
+/// passes.
 fn names(body: &str, ask: &Value, people: &[String]) -> bool {
+    fn words(text: &str) -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    }
+    let words_of_body = words(body);
     let (keys, strong) = key_words(ask, people);
     if keys.is_empty() {
-        return true;
+        let phrases: Vec<Vec<String>> = ["title", "quote"]
+            .iter()
+            .filter_map(|f| ask[f].as_str().map(words))
+            .filter(|p| !p.is_empty())
+            .collect();
+        return phrases.is_empty()
+            || phrases
+                .iter()
+                .any(|p| words_of_body.windows(p.len()).any(|w| w == p.as_slice()));
     }
-    let words: Vec<String> = body
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let words = words_of_body;
     keys.iter().any(|k| {
         let stem: String = k.chars().take(5).collect();
         words
