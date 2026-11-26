@@ -677,6 +677,7 @@ fn each_table_with_mail_of_an_account_is_in_the_delete_or_the_record() {
         "item_source",
         "label",
         "link_check",
+        "link_recheck",
         "model_declined",
         "fixed_due",
         "matter_add",

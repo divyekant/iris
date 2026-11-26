@@ -4088,8 +4088,8 @@ fn a_cc_party_known_before_migration_71_runs_the_later_mail_after_the_upgrade() 
                      decided_by = 'person';
                  DELETE FROM talk_due;",
             )?;
-            let v: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            tx.execute_batch(&format!("PRAGMA user_version = {};", v - 1))?;
+            // Migration 71 and the later ones run again at the open.
+            tx.execute_batch("PRAGMA user_version = 70;")?;
             Ok(())
         })
         .unwrap();
@@ -4147,4 +4147,85 @@ fn a_party_change_before_a_record_page_is_queued_in_the_same_write() {
     );
     drain(&b, &fake, &mut last);
     assert!(last[&m2].contains("Dee <dee@example.org>"), "{}", last[&m2]);
+}
+
+/// Issue 1121: mail checked before the links of attached messages counted
+/// gets one more check (`link_recheck`, store migration 72). A message
+/// with a deceptive link only in an attached message gets the mark, with
+/// no model call. Other mail keeps its run, and is not "may be hostile"
+/// while it waits.
+#[test]
+fn old_mail_gets_the_link_check_of_its_attached_messages() {
+    let b = store("link-recheck");
+    let bad = "Authentication-Results: mx.google.com; dkim=pass header.i=@shop.com; dmarc=pass (p=NONE) header.from=shop.com
+From: Shop <alerts@shop.com>
+To: owner@example.com
+Subject: Fwd: account
+Content-Type: multipart/mixed; boundary=o
+
+--o
+Content-Type: text/plain
+
+See below.
+--o
+Content-Type: message/rfc822
+
+From: Shop <alerts@shop.com>
+Subject: Your account
+Content-Type: text/html; charset=utf-8
+
+<p><a href=\"https://click.mailer.example.org/r/1\">https://www.shop.com/account</a></p>
+--o--
+";
+    let m1 = b.add_in("1", "t1", NOW - 2 * DAY, bad, &["INBOX"]);
+    let m2 = b.add_in("2", "t2", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // The state before the upgrade: the old check found no mark in m1.
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET hostile = NULL WHERE id = ?1", [m1])?;
+            tx.execute("DELETE FROM link_check", [])?;
+            tx.execute(
+                "INSERT INTO link_recheck(message_id) SELECT id FROM message",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let before: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    let calls = fake.calls.borrow().len();
+    // A raw file that Iris cannot read keeps its row; a later run checks it.
+    let sha: String = b.col("SELECT content_sha256 FROM message WHERE id = ?1", m1);
+    let path = b.store.content_path(&sha).unwrap();
+    let away = path.with_extension("away");
+    std::fs::rename(&path, &away).unwrap();
+    let marked = iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
+    assert_eq!(marked, 0);
+    let kept: i64 = b.col(
+        "SELECT count(*) FROM link_recheck WHERE message_id = ?1",
+        m1,
+    );
+    assert_eq!(kept, 1, "the unread row stays");
+    let rest: i64 = b.col(
+        "SELECT count(*) FROM link_recheck WHERE message_id = ?1",
+        m2,
+    );
+    assert_eq!(rest, 0, "the scan goes on after the unread row");
+    std::fs::rename(&away, &path).unwrap();
+    let marked = iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
+    assert_eq!(marked, 1);
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m1);
+    assert!(marks.contains("link"), "{marks}");
+    let none: Option<String> = b.col("SELECT hostile FROM message WHERE id = ?1", m2);
+    assert!(none.is_none_or(|h| !h.contains("link")));
+    let after: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    assert_eq!(after, before, "m2 keeps its run");
+    assert_eq!(fake.calls.borrow().len(), calls, "no model call");
+    let left: i64 = b.col(
+        "SELECT (SELECT count(*) FROM link_recheck) + (SELECT count(*) FROM link_check) + ?1",
+        0,
+    );
+    assert_eq!(left, 0);
 }
