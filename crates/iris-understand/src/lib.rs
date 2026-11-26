@@ -553,6 +553,17 @@ pub trait Model {
     /// The model name for `derived.model`.
     fn name(&self) -> &str;
     fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error>;
+    /// [`Model::ask`], but the wait for the answer stops with
+    /// `iris_model::Error::Cancelled` when `cancel` gives true (issue #1126).
+    /// The default does not read `cancel`: the wait ends with the answer.
+    fn ask_cancel(
+        &self,
+        instruction: &str,
+        data: &str,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<iris_model::Reply, iris_model::Error> {
+        self.ask(instruction, data)
+    }
     /// An upper bound of the bytes of the request body for these texts: the
     /// input tokens of the worst case of a call (`batch`). The default
     /// allows JSON escapes (at most 6 bytes for each byte) and the framing.
@@ -574,6 +585,15 @@ impl Model for Named {
 
     fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
         self.client.ask(instruction, data)
+    }
+
+    fn ask_cancel(
+        &self,
+        instruction: &str,
+        data: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<iris_model::Reply, iris_model::Error> {
+        self.client.ask_cancel(instruction, data, cancel)
     }
 
     fn request_bytes(&self, instruction: &str, data: &str) -> u64 {

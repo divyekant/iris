@@ -82,7 +82,7 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
         match outcome {
             // The next thread can still fit the budget.
             Outcome::Refused => continue,
-            Outcome::ModelFailed => break,
+            Outcome::ModelFailed | Outcome::Yielded => break,
             Outcome::Saved => saved += 1,
             Outcome::Invalid | Outcome::Other => {}
         }

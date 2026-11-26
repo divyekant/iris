@@ -52,6 +52,9 @@ struct Script {
     /// Runs in the next call, before the answer: a write of another
     /// writer during the call.
     during: RefCell<Option<std::boxed::Box<dyn FnOnce()>>>,
+    /// The next `ask_cancel` sends on it and gives no answer until its
+    /// cancel test gives true (issue #1126).
+    hang: RefCell<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl Script {
@@ -91,6 +94,20 @@ impl Model for Fake {
             text,
             usage,
         })
+    }
+
+    fn ask_cancel(&self, i: &str, d: &str, cancel: &dyn Fn() -> bool) -> Result<Reply, ModelError> {
+        let Some(started) = self.0.hang.borrow_mut().take() else {
+            return self.ask(i, d);
+        };
+        *self.0.calls.borrow_mut() += 1;
+        started.send(()).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !cancel() {
+            assert!(std::time::Instant::now() < end, "no cancel");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Err(ModelError::Cancelled)
     }
 }
 
@@ -2197,4 +2214,46 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), r#"["phishing"]"#);
     assert_eq!((b.script.calls(), items(&b)), (1, 0));
+}
+
+/// Issue #1126: a waiter of the run lock stops the wait of the run for the
+/// answer of a call in flight. The call keeps its worst case as unknown
+/// cost, starts no model wait, and adds no try and no mark to its message.
+#[test]
+fn a_waiter_cancels_the_call_in_flight() {
+    let b = store("cancel");
+    b.model(true, Some(10_000));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let dir = b.store.dir().to_path_buf();
+    let (started, wait) = std::sync::mpsc::channel::<()>();
+    *b.script.hang.borrow_mut() = Some(started);
+    let waiter = std::thread::spawn(move || {
+        let store = Store::open(&dir).unwrap();
+        wait.recv().unwrap();
+        let start = std::time::Instant::now();
+        let got = batch::lock_wait(&store, batch::WAIT).is_ok();
+        (got, start.elapsed())
+    });
+    let r = b.run(&Limits::default()).unwrap();
+    let (got, waited) = waiter.join().unwrap();
+    assert!(got, "the waiter gets the run lock");
+    assert!(waited < std::time::Duration::from_secs(10), "{waited:?}");
+    assert_eq!(r.stop.as_deref(), Some("yield"));
+    assert_eq!((r.calls, r.unknown_calls), (0, 1));
+    assert_eq!(r.unknown_cost_micro_usd, Some(WORST));
+    assert_eq!(r.reserved_micro_usd, 0);
+    assert_eq!(b.budget(), Some(10_000 - WORST));
+    assert_eq!(b.col("SELECT retry_failures FROM model_setting"), Some(0));
+    assert_eq!(b.col("SELECT retry_at FROM model_setting"), None);
+    assert!(!b.understood(m));
+    assert_eq!(
+        b.col(&format!(
+            "SELECT tries + waits_model + coalesce(retry_at, 0) FROM message WHERE id = {m}"
+        )),
+        Some(0)
+    );
+    // The next run reads the message.
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert!(b.understood(m));
 }
