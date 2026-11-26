@@ -168,6 +168,34 @@ egress port.
   an open or a check fails, no session starts. `bwrap` has
   `--ro-bind-fd` since version 0.5.0. An older `bwrap` refuses the
   unknown option and exits, so no session starts (fail closed).
+- Each read path that is a folder goes into the view through a read-only
+  overlay (changed on 2026-11-26, issue 996). A program of the person can
+  make a socket in the folder after the checks, and a read-only bind
+  shows it: `connect` to a socket needs no write to the mount. The
+  kernel finds a socket by the inode of its file, and an overlay shows
+  each file with an inode of its own, so `connect` through the overlay
+  gives `ECONNREFUSED`. Files, links and folders read as before. The
+  child of the spawn (between fork and exec of `bwrap`) does these steps
+  with system calls only:
+  1. It makes a new user namespace (the same user and group, one line
+     each) and a new mount namespace, and makes each mount private.
+  2. It makes one empty read-only `tmpfs` (`fsopen`, `fsmount`): the
+     second layer of each overlay. An overlay with no upper layer needs
+     two lower layers.
+  3. For each folder, it opens the path again in the new namespace and
+     compares the device and inode with the descriptor of the checks. A
+     folder has one path (no hard link), so the same device and inode is
+     the same folder. Else no session starts (`ESTALE`).
+  4. It makes the overlay (`lowerdir` = the folder, then the empty
+     `tmpfs`; read-only, `nosuid`, `nodev`), puts it on the folder in the
+     new namespace (`move_mount`), and gives its root to `bwrap` at the
+     number of the read path.
+
+  `bwrap` then runs in that namespace and makes its own namespaces in it.
+  A read path that is a file needs no overlay: no socket can appear in a
+  file. If a step fails (for example a kernel without overlays in a user
+  namespace, or older than 5.11), no session starts. A session with no
+  read path folder gets no extra namespace.
 - The binds come after the system folders, the private home and the
   program files, and before the empty mount of the data folder. So a read
   path that holds a part of the data folder cannot show it (the check
@@ -243,6 +271,10 @@ fails at its first call.
 | A read path that changes to another folder after the launch checks | The helper checks the new folder: a protected or unsafe folder stops the start; a clean folder is bound | Linux helper test with a swap to the data folder |
 | `bwrap` older than 0.5.0 and an adapter with read paths | `bwrap` refuses the option and exits; no session starts | not testable in CI (the CI has 0.9) |
 | A write to a read path | The system refuses it (read-only bind) | Linux sandbox test |
+| A program of the person makes a socket in a read path folder after the checks, while the session runs (issue 996) | Linux: `connect` through the overlay gives `ECONNREFUSED`; the server gets no connection. macOS: the profile denies it | Linux sandbox test with a server that binds after the spawn |
+| The folder at the path of a read path is another folder at the time of the overlay | No session starts (`ESTALE`) | the device and inode compare in the child |
+| A kernel that refuses an overlay or the mount API in a user namespace | No session starts with a read path folder; a session with none is not changed | not testable in CI (the CI kernel permits it) |
+| An AppArmor rule that limits user namespaces to programs with a profile (Ubuntu 24.04), and no profile for `iris` | The `unshare` gives a namespace with no capabilities, the mount fails, and no session starts with a read path folder; the error names the overlay | not testable in CI (no AppArmor in the CI kernel); known limit #518 |
 | A connection to a local port other than `allow_local` | Refused: no listener in the namespace (Linux), the profile denies it (macOS) | Linux sandbox test |
 | `allow_local` with no server on the port | The relay closes the connection | Linux sandbox test |
 | `allow_local` 0 or above 65535, or not an integer | The parse refuses the file, with the line | config test |
@@ -339,9 +371,11 @@ None. Both keys are opt-in.
 ## Risks
 
 - A program of the person can make a socket in a read path after the
-  launch checks. Linux: the bind shows it, and a process of the session
-  can connect to it. Known limit, issue #996: the docs tell the person
-  to list only folders of programs.
+  launch checks. Linux: the overlay shows it, but a `connect` to it is
+  refused (issue 996, closed). macOS: the profile denies it.
+- The overlay rule depends on the kernel: a socket is found by the inode
+  of its file. If a later kernel finds a socket through an overlay, the
+  Linux sandbox test of issue 996 fails.
 - A person can list a folder with credentials. The session can then send
   them to an allowed host. The docs say so next to the key. The checks
   refuse only the root, the home folder and the data folder.

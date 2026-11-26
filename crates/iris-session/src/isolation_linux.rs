@@ -255,7 +255,12 @@ impl Bwrap {
         // of the descriptor, not a path (read paths spec, "Linux").
         let opened = self.open_reads(command)?;
         let local_port = local_port_of(command);
-        let read_fds: Vec<RawFd> = opened.iter().map(|f| f.as_raw_fd()).collect();
+        let read_fds: Vec<RawFd> = opened.iter().map(|(f, _)| f.as_raw_fd()).collect();
+        // Each folder of a read path goes into the view through a
+        // read-only overlay (issue 996). Made before the fork: the child
+        // only runs system calls on it.
+        let overlays = Overlays::plan(&opened)?;
+        let has_overlays = overlays.is_some();
         let (info_r, info_w) = pipe()?;
         let (block_r, block_w) = pipe()?;
         let (iw, br) = (info_w.as_raw_fd(), block_r.as_raw_fd());
@@ -289,6 +294,9 @@ impl Bwrap {
                         return Err(io::Error::last_os_error());
                     }
                 }
+                if let Some(o) = &overlays {
+                    o.apply()?;
+                }
                 Ok(())
             });
         }
@@ -296,7 +304,21 @@ impl Bwrap {
         // SAFETY: getppid has no memory effects.
         let engine = pidfd_open(unsafe { libc::getppid() })?;
         let engine_local = engine.try_clone()?;
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(|e| {
+            if has_overlays {
+                // Names the cause for the person (read paths spec, "Linux").
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "the read-only overlay of a read path folder failed ({e}): \
+                         the system must permit an overlay in a user namespace \
+                         for the iris program"
+                    ),
+                )
+            } else {
+                e
+            }
+        })?;
         drop(info_w);
         drop(block_r);
         let mut init: Option<OwnedFd> = None;
@@ -342,7 +364,7 @@ impl Bwrap {
     /// `--ro-bind-fd <n> <path>`, in order from [`READ_FD`]). The helper
     /// runs the checks of the launch again on the object that it binds,
     /// with no link in the path: a change after the launch fails here.
-    fn open_reads(&self, command: &std::process::Command) -> io::Result<Vec<OwnedFd>> {
+    fn open_reads(&self, command: &std::process::Command) -> io::Result<Vec<(OwnedFd, PathBuf)>> {
         let args: Vec<&OsStr> = command.get_args().collect();
         let home = std::env::var_os("HOME");
         let mut out = Vec::new();
@@ -366,7 +388,7 @@ impl Bwrap {
                         path.display()
                     )));
                 }
-                out.push(c.fd);
+                out.push((c.fd, c.real));
                 i += 3;
             } else if args[i] == "--" {
                 break;
@@ -537,6 +559,204 @@ impl Isolation for Bwrap {
             .and_then(|v| v.strip_prefix("http://127.0.0.1:")?.parse::<u16>().ok());
         self.spawn_with(session, command, port)
     }
+}
+
+/// The descriptor of the empty read-only `tmpfs` that is the second layer
+/// of each overlay, in the child of the spawn.
+const EMPTY_FD: RawFd = 40;
+/// The first descriptor of a read path folder, opened again in the new
+/// mount namespace, in the child of the spawn (one for each read path).
+const LOWER_FD: RawFd = 41;
+
+/// The overlays of the read path folders (issue 996). A program of the
+/// person can make a socket in a read path after the checks. The kernel
+/// finds a socket by the inode of its file, and an overlay shows each file
+/// with an inode of its own, so a `connect` through the overlay is refused
+/// (`ECONNREFUSED`). The child of the spawn makes a new user and mount
+/// namespace, puts an overlay on each folder there, and gives `bwrap` the
+/// overlay in the place of the folder. `bwrap` runs in that namespace.
+/// A read path that is a file needs no overlay: no socket can appear in it.
+struct Overlays {
+    /// The lines of `/proc/self/{setgroups,uid_map,gid_map}`.
+    maps: [(CString, CString); 3],
+    /// For each folder: its read path number, its path, its device and
+    /// inode, and the `lowerdir` value of its overlay.
+    dirs: Vec<(usize, CString, (u64, u64), CString)>,
+}
+
+impl Overlays {
+    fn plan(opened: &[(OwnedFd, PathBuf)]) -> io::Result<Option<Overlays>> {
+        let mut dirs = Vec::new();
+        for (i, (fd, path)) in opened.iter().enumerate() {
+            let m = File::from(fd.try_clone()?).metadata()?;
+            if !m.is_dir() {
+                continue;
+            }
+            let lower = format!(
+                "/proc/self/fd/{}:/proc/self/fd/{EMPTY_FD}",
+                LOWER_FD + i as RawFd
+            );
+            dirs.push((
+                i,
+                cstr(path.as_os_str())?,
+                (m.dev(), m.ino()),
+                cstr(lower.as_ref())?,
+            ));
+        }
+        if dirs.is_empty() {
+            return Ok(None);
+        }
+        let c = |s: &str| CString::new(s).map_err(io::Error::other);
+        // SAFETY: getuid and getgid have no memory effects.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        Ok(Some(Overlays {
+            maps: [
+                (c("/proc/self/setgroups")?, c("deny")?),
+                (c("/proc/self/uid_map")?, c(&format!("{uid} {uid} 1"))?),
+                (c("/proc/self/gid_map")?, c(&format!("{gid} {gid} 1"))?),
+            ],
+            dirs,
+        }))
+    }
+
+    /// Runs in the child of the spawn, after the read paths are at their
+    /// numbers. Only system calls, no allocation.
+    ///
+    /// # Safety
+    ///
+    /// Call only in the child of a fork, before exec.
+    unsafe fn apply(&self) -> io::Result<()> {
+        let err = || Err(io::Error::last_os_error());
+        if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+            return err();
+        }
+        for (path, line) in &self.maps {
+            let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+            if fd < 0 {
+                return err();
+            }
+            let n = line.as_bytes().len();
+            let w = libc::write(fd, line.as_ptr() as *const libc::c_void, n);
+            libc::close(fd);
+            if w != n as isize {
+                return err();
+            }
+        }
+        // No mount of this namespace goes back to the host.
+        if libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        ) != 0
+        {
+            return err();
+        }
+        let empty = fs_mount(c"tmpfs", None)?;
+        if libc::dup2(empty, EMPTY_FD) < 0 {
+            return err();
+        }
+        libc::close(empty);
+        for (i, path, id, lower) in &self.dirs {
+            // The folder again, at its path in this namespace. It must be
+            // the folder that the checks opened (a folder has one path:
+            // no hard link).
+            let lo = libc::open(
+                path.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            );
+            let mut st: libc::stat = std::mem::zeroed();
+            if lo < 0 || libc::fstat(lo, &mut st) != 0 {
+                return err();
+            }
+            if (st.st_dev as u64, st.st_ino as u64) != *id {
+                return Err(io::Error::from_raw_os_error(libc::ESTALE));
+            }
+            let slot = LOWER_FD + *i as RawFd;
+            if libc::dup2(lo, slot) < 0 {
+                return err();
+            }
+            libc::close(lo);
+            let m = fs_mount(c"overlay", Some(lower))?;
+            // Put the overlay on the folder in this namespace, then give
+            // its root to bwrap in the place of the folder.
+            let moved = libc::syscall(
+                libc::SYS_move_mount,
+                m,
+                c"".as_ptr(),
+                slot,
+                c"".as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            );
+            if moved != 0 || libc::dup2(m, READ_FD + *i as RawFd) < 0 {
+                return err();
+            }
+            libc::close(m);
+            libc::close(slot);
+        }
+        libc::close(EMPTY_FD);
+        Ok(())
+    }
+}
+
+const FSCONFIG_SET_STRING: libc::c_uint = 1;
+const FSCONFIG_CMD_CREATE: libc::c_uint = 6;
+const MOUNT_ATTR_RDONLY: libc::c_uint = 0x1;
+const MOUNT_ATTR_NOSUID: libc::c_uint = 0x2;
+const MOUNT_ATTR_NODEV: libc::c_uint = 0x4;
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
+
+/// A new detached read-only mount of the file system `kind`, with the
+/// option `lowerdir` if given (new mount API, Linux 5.2).
+///
+/// # Safety
+///
+/// Only system calls: safe in the child of a fork.
+unsafe fn fs_mount(kind: &std::ffi::CStr, lowerdir: Option<&CString>) -> io::Result<RawFd> {
+    let fs = libc::syscall(libc::SYS_fsopen, kind.as_ptr(), 1 as libc::c_uint) as RawFd;
+    if fs < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let ok = lowerdir.is_none_or(|l| {
+        libc::syscall(
+            libc::SYS_fsconfig,
+            fs,
+            FSCONFIG_SET_STRING,
+            c"lowerdir".as_ptr(),
+            l.as_ptr(),
+            0,
+        ) == 0
+    }) && libc::syscall(
+        libc::SYS_fsconfig,
+        fs,
+        FSCONFIG_CMD_CREATE,
+        std::ptr::null::<libc::c_char>(),
+        std::ptr::null::<libc::c_void>(),
+        0,
+    ) == 0;
+    let m = if ok {
+        libc::syscall(
+            libc::SYS_fsmount,
+            fs,
+            1 as libc::c_uint,
+            MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+        ) as RawFd
+    } else {
+        -1
+    };
+    let e = io::Error::last_os_error();
+    libc::close(fs);
+    if m < 0 {
+        return Err(e);
+    }
+    Ok(m)
+}
+
+fn cstr(s: &OsStr) -> io::Result<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(s.as_bytes()).map_err(io::Error::other)
 }
 
 /// The local port of `command`: the value of the pair

@@ -843,6 +843,58 @@ fn a_read_path_is_readable_and_not_writable() {
     let _ = fs::remove_dir_all(&tool);
 }
 
+/// Issue 996: a program of the person makes a socket in a read path after
+/// the launch checked it. The view shows each read path through a
+/// read-only overlay, so a connection to that socket is refused: the
+/// kernel finds a socket by its inode, and the overlay has its own inodes.
+#[test]
+fn a_socket_made_in_a_read_path_after_the_checks_is_not_reached() {
+    let d = Data::new();
+    let iso = d.iso();
+    let tool = tool_dir("latesock");
+    let sock = tool.join("late.sock");
+    let script = format!(
+        "import os, socket, time\n\
+         for _ in range(200):\n\
+         \x20   if os.path.exists('{s}'): break\n\
+         \x20   time.sleep(0.05)\n\
+         print(open('{t}/main.js').read())\n\
+         c = socket.socket(socket.AF_UNIX)\n\
+         try:\n\
+         \x20   c.connect('{s}'); print('REACHED')\n\
+         except OSError as e: print('refused', e.errno)\n",
+        s = sock.display(),
+        t = tool.display()
+    );
+    let c = iso.command(
+        24,
+        &d.ws,
+        None,
+        Path::new("/usr/bin/python3"),
+        &["-c".into(), script],
+        std::slice::from_ref(&tool),
+        None,
+    );
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let child = iso.spawn_with(24, &mut cmd, None).unwrap();
+    // After the checks of the spawn: a server of the person.
+    let server = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    fs::set_permissions(&sock, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+    server.set_nonblocking(true).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("TOOL-MARKER"), "{out}");
+    assert!(out.contains("refused"), "{out}");
+    assert!(!out.contains("REACHED"), "{out}");
+    assert!(server.accept().is_err(), "no connection reached the server");
+    let _ = fs::remove_dir_all(&tool);
+}
+
 #[test]
 fn a_read_path_that_changes_after_the_launch_stops_the_start() {
     let d = Data::new();
