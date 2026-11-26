@@ -438,6 +438,9 @@ lose a rerun:
    message is understood at once with no model call, and counts in
    `messages` and toward `Limits::max_messages`. Mail in `link_recheck` is
    not hostile mail for the gates while it waits: it had its first check.
+   The recheck makes no model call. A newly marked old message can make
+   later messages of its thread get understood again, with model calls
+   (issue #1178).
 2. In one write: `iris_senders::refresh`, then `rerun_senders` for the rows
    that became or stopped being hostile. No model call. Then the fixed
    check of each row of `fixed_due` (spec 1, migration 54, decision D31),

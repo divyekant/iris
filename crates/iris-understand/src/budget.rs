@@ -93,6 +93,10 @@ pub struct State {
     /// its worst case as unknown cost. It is no model error. No later call
     /// goes out.
     pub cancelled: bool,
+    /// A request of this run can have gone out: the inner model got a call.
+    /// False after a refusal or a cancel before the first request (issue
+    /// #1175).
+    pub sent: bool,
 }
 
 /// The model that `store::understand` gets from the runner (spec
@@ -157,6 +161,7 @@ impl<'a> Budgeted<'a> {
 
     /// Calls the inner model, with the cancel of [`Budgeted::yielding`].
     fn call(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        self.set(|s| s.sent = true);
         if self.yields {
             let store = self.store;
             self.inner
