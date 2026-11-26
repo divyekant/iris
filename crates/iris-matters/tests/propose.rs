@@ -957,15 +957,16 @@ impl Model for Cancelled {
 }
 
 /// Issue #1126: a call that a waiter of the run lock cancels is no model
-/// error. The run says `yield`, no wait starts, the attempt is undone, and
-/// the next step calls again.
+/// error: the run says `yield` and no wait starts. The call can be out and
+/// charged, so the hourly gate counts it: no second call within the hour.
+/// A manual step calls again at once.
 #[test]
-fn a_cancelled_call_starts_no_wait_and_tries_again() {
+fn a_cancelled_call_starts_no_wait_and_counts_for_the_hour() {
     let b = setup("cancel", 3, &titles(3), &["record"]);
     let connect = |_: &ModelRow| -> Result<std::boxed::Box<dyn Model>, String> {
         Ok(std::boxed::Box::new(Cancelled))
     };
-    let o = propose(&b.store, &connect, Gate::Now, NOW).unwrap();
+    let o = propose(&b.store, &connect, Gate::Hourly, NOW).unwrap();
     assert!(!o.failed);
     assert_eq!(
         col(
@@ -984,11 +985,13 @@ fn a_cancelled_call_starts_no_wait_and_tries_again() {
     assert_eq!(
         col(
             &b,
-            "SELECT count(*) FROM matter_run WHERE candidates IS NULL AND tried_at IS NULL"
+            "SELECT count(*) FROM matter_run WHERE candidates IS NULL AND tried_at IS NOT NULL"
         ),
         1
     );
     let f = fake(vec![]);
+    assert_eq!(run(&b, &f, Gate::Hourly, NOW + 1).skip, Some(Skip::Hourly));
+    assert!(f.data.borrow().is_empty());
     assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, None);
     assert_eq!(f.data.borrow().len(), 1);
 }

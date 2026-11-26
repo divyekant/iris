@@ -221,7 +221,7 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
     // Only evidence of the model starts the wait: a failed store write of
     // the counts is no such evidence (#156).
     // A call stopped for a waiter of the run lock (issue #1126) is no
-    // evidence of the model: no wait, and the next step tries again.
+    // evidence of the model: no wait. It is an attempt of the hourly gate.
     let cancelled = state.cancelled;
     let failed = !refused
         && !cancelled
@@ -246,8 +246,8 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             params![run, ended, stop],
         )?;
         if cancelled {
-            // The run row keeps the cost of the call; the attempt is undone.
-            tx.execute("UPDATE matter_run SET tried_at = ?1 WHERE id = 1", [before])?;
+            // The call can be out and charged: the run row keeps its cost,
+            // and `tried_at` stays, so the hourly gate counts the attempt.
             return Ok((0, 0, 0));
         }
         batch::update_wait(tx, failed, !failed && answer.is_some(), ended)?;

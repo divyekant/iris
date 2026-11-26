@@ -697,7 +697,9 @@ The model call changes nothing outside the product, but it costs money.
 - An unknown result: the worst case counts; the run stops; the message stays
   pending. A retry pays again, at most one message for each event.
 - A cancel for a waiter of the run lock (issue #1126): as an unknown
-  result, but the holder stops with `stop = yield` and no model wait.
+  result, but the holder stops with `stop = yield` and no model wait. The
+  matter step keeps `matter_run.tried_at`, so its hourly gate counts the
+  call.
 - Retry: the next run.
 
 ## Open questions
