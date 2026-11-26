@@ -609,10 +609,18 @@ no network stops them. The engine gives each session one narrow path out:
   connection with the reason `sni_not_allowed`, or `not_tls` for bytes
   that are not a ClientHello. The proxy sends the ClientHello on to the
   host, then relays the bytes and does not read them. TLS runs from the
-  agent to the model host, so the engine sees no key and no text. A site
-  of the same CDN that serves a request with another name inside TLS
-  (domain fronting), or a client that hides the name with Encrypted
-  Client Hello, is a known limit (issue).
+  agent to the model host, so the engine sees no key and no text.
+- A ClientHello with the extension `encrypted_client_hello` (Encrypted
+  Client Hello, ECH) or `encrypted_server_name` (the older ESNI draft)
+  hides the true server name: its SNI is only the outer name, and the
+  CDN can serve another site from the encrypted inner name. The proxy
+  closes such a connection with the reason `ech` before any byte reaches
+  the host (issue 426). The proxy reads the extension list itself, over
+  each TLS record of the ClientHello; `rustls` gives no list. The agent
+  tools send no such extension (checked on 2026-11-26: Claude Code and
+  `codex` exec). A site of the same CDN that serves a request with
+  another name inside TLS (domain fronting) stays a known limit (issue
+  426): a check inside TLS needs a man-in-the-middle certificate.
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
   starts one proxy for each session that it registers, after the bind and
@@ -627,7 +635,7 @@ no network stops them. The engine gives each session one narrow path out:
   `port_not_allowed`, `address_not_public`, `too_long`, `too_many` for a
   ninth open connection or a resolver worker past the bound, `timeout`
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
-  `sni_not_allowed`, `no_resources` when the engine has no file
+  `sni_not_allowed`, `ech`, `no_resources` when the engine has no file
   descriptor or thread for the connection, `not_session` on macOS for a
   client that is not from `127.0.0.1` or has no token of the session) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
@@ -868,6 +876,7 @@ is refused before a row is written.
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
 | A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line with a fixed reason and no request text | Proxy test: `CONNECT <marker>:443` leaves no marker in the log |
 | A `CONNECT` to an allowed host, then a ClientHello with another server name (a site that shares the address) | Closed before any byte reaches the host; `sni_not_allowed` in the egress log | Proxy test with two names on one test server |
+| A ClientHello with the SNI of the allowed host and an ECH or ESNI extension, in one or more TLS records | Closed before any byte reaches the host; `ech` in the egress log (or `not_tls` if `rustls` cannot read the ECH body) | Proxy test; property test of the extension reader over random extension lists, places and record sizes, and over cut and changed bytes |
 | A revoke right after the gate commits, before the agent reads a file | The agent exists at the commit (the gate waited for `started`), so the revoke ends a running session and the supervisor stops it | Launch test: revoke hook right after the commit; the session ends with `revoke` and its group stops |
 | The helper does not confirm the spawn in 2 seconds | Roll back; `launch_failed`; the helper stops a late agent | Launch test with a helper that waits 3 seconds |
 | The agent and its children exit before the helper signals the group | The agent stays a zombie until after the last signal, so its group ID is not reused | Helper test: the agent exits at once, and the helper sends the signals before the reap (test hook that records the order) |

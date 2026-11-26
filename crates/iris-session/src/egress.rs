@@ -58,6 +58,9 @@ pub enum Reason {
     Timeout,
     NotTls,
     SniNotAllowed,
+    /// The ClientHello hides the true server name: Encrypted Client Hello
+    /// or the older ESNI draft (issue 426).
+    Ech,
     /// The proxy had no file descriptor or thread for the connection.
     NoResources,
     /// The client is not of the session: on macOS, not from `127.0.0.1`
@@ -77,6 +80,7 @@ impl Reason {
             Reason::Timeout => "timeout",
             Reason::NotTls => "not_tls",
             Reason::SniNotAllowed => "sni_not_allowed",
+            Reason::Ech => "ech",
             Reason::NoResources => "no_resources",
             Reason::NotSession => "not_session",
         }
@@ -1270,10 +1274,100 @@ fn check_hello(buf: &[u8], name: &str) -> Result<bool, Reason> {
         Ok(None) if buf.len() >= HELLO_MAX => Err(Reason::TooLong),
         Ok(None) => Ok(false),
         Ok(Some(accepted)) => match accepted.client_hello().server_name() {
-            Some(sni) if sni.eq_ignore_ascii_case(name) => Ok(true),
+            Some(sni) if sni.eq_ignore_ascii_case(name) => {
+                // With ECH, the SNI is only the outer name: the server can
+                // serve another site from the encrypted inner name.
+                let mut hidden = false;
+                match hello_extensions(buf, |t| hidden |= HIDDEN_NAME.contains(&t)) {
+                    Some(()) if hidden => Err(Reason::Ech),
+                    Some(()) => Ok(true),
+                    None => Err(Reason::NotTls),
+                }
+            }
             _ => Err(Reason::SniNotAllowed),
         },
         Err(_) => Err(Reason::NotTls),
+    }
+}
+
+/// The extension types that hide the true server name: Encrypted Client
+/// Hello (`encrypted_client_hello`) and the older ESNI draft
+/// (`encrypted_server_name`).
+const HIDDEN_NAME: [u16; 2] = [0xfe0d, 0xffce];
+
+/// Gives each extension type of the ClientHello at the start of `buf` to
+/// `each`, in order. The ClientHello can come in more than one TLS record.
+/// `None` if `buf` does not start with one whole ClientHello. It reads the
+/// records in place: no copy and no allocation.
+fn hello_extensions(buf: &[u8], mut each: impl FnMut(u16)) -> Option<()> {
+    let mut r = Records {
+        fragment: &[],
+        rest: buf,
+        at: 0,
+        end: 4,
+    };
+    if r.number(1)? != 1 {
+        return None; // not a ClientHello
+    }
+    r.end = 4 + r.number(3)?;
+    r.skip(2 + 32)?; // version, random
+    for width in [1, 2, 1] {
+        // session ID, cipher suites, compression methods
+        let n = r.number(width)?;
+        r.skip(n)?;
+    }
+    let list = r.number(2)?;
+    let list_end = r.at.checked_add(list).filter(|e| *e <= r.end)?;
+    while r.at < list_end {
+        each(r.number(2)? as u16);
+        let n = r.number(2)?;
+        r.skip(n)?;
+    }
+    if r.at != list_end {
+        return None;
+    }
+    // The rest of the message must be in `buf` too.
+    r.skip(r.end - r.at)
+}
+
+/// A reader of one handshake message over the fragments of its TLS
+/// records, in place.
+struct Records<'a> {
+    /// The unread part of the fragment of the current record.
+    fragment: &'a [u8],
+    /// The records after it.
+    rest: &'a [u8],
+    /// The bytes of the message read so far, and the length of the message.
+    at: usize,
+    end: usize,
+}
+
+impl Records<'_> {
+    fn byte(&mut self) -> Option<u8> {
+        if self.at >= self.end {
+            return None;
+        }
+        while self.fragment.is_empty() {
+            let (head, tail) = self.rest.split_at_checked(5)?;
+            if head[0] != 22 {
+                return None; // not a handshake record
+            }
+            let len = u16::from_be_bytes([head[3], head[4]]) as usize;
+            (self.fragment, self.rest) = tail.split_at_checked(len)?;
+        }
+        let (b, tail) = self.fragment.split_first()?;
+        self.fragment = tail;
+        self.at += 1;
+        Some(*b)
+    }
+
+    /// A big-endian number of `width` bytes.
+    fn number(&mut self, width: usize) -> Option<usize> {
+        (0..width).try_fold(0usize, |n, _| Some(n << 8 | self.byte()? as usize))
+    }
+
+    fn skip(&mut self, n: usize) -> Option<()> {
+        (0..n).try_for_each(|_| self.byte().map(drop))
     }
 }
 
