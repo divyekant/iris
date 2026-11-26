@@ -570,15 +570,16 @@ The built-in agent tools call their model over HTTPS: `claude-code` needs
 `api.anthropic.com`, and `codex` needs `api.openai.com`. An isolation with
 no network stops them. The engine gives each session one narrow path out:
 
-- The engine listens on one TCP port of `127.0.0.1` for each running
-  session, the egress port. The isolation permits a connection to this
-  port only. It blocks each other address, also DNS.
-- On Linux, the proxy takes a client only from the session address of
-  its session (`127.128.0.0` plus the session ID). The relay of the
-  sandbox connects from that address (sandbox spec, "Egress on Linux"). A
-  client from each other address gets `403` and the log word
-  `not_session`. The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and
-  the same value in `https_proxy`.
+- The engine runs one proxy for each running session. The agent reaches
+  it on one TCP port of `127.0.0.1`, the egress port. The isolation
+  permits a connection to this port only. It blocks each other address,
+  also DNS.
+- On Linux, the proxy has no port on the host (issue 507). It takes its
+  clients only from a socket pair of its session: the helper listens on
+  the egress port in the namespace of the session, and sends each
+  connection to the proxy as a file descriptor (sandbox spec, "Egress on
+  Linux"). The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and the
+  same value in `https_proxy`.
 - On macOS, the proxy takes a client only from `127.0.0.1`, and only with
   the token of its session in `Proxy-Authorization: Basic` (user `iris`).
   A client from another address gets `403`, and a `CONNECT` with no
@@ -625,8 +626,8 @@ no network stops them. The engine gives each session one narrow path out:
   ninth open connection or a resolver worker past the bound, `timeout`
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
   `sni_not_allowed`, `no_resources` when the engine has no file
-  descriptor or thread for the connection, `not_session` for a client
-  that is not at the session address) and no text of the request. For a connection that closes, or
+  descriptor or thread for the connection, `not_session` on macOS for a
+  client that is not from `127.0.0.1` or has no token of the session) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
   Only the proxy writes this file,

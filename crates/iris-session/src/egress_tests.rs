@@ -743,31 +743,11 @@ fn a_stop_during_the_hello_logs_the_host() {
     );
 }
 
-#[test]
-fn session_addresses_are_distinct_loopback_addresses() {
-    assert_eq!(session_peer(0), None);
-    assert_eq!(session_peer(-1), None);
-    assert_eq!(session_peer(SESSION_MAX + 1), None);
-    assert_eq!(session_peer(1), Some(Ipv4Addr::new(127, 128, 0, 1)));
-    assert_eq!(
-        session_peer(SESSION_MAX),
-        Some(Ipv4Addr::new(127, 255, 255, 254))
-    );
-    let mut r = Rng(11);
-    for _ in 0..2000 {
-        let a = 1 + r.next(SESSION_MAX as u64) as i64;
-        let b = 1 + r.next(SESSION_MAX as u64) as i64;
-        let (pa, pb) = (session_peer(a).unwrap(), session_peer(b).unwrap());
-        assert!(pa.is_loopback() && pa != Ipv4Addr::LOCALHOST);
-        assert_eq!(pa == pb, a == b, "{a} {b}");
-    }
-}
-
-/// The relay of session 8 reaches the port of session 7 (for example after
-/// an engine crash gave the port to another session): the proxy refuses it.
+/// A proxy with a peer address refuses a client from each other address.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_proxy_takes_only_its_session_address() {
+fn the_proxy_takes_only_its_peer_address() {
+    let (own, foreign) = (Ipv4Addr::new(127, 128, 0, 7), Ipv4Addr::new(127, 128, 0, 8));
     let log = std::env::temp_dir().join(format!("iris-egress-peer-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&log);
     let guard = LogFile(log.clone());
@@ -781,19 +761,19 @@ fn the_proxy_takes_only_its_session_address() {
         file,
         Box::new(Fixed(echo())),
         false,
-        session_peer(7),
+        Some(own),
         None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
     .unwrap();
     let head = "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n";
-    let other = connect_from(session_peer(8).unwrap(), proxy.port()).unwrap();
+    let other = connect_from(foreign, proxy.port()).unwrap();
     let (_s, line) = send_on(other, head);
     assert!(line.starts_with("HTTP/1.1 403"), "{line}");
     let (_s, line) = send(&proxy, head);
     assert!(line.starts_with("HTTP/1.1 403"), "{line}");
-    let own = connect_from(session_peer(7).unwrap(), proxy.port()).unwrap();
+    let own = connect_from(own, proxy.port()).unwrap();
     let (_s, line) = send_on(own, head);
     assert!(line.starts_with("HTTP/1.1 200"), "{line}");
     drop(_s);
@@ -1057,14 +1037,14 @@ fn close_comes_before_the_address_check() {
         file,
         Box::new(Fixed(echo())),
         false,
-        session_peer(7),
+        Some(Ipv4Addr::new(127, 128, 0, 7)),
         None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
     .unwrap();
     proxy.close();
-    for from in [session_peer(8).unwrap(), Ipv4Addr::LOCALHOST] {
+    for from in [Ipv4Addr::new(127, 128, 0, 8), Ipv4Addr::LOCALHOST] {
         let mut s = connect_from(from, proxy.port()).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let _ = s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
@@ -1086,4 +1066,125 @@ fn wait_until(f: impl Fn() -> bool) -> bool {
         thread::sleep(Duration::from_millis(10));
     }
     false
+}
+
+/// A proxy of a Linux session on its socket pair, with a loopback server.
+#[cfg(target_os = "linux")]
+fn channel_proxy(name: &str) -> (Proxy, UnixStream, LogFile) {
+    let log = std::env::temp_dir().join(format!("iris-egress-{name}-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let (engine, helper) = UnixStream::pair().unwrap();
+    let proxy = Proxy::start_on(
+        Source::Channel(engine),
+        EGRESS_PORT,
+        allowed(),
+        file,
+        Box::new(Fixed(echo())),
+        false,
+        None,
+        None,
+        LOG_LIMIT,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
+    (proxy, helper, LogFile(log))
+}
+
+/// A connection of the agent, as the helper hands it over: the proxy end
+/// goes on the pair, the agent end stays with the test.
+#[cfg(target_os = "linux")]
+fn hand_over(helper: &UnixStream) -> io::Result<TcpStream> {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let agent = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+    let (inner, _) = l.accept().unwrap();
+    // SAFETY: both descriptors are open for the call.
+    if unsafe { crate::isolation::linux::send_fd(helper.as_raw_fd(), inner.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(agent)
+}
+
+/// Issue 507: the proxy of a Linux session has no port. A connection that
+/// the helper sends on the pair gets a tunnel; after the end of the proxy
+/// side, the helper cannot send one more, so it reaches no other process.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_channel_proxy_takes_connections_only_from_its_pair() {
+    let (proxy, helper, log) = channel_proxy("channel");
+    assert_eq!(proxy.endpoint().port, EGRESS_PORT);
+    let agent = hand_over(&helper).unwrap();
+    let (mut s, line) = send_on(agent, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    let mut sent = hello("api.example.test");
+    sent.extend_from_slice(b"ping");
+    s.write_all(&sent).unwrap();
+    let mut got = vec![0u8; sent.len()];
+    s.read_exact(&mut got).unwrap();
+    assert_eq!(got, sent);
+    drop(s);
+    // The engine ends: the helper end gets an error, never a new peer.
+    proxy.stop().unwrap();
+    let mut refused = 0;
+    for _ in 0..3 {
+        refused += hand_over(&helper).is_err() as usize;
+    }
+    assert_eq!(refused, 3);
+    let text = log_text(&log);
+    assert_eq!(text.lines().count(), 1, "{text}");
+}
+
+/// The helper ends first: the proxy sees the end of the pair, does not spin,
+/// and stops at once.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_channel_proxy_stops_after_the_end_of_the_helper() {
+    let (proxy, helper, _log) = channel_proxy("channel-end");
+    drop(helper);
+    thread::sleep(Duration::from_millis(100));
+    let start = Instant::now();
+    proxy.stop().unwrap();
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+/// A descriptor that is not a TCP connection is closed with no answer and
+/// no log line, and the proxy goes on.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_channel_proxy_closes_a_descriptor_that_is_not_tcp() {
+    let (proxy, helper, log) = channel_proxy("channel-unix");
+    let (mut mine, theirs) = UnixStream::pair().unwrap();
+    // SAFETY: both descriptors are open for the call.
+    assert_eq!(
+        unsafe { crate::isolation::linux::send_fd(helper.as_raw_fd(), theirs.as_raw_fd()) },
+        0
+    );
+    drop(theirs);
+    mine.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut b = [0u8; 1];
+    assert_eq!(mine.read(&mut b).unwrap(), 0, "the proxy closed it");
+    let agent = hand_over(&helper).unwrap();
+    let (_s, line) = send_on(agent, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    drop(_s);
+    proxy.stop().unwrap();
+    assert_eq!(log_text(&log).lines().count(), 1);
+}
+
+#[test]
+fn the_sandbox_port_is_never_the_local_port() {
+    for local in [
+        None,
+        Some(1),
+        Some(EGRESS_PORT - 1),
+        Some(EGRESS_PORT),
+        Some(EGRESS_PORT + 1),
+        Some(u16::MAX),
+    ] {
+        assert_ne!(Some(sandbox_port(local)), local);
+    }
 }

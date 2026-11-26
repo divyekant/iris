@@ -330,7 +330,14 @@ fn engine_env() -> HashMap<&'static str, &'static str> {
 }
 
 fn env_of(a: &Adapter, port: Option<u16>) -> HashMap<String, String> {
-    env_with(a, port.map(|port| Endpoint { port, token: None }))
+    env_with(
+        a,
+        port.map(|port| Endpoint {
+            port,
+            token: None,
+            channel: None,
+        }),
+    )
 }
 
 fn env_with(a: &Adapter, end: Option<Endpoint>) -> HashMap<String, String> {
@@ -376,6 +383,7 @@ fn the_agent_env_has_only_the_listed_variables() {
         Some(Endpoint {
             port: 4003,
             token: Some("ab12".into()),
+            channel: None,
         }),
     );
     assert_eq!(t["HTTPS_PROXY"], "http://iris:ab12@127.0.0.1:4003");
