@@ -181,6 +181,10 @@ pub enum Error {
     /// The caller refused the call before it went out, for example because
     /// the budget cannot pay it. No request was sent.
     Budget(String),
+    /// The caller stopped the wait for the answer ([`Client::ask_cancel`]).
+    /// The request can have gone out, so the provider can charge it. The
+    /// answer is dropped.
+    Cancelled,
 }
 
 impl Error {
@@ -212,6 +216,7 @@ impl fmt::Display for Error {
             Error::BadAnswer(e) => write!(f, "the model server answer has an unknown format: {e}"),
             Error::NotJson => write!(f, "the model answer is not one JSON document"),
             Error::Budget(why) => write!(f, "no call: {why}"),
+            Error::Cancelled => write!(f, "the call was stopped before its answer"),
         }
     }
 }
@@ -224,8 +229,12 @@ pub fn data_block(text: &str) -> String {
     format!("{DATA_START}\n{}\n{DATA_END}", text.replace("<<<", "‹‹‹"))
 }
 
+/// The time between two reads of the cancel test of [`Client::ask_cancel`].
+pub const CANCEL_POLL: Duration = Duration::from_millis(50);
+
 /// A client for one model. Keep one for each model and use it again: it keeps
-/// the connections open.
+/// the connections open. A clone shares the connections.
+#[derive(Clone)]
 pub struct Client {
     config: Config,
     agent: ureq::Agent,
@@ -252,6 +261,42 @@ impl Client {
     pub fn ask(&self, instruction: &str, data: &str) -> Result<Reply, Error> {
         let (url, body) = self.request(instruction, data);
         self.send(&url, body)
+    }
+
+    /// [`Client::ask`], but the caller stops the wait when `cancel` gives
+    /// true (issue #1126): it reads `cancel` each [`CANCEL_POLL`] and then
+    /// gives [`Error::Cancelled`]. The call runs on its own thread.
+    // shortcut: a cancelled call is not stopped (issue #1158). Its thread ends with the
+    // answer or at the time limit of the config, and drops the answer. ureq
+    // has no stable API to stop a call in flight; change this when it has one.
+    pub fn ask_cancel(
+        &self,
+        instruction: &str,
+        data: &str,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<Reply, Error> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let client = self.clone();
+        let (instruction, data) = (instruction.to_string(), data.to_string());
+        std::thread::Builder::new()
+            .name("iris-model-call".into())
+            .spawn(move || {
+                // The receiver is gone after a cancel: the answer is dropped.
+                let _ = tx.send(client.ask(&instruction, &data));
+            })
+            .map_err(|e| Error::Transport(format!("no thread for the call: {e}")))?;
+        loop {
+            match rx.recv_timeout(CANCEL_POLL) {
+                Ok(r) => return r,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Transport("the call thread stopped".into()))
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if cancel() => {
+                    return Err(Error::Cancelled)
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
     }
 
     /// The byte count of the request body that [`Client::ask`] sends for

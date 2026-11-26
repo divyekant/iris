@@ -24,8 +24,10 @@ pub const LOCK_FILE: &str = "understand.lock";
 /// for a long run (#279).
 pub const WANT_FILE: &str = "understand.want";
 
-/// The longest wait of [`lock_wait`]. One model call of a run must end
-/// before the run stops.
+/// The longest wait of [`lock_wait`]. A holder of the run lock stops the
+/// wait for the answer of its model call when a caller waits
+/// (`Budgeted::yielding`, issue #1126), so the wait does not hold for the
+/// time limit of a call.
 pub const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Messages between two sender refreshes (step 5 of the runner).
 pub const BATCH: usize = 50;
@@ -454,7 +456,7 @@ fn run_messages(
         Some(r) if calls => connect(r).map_err(Error::Connect)?,
         _ => Box::new(NoModel),
     };
-    let model = Budgeted::new(inner.as_ref(), store, run, row);
+    let model = Budgeted::new(inner.as_ref(), store, run, row).yielding();
     let mut r = Runner {
         store,
         model: &model,
@@ -643,6 +645,11 @@ impl Runner<'_> {
             let s = self.model.state();
             if s.store_failed {
                 return Ok(Some(Stop::Error));
+            }
+            // A call stopped for a waiter (issue #1126): no model error, so
+            // no model wait. The message has no added try and no mark.
+            if s.cancelled {
+                return Ok(Some(Stop::Yield));
             }
             if s.key_refused || s.server_failed {
                 return Ok(Some(Stop::Model));

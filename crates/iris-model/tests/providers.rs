@@ -478,3 +478,33 @@ fn truncated_answer_with_no_text_is_allowed() {
     let reply = client.ask("x", "y").unwrap();
     assert_eq!((reply.stop, reply.text.as_str()), (Stop::Truncated, ""));
 }
+
+/// Issue #1126: `ask_cancel` stops the wait for a call that does not
+/// answer, soon after the cancel test gives true, and a call with no cancel
+/// gives its answer.
+#[test]
+fn ask_cancel_stops_the_wait_for_a_slow_call() {
+    use std::time::Instant;
+    // A server that reads the request and never answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in listener.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let mut config = Config::local(format!("http://{addr}/v1"), "m");
+    config.timeout = Duration::from_secs(30);
+    let client = Client::new(config);
+    let start = Instant::now();
+    let r = client.ask_cancel("i", "d", &|| start.elapsed() >= Duration::from_millis(300));
+    assert!(matches!(r, Err(Error::Cancelled)), "{r:?}");
+    assert!(start.elapsed() < Duration::from_secs(5));
+
+    let p = Provider::OpenAiCompatible;
+    let body = ok_body(p, "ok", 1, 1, stop_word(p, Stop::End));
+    let (client, _fake) = setup(p, vec![(200, vec![], body.into_bytes())]);
+    let r = client.ask_cancel("i", "d", &|| false).unwrap();
+    assert_eq!(r.text, "ok");
+}

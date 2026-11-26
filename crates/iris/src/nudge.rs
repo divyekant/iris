@@ -87,7 +87,7 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
         match outcome {
             // The next thread can still fit the budget.
             Outcome::Refused => continue,
-            Outcome::ModelFailed => break,
+            Outcome::ModelFailed | Outcome::Yielded => break,
             Outcome::Saved => saved += 1,
             Outcome::Invalid | Outcome::Other => {}
         }
@@ -115,6 +115,8 @@ pub(crate) enum Outcome {
     Other,
     /// The model failed: the shared wait starts.
     ModelFailed,
+    /// A draft or a question waits for the run lock: the step stops.
+    Yielded,
 }
 
 /// One prepared thing (a nudge, a thread summary) under the budget, as
@@ -142,7 +144,7 @@ pub(crate) fn call(
             Ok(tx.last_insert_rowid())
         })
         .map_err(|e| e.to_string())?;
-    let budgeted = Budgeted::new(model, store, run, Some(row));
+    let budgeted = Budgeted::new(model, store, run, Some(row)).yielding();
     let waits = Yielding {
         model: &budgeted,
         store,
@@ -150,7 +152,10 @@ pub(crate) fn call(
     };
     let result = run_with(&waits);
     let s = budgeted.state();
-    let stop = if waits.refused.get() {
+    // A call stopped for a waiter (issue #1126) is a yield too: no model
+    // error, and the thing stays open for a later step.
+    let yielded = waits.refused.get() || s.cancelled;
+    let stop = if yielded {
         "yield"
     } else if s.refused || s.overrun {
         "budget"
@@ -180,7 +185,7 @@ pub(crate) fn call(
                 "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
                 params![run, ended, stop],
             )?;
-            batch::update_wait(tx, failed, made > 0, ended)?;
+            batch::update_wait(tx, failed, made > 0 && !s.cancelled, ended)?;
             Ok(made.max(0) as usize)
         })
         .map_err(|e| e.to_string())?;
@@ -188,6 +193,7 @@ pub(crate) fn call(
         return Err(format!("store: {e}"));
     }
     let outcome = match result {
+        _ if yielded => Outcome::Yielded,
         _ if refused => Outcome::Refused,
         _ if failed => Outcome::ModelFailed,
         Done::Saved => Outcome::Saved,
@@ -483,6 +489,80 @@ mod tests {
                 .get_or_insert_with(|| iris_store::FileLock::try_take(&self.2).unwrap().unwrap());
             self.0.ask(i, d)
         }
+    }
+
+    /// A model whose call takes the want lock and then gives no answer
+    /// until its cancel test gives true (issue #1126).
+    struct Hang(Want, std::path::PathBuf, Rc<Cell<u32>>);
+
+    impl Model for Hang {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn request_bytes(&self, _: &str, _: &str) -> u64 {
+            100
+        }
+        fn ask(&self, _: &str, _: &str) -> Result<Reply, iris_model::Error> {
+            panic!("the step calls with a cancel test")
+        }
+        fn ask_cancel(
+            &self,
+            _: &str,
+            _: &str,
+            cancel: &dyn Fn() -> bool,
+        ) -> Result<Reply, iris_model::Error> {
+            self.2.set(self.2.get() + 1);
+            self.0
+                .borrow_mut()
+                .get_or_insert_with(|| iris_store::FileLock::try_take(&self.1).unwrap().unwrap());
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !cancel() {
+                assert!(std::time::Instant::now() < end, "no cancel");
+            }
+            Err(iris_model::Error::Cancelled)
+        }
+    }
+
+    /// Issue #1126: a waiter stops the call in flight of the nudge step.
+    /// The run says `yield`, the worst case stays as unknown cost, no model
+    /// wait starts, and the step makes no other call.
+    #[test]
+    fn a_waiter_cancels_the_call_in_flight() {
+        let (store, dir) = open("wantcancel");
+        ask(&store, "t1", "Ana, can you send the slides?");
+        ask(&store, "t2", "Ben, can you send the notes?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let want: Want = Rc::default();
+        let path = dir.join(batch::WANT_FILE);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Hang(want.clone(), path.clone(), calls.clone())))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (1, 0));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM understand_run WHERE stop = 'yield' AND unknown_calls = 1
+                   AND unknown_cost_micro_usd > 0"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM model_setting WHERE retry_failures = 0 AND retry_at IS NULL"
+            ),
+            1
+        );
+        drop(want.borrow_mut().take());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The retry of an invalid answer waits too (#279): no second call

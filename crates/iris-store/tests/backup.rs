@@ -581,7 +581,6 @@ fn the_backup_copies_each_attachment_file() {
 
 #[test]
 fn a_backup_keeps_the_drafts_of_each_job_and_only_safe_files() {
-    use iris_store::{DRAFT_FILES_MAX, DRAFT_FILE_MAX};
     let dir = TempDir::new("drafts");
     let dest = TempDir::new("drafts-copy");
     let store = Store::open(&dir.0).unwrap();
@@ -591,61 +590,42 @@ fn a_backup_keeps_the_drafts_of_each_job_and_only_safe_files() {
     fs::write(drafts.join("reply.md"), "Dear Ann").unwrap();
     fs::write(ws.join("j-1/mail.md"), "MAIL-TEXT").unwrap();
     fs::write(ws.join("j-1/notes.md"), "notes").unwrap();
-    // Not copied: a link, a subfolder, a file over the limit.
+    // Not copied: a link, a subfolder.
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.0.join("key"), drafts.join("key.md")).unwrap();
     fs::create_dir_all(drafts.join("sub")).unwrap();
     fs::write(drafts.join("sub/x.md"), "x").unwrap();
-    fs::write(
-        drafts.join("big.md"),
-        vec![b'a'; DRAFT_FILE_MAX as usize + 1],
-    )
-    .unwrap();
+    // Copied: a draft over 1 MiB (issue #1152: no size limit).
+    let big: Vec<u8> = (0..3 * 1024 * 1024 + 7).map(|i| (i % 251) as u8).collect();
+    fs::write(drafts.join("big.md"), &big).unwrap();
     // A job whose drafts/ is a link to the data folder.
     fs::create_dir_all(ws.join("j-2")).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&dir.0, ws.join("j-2/drafts")).unwrap();
-    // A job with more files than the limit.
+    // A job with many files (issue #1152: no count limit).
     let many = ws.join("j-3/drafts");
     fs::create_dir_all(&many).unwrap();
-    for i in 0..DRAFT_FILES_MAX + 5 {
+    for i in 0..600 {
         fs::write(many.join(format!("d{i:04}.md")), "d").unwrap();
     }
 
-    let report = store.backup(&dest.0).unwrap();
-    // Issue 1063: the report names each draft that the copy did not take.
-    assert_eq!(
-        report.skipped,
-        [
-            iris_store::SkippedDrafts {
-                folder: ws.join("j-1/drafts"),
-                large: vec!["big.md".into()],
-                more: 0,
-            },
-            iris_store::SkippedDrafts {
-                folder: ws.join("j-3/drafts"),
-                large: vec![],
-                more: 5,
-            },
-        ]
-    );
+    store.backup(&dest.0).unwrap();
     let copy = dest.0.join("workspaces");
     assert_eq!(
         fs::read_to_string(copy.join("j-1/drafts/reply.md")).unwrap(),
         "Dear Ann"
     );
-    let names: Vec<String> = fs::read_dir(copy.join("j-1/drafts"))
+    let mut names: Vec<String> = fs::read_dir(copy.join("j-1/drafts"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(names, ["reply.md"]);
+    names.sort();
+    assert_eq!(names, ["big.md", "reply.md"]);
+    assert_eq!(fs::read(copy.join("j-1/drafts/big.md")).unwrap(), big);
     // The other files of a workspace come again from the store.
     assert!(!copy.join("j-1/mail.md").exists());
     assert!(!copy.join("j-2").exists());
-    assert_eq!(
-        fs::read_dir(copy.join("j-3/drafts")).unwrap().count(),
-        DRAFT_FILES_MAX
-    );
+    assert_eq!(fs::read_dir(copy.join("j-3/drafts")).unwrap().count(), 600);
     #[cfg(unix)]
     {
         assert_eq!(mode(&copy.join("j-1/drafts")), 0o700);

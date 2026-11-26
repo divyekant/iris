@@ -198,7 +198,7 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
         out.skip = Some(Skip::Same);
         return Ok(out);
     };
-    let model = Budgeted::new(inner.as_ref(), store, run, Some(&row));
+    let model = Budgeted::new(inner.as_ref(), store, run, Some(&row)).yielding();
     let reply = model.ask(INSTRUCTION, &data);
     let state = model.state();
     // The wait starts at the end of the call, as in an understanding run.
@@ -220,7 +220,11 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
     };
     // Only evidence of the model starts the wait: a failed store write of
     // the counts is no such evidence (#156).
+    // A call stopped for a waiter of the run lock (issue #1126) is no
+    // evidence of the model: no wait. It is an attempt of the hourly gate.
+    let cancelled = state.cancelled;
     let failed = !refused
+        && !cancelled
         && ((answer.is_none() && !state.store_failed)
             || state.key_refused
             || state.server_failed
@@ -232,10 +236,20 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             tx.execute("UPDATE matter_run SET tried_at = ?1 WHERE id = 1", [before])?;
             return Ok((0, 0, 0));
         }
+        let stop = match () {
+            _ if cancelled => "yield",
+            _ if failed => "model",
+            _ => "done",
+        };
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![run, ended, if failed { "model" } else { "done" }],
+            params![run, ended, stop],
         )?;
+        if cancelled {
+            // The call can be out and charged: the run row keeps its cost,
+            // and `tried_at` stays, so the hourly gate counts the attempt.
+            return Ok((0, 0, 0));
+        }
         batch::update_wait(tx, failed, !failed && answer.is_some(), ended)?;
         let Some(answer) = &answer else {
             return Ok((0, 0, 0));
