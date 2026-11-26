@@ -484,6 +484,38 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
     );
 }
 
+/// Issue #1131: a header row of an older build has no `reply_to`. The
+/// reply form reads the `Reply-To` from the head of the raw content.
+#[tokio::test]
+async fn a_reply_to_old_mail_reads_reply_to_from_the_raw_content() {
+    let dir = temp("reply-old");
+    let s = store(&dir);
+    let sha = s
+        .put_content(
+            b"From: Priya Shah <priya@example.com>\r\nReply-To: List <LIST@example.org>, b@example.org\r\n\
+              To: owner@example.com\r\nSubject: Q4\r\n\r\nHi\r\n",
+        )
+        .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE message SET content_sha256 = ?1 WHERE id = 2",
+            [&sha],
+        )?)
+    })
+    .unwrap();
+    read_all(&s);
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["to"], json!(["list@example.org", "b@example.org"]));
+    // A value in the row wins: the raw content is not read.
+    s.write(|tx| {
+        Ok(tx.execute_batch("UPDATE header SET reply_to = 'x@example.org' WHERE message_id = 2")?)
+    })
+    .unwrap();
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["x@example.org"]));
+}
+
 /// The reply form gives recipients only from a header row of the content
 /// of the parent now: after a sync of new content and before understanding
 /// reads it, the row is empty or of the old content (migration 70).

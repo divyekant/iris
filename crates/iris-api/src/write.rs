@@ -487,14 +487,29 @@ pub fn reply(store: &Store, thread: &str) -> Result<Option<Value>> {
     store
         .read(|conn| {
             let tx = conn.unchecked_transaction()?;
-            let v = reply_in(&tx, row);
+            let v = reply_in(store, &tx, row);
             tx.finish()?;
             Ok(v)
         })
         .map_err(Error::from)?
 }
 
-fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
+/// The `Reply-To` addresses of the raw content `sha`, comma-separated, as
+/// understanding writes them. `None` if the file cannot be read or has no
+/// such header: the reply then goes to `From`, as before the migration.
+fn head_reply_to(store: &Store, sha: &str) -> Option<String> {
+    use std::io::Read as _;
+    let mut raw = Vec::new();
+    std::fs::File::open(store.content_path(sha)?)
+        .ok()?
+        .take(iris_understand::head::HEAD_LIMIT as u64)
+        .read_to_end(&mut raw)
+        .ok()?;
+    let h = iris_understand::Head::parse(&raw, None);
+    (!h.reply_to.is_empty()).then(|| h.reply_to.join(","))
+}
+
+fn reply_in(store: &Store, c: &Connection, thread: i64) -> Result<Option<Value>> {
     let exists: bool = c
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)",
@@ -522,13 +537,15 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         String,
         bool,
         bool,
+        Option<String>,
     );
-    let (account, subject, to, cc, reply_to, me, sent, current): Row = c
+    let (account, subject, to, cc, reply_to, me, sent, current, sha): Row = c
         .query_row(
             "SELECT m.account_id, h.subject, h.to_addrs, h.cc_addrs, h.reply_to, a.address,
                     EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                             WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-                    coalesce(m.content_sha256 IS NOT NULL AND h.content_sha256 = m.content_sha256, 0)
+                    coalesce(m.content_sha256 IS NOT NULL AND h.content_sha256 = m.content_sha256, 0),
+                    m.content_sha256
              FROM message m JOIN account a ON a.id = m.account_id
              LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
             [parent],
@@ -542,6 +559,7 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
+                    r.get(8)?,
                 ))
             },
         )
@@ -573,6 +591,9 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
     let (to, others) = if sent {
         (list(to.as_deref()), list(cc.as_deref()))
     } else {
+        // A header row of an older build has no `reply_to` (migration
+        // 70, issue #1131): read it from the head of the raw content.
+        let reply_to = reply_to.or_else(|| sha.as_deref().and_then(|h| head_reply_to(store, h)));
         let wanted = list(reply_to.as_deref());
         let to_list = if wanted.is_empty() {
             list(Some(&from))
