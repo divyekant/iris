@@ -860,12 +860,11 @@ fn people_texts(
         for v in [&m.from_name, &m.from_addr, &m.to_addrs, &m.cc_addrs] {
             out.extend(v.clone());
         }
-        for v in [&m.from_addr, &m.to_addrs, &m.cc_addrs] {
-            addrs.extend(
-                v.iter()
-                    .flat_map(|l| l.split(','))
-                    .map(|a| a.trim().to_lowercase()),
-            );
+        addrs.extend(m.from_addr.iter().map(|a| a.to_lowercase()));
+        // The parser of the stored lists: a `,` in a quoted local part
+        // does not split an entry.
+        for v in [&m.to_addrs, &m.cc_addrs] {
+            addrs.extend(v.iter().flat_map(|l| entries(l)).map(|a| a.to_lowercase()));
         }
     }
     let mut st = c.prepare_cached(&format!(

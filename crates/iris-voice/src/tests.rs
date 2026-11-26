@@ -2507,6 +2507,56 @@ fn every_stored_name_of_a_thread_address_is_a_people_word() {
     }
 }
 
+/// Issue #1146: the stored name of each entry of a `To` or `Cc` list is a
+/// people word, also for a quoted local part with a comma in it.
+#[test]
+fn the_stored_name_of_each_list_entry_is_a_people_word() {
+    let (b, t) = asked("people-list-entries");
+    let locals = ["\"a,b\"", "\"c, d\"", "plain", "\"x\\\"y,z\""];
+    let mut seed = 5u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    let mut msgs = vec![];
+    let mut addrs = vec![];
+    for (i, l) in locals.iter().enumerate() {
+        let addr = format!("{l}@ex{i}.org");
+        let mut m = msg(
+            &format!("q-{i}"),
+            &format!("t-q{i}"),
+            5,
+            "INBOX",
+            &addr,
+            "me@example.com",
+            Some("Hi"),
+        );
+        m.header.from_name = Some(format!("Quotedname{i}"));
+        msgs.push(m);
+        addrs.push(addr);
+    }
+    b.store.put_messages(1, &msgs).unwrap();
+    for _ in 0..50 {
+        let mut list: Vec<String> = addrs.clone();
+        for i in (1..list.len()).rev() {
+            list.swap(i, next(i + 1));
+        }
+        let mut snap = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+        snap.newest[0].cc_addrs = Some(list.join(", "));
+        let texts = b
+            .store
+            .read(|c| Ok(people_texts(c, t, "me@example.com", None, &snap.newest)?))
+            .unwrap();
+        let people = people_words(&texts);
+        for i in 0..locals.len() {
+            let w = format!("quotedname{i}");
+            assert!(people.binary_search(&w).is_ok(), "{w} {list:?}");
+        }
+    }
+}
+
 /// Issue #1075: for any commitment, a body that holds one of its key words
 /// names it, and a body of only common words names it only when it has no
 /// key word.
