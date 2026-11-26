@@ -2321,24 +2321,21 @@ fn a_short_commitment_needs_its_short_words() {
     ] {
         assert_eq!(names(body, &ask, none), ok, "{body}");
     }
+    // A common word of 3 letters is no weak key word.
+    let ask = serde_json::json!({"title": "Can you pay?", "quote": "Can you pay it?"});
+    assert_eq!(key_words(&ask, none).0, ["pay", "pay"]);
+    assert!(!names("Can you update me?", &ask, none));
 }
 
 /// Issue #1146: a word of the name or the address of a person of the
 /// thread is no key word, so a greeting does not name the commitment.
 #[test]
 fn a_name_of_a_person_names_no_commitment() {
-    let msgs = [Msg {
-        id: 1,
-        from_addr: Some("priya@example.com".into()),
-        from_name: Some("Priya Raman".into()),
-        to_addrs: Some("Dana <dana@example.com>".into()),
-        cc_addrs: None,
-        subject: "x".into(),
-        text: None,
-        sent: false,
-        sent_to: vec![],
-    }];
-    let people = people_words("dana@example.com", Some("priya@example.com"), &msgs);
+    let people = people_words(&[
+        "dana@example.com".into(),
+        "Priya Raman".into(),
+        "priya@example.com".into(),
+    ]);
     let ask = serde_json::json!({"title": "Priya to check", "quote": "Priya, can you check?"});
     assert_eq!(
         key_words(&ask, &people),
@@ -2349,6 +2346,84 @@ fn a_name_of_a_person_names_no_commitment() {
     // With no other word, a name leaves the commitment with no key word.
     let only = serde_json::json!({"title": "Raman", "quote": null});
     assert!(names("Hi", &only, &people));
+}
+
+/// Issue #1146: for any text of names and addresses, each of its words is a
+/// people word, so a commitment of only such words has no key word.
+#[test]
+fn each_word_of_a_name_is_a_people_word() {
+    let parts = [
+        "Priya",
+        "O'Brien",
+        "José",
+        "Ünal",
+        "李",
+        "bo",
+        "x1",
+        "dana@example.com",
+        ".",
+        " ",
+        ",",
+        "<",
+        ">",
+        "-",
+        "\"",
+        "Ⅷ",
+        "ß",
+    ];
+    let mut seed = 11u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    for _ in 0..2000 {
+        let text: String = (0..1 + next(8)).map(|_| parts[next(parts.len())]).collect();
+        let people = people_words(&[text.clone()]);
+        let ask = serde_json::json!({"title": text, "quote": text});
+        assert!(key_words(&ask, &people).0.is_empty(), "{text:?} {people:?}");
+        assert!(names("Hi", &ask, &people), "{text:?}");
+    }
+}
+
+/// Issue #1146: the name of a recipient comes from the mail that the
+/// recipient sent, because the header keeps only bare `To` addresses. A
+/// body that names only the recipient does not pass.
+#[test]
+fn a_nudge_that_names_only_the_recipient_is_not_saved() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-recipient-name");
+    let mut other = msg(
+        "from-ana",
+        "t-other",
+        500,
+        "INBOX",
+        "ana@example.org",
+        "me@example.com",
+        Some("Hello"),
+    );
+    other.header.from_name = Some("Ana Priyanka".into());
+    b.store.put_messages(1, &[other]).unwrap();
+    understood(&b.store);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET doc = json_set(doc, '$.title', 'Priyanka to send the slides')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    let fake = Fake::new(r#"{"body": "Hi Priyanka, any news? D", "named": [1]}"#);
+    assert!(matches!(
+        nudge(&b.store, &l, &fake, now),
+        Err(Error::BadAnswer(_))
+    ));
+    assert_eq!(saved(&b.store, t), None);
+    let fake = Fake::new(r#"{"body": "Hi Priyanka, the slides? D", "named": [1]}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
 }
 
 /// Issue #1075: for any commitment, a body that holds one of its key words

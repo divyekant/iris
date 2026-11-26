@@ -831,21 +831,70 @@ const COMMON: &[&str] = &[
     "about", "after", "again", "also", "before", "could", "from", "have", "just", "know", "let",
     "like", "need", "please", "send", "sent", "that", "them", "then", "there", "they", "this",
     "what", "when", "will", "with", "would", "your", "yours", "thanks", "thank",
+    // Words of 3 letters: a weak key word is none of these (issue #1154).
+    "all", "and", "any", "are", "ask", "but", "can", "did", "for", "get", "got", "had", "has",
+    "her", "him", "his", "how", "its", "may", "not", "now", "our", "out", "see", "she", "the",
+    "too", "was", "way", "who", "why", "yes", "yet", "you",
 ];
 
-/// The words of the names and addresses of the people of a thread:
-/// the owner `me`, the person `to` of the nudge, and the `From`, `To` and
-/// `Cc` of each message of the snapshot, lowercase. A word of a name says
-/// nothing about one commitment (issue #1146): "Hi Priya" names no promise.
-fn people_words(me: &str, to: Option<&str>, msgs: &[Msg]) -> Vec<String> {
-    let mut all = vec![me.to_string()];
-    all.extend(to.map(str::to_string));
+/// The names and addresses of the people of the thread `thread`: the
+/// owner `me`, the person `to` of the nudge, the `From`, `To` and `Cc` of
+/// each message of the snapshot `msgs`, the `From` of each message of the
+/// thread, and each display name that the store has for one of these
+/// addresses. The header keeps only bare `To` and `Cc` addresses, so the
+/// name of a recipient comes from the mail that the recipient sent.
+fn people_texts(
+    c: &Connection,
+    thread: i64,
+    me: &str,
+    to: Option<&str>,
+    msgs: &[Msg],
+) -> rusqlite::Result<Vec<String>> {
+    let mut out = vec![me.to_string()];
+    out.extend(to.map(str::to_string));
+    let mut addrs = vec![me.to_lowercase()];
+    addrs.extend(to.map(str::to_lowercase));
     for m in msgs {
         for v in [&m.from_name, &m.from_addr, &m.to_addrs, &m.cc_addrs] {
-            all.extend(v.clone());
+            out.extend(v.clone());
+        }
+        for v in [&m.from_addr, &m.to_addrs, &m.cc_addrs] {
+            addrs.extend(
+                v.iter()
+                    .flat_map(|l| l.split(','))
+                    .map(|a| a.trim().to_lowercase()),
+            );
         }
     }
-    let mut out: Vec<String> = all
+    let mut st = c.prepare_cached(&format!(
+        "SELECT DISTINCT h.from_name, h.from_addr {IN_THREAD} AND h.from_addr IS NOT NULL"
+    ))?;
+    for r in st.query_map([thread], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+    })? {
+        let (name, addr) = r?;
+        out.extend(name);
+        out.push(addr);
+    }
+    addrs.sort();
+    addrs.dedup();
+    let mut st = c.prepare_cached(
+        "SELECT DISTINCT from_name FROM header
+         WHERE from_addr = ?1 AND from_name IS NOT NULL LIMIT 8",
+    )?;
+    for a in addrs.iter().filter(|a| !a.is_empty()) {
+        for n in st.query_map([a], |r| r.get::<_, String>(0))? {
+            out.push(n?);
+        }
+    }
+    Ok(out)
+}
+
+/// The words of `texts` (names and addresses, [`people_texts`]),
+/// lowercase, sorted, once each. A word of a name says nothing about one
+/// commitment (issue #1146): "Hi Priya" names no promise.
+fn people_words(texts: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = texts
         .iter()
         .flat_map(|t| t.split(|c: char| !c.is_alphanumeric()))
         .filter(|w| !w.is_empty())
@@ -1107,7 +1156,9 @@ fn write_when(
     let asks: &[Value] = nudge
         .and_then(|n| n.ask.as_array())
         .map_or(&[], Vec::as_slice);
-    let people = people_words(&me, to.as_deref(), &snap.newest);
+    let people = people_words(
+        &store.read(|c| Ok(people_texts(c, thread, &me, to.as_deref(), &snap.newest)?))?,
+    );
     let valid = |r: &iris_model::Reply| {
         read_answer(r, asks.len()).and_then(|b| match asks.iter().all(|a| names(&b, a, &people)) {
             true => Ok(b),

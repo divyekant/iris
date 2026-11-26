@@ -1063,7 +1063,10 @@ The answer of the model must list each number in `named`, or Iris asks
 one more time and then saves no draft (issue #950). The body must also
 name each commitment in words. A key word of a commitment is a word of
 its title, quote or amount that is not a word of the name or the address
-of a person of the thread (issue #1146). A strong key word has 4 letters
+of a person of the thread (issue #1146): the owner, the person of the
+nudge, the `From`, `To` and `Cc` of the messages that the model reads, the
+`From` of each message of the thread, and each display name that the
+store has for one of these addresses. A strong key word has 4 letters
 or more and is not a common word, or has a digit and 2 characters or
 more. One word of the body must start with the first 5 characters of a
 strong key word. If the commitment has no strong key word, a weak key
