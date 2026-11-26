@@ -580,7 +580,10 @@ struct Overlays {
     maps: [(CString, CString); 3],
     /// For each folder: its read path number, its path, and its device
     /// and inode.
+    /// The outer folders come first.
     dirs: Vec<(usize, CString, (u64, u64))>,
+    /// For each folder: true if another read path folder holds it.
+    inner: Vec<bool>,
     /// For each folder, written in the child with no allocation: its
     /// descriptor in the new namespace, and the `lowerdir` value.
     fds: Vec<RawFd>,
@@ -589,16 +592,25 @@ struct Overlays {
 
 impl Overlays {
     fn plan(opened: &[(OwnedFd, PathBuf)]) -> io::Result<Option<Overlays>> {
-        let mut dirs = Vec::new();
+        let mut found = Vec::new();
         for (i, (fd, path)) in opened.iter().enumerate() {
             let m = File::from(fd.try_clone()?).metadata()?;
             if m.is_dir() {
-                dirs.push((i, cstr(path.as_os_str())?, (m.dev(), m.ino())));
+                found.push((i, path, (m.dev(), m.ino())));
             }
         }
-        if dirs.is_empty() {
+        if found.is_empty() {
             return Ok(None);
         }
+        found.sort_by_key(|(_, path, _)| path.components().count());
+        let inner = found
+            .iter()
+            .map(|(_, p, _)| found.iter().any(|(_, o, _)| o != p && p.starts_with(o)))
+            .collect();
+        let dirs = found
+            .into_iter()
+            .map(|(i, path, id)| Ok((i, cstr(path.as_os_str())?, id)))
+            .collect::<io::Result<Vec<_>>>()?;
         let c = |s: &str| CString::new(s).map_err(io::Error::other);
         // SAFETY: getuid and getgid have no memory effects.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -611,6 +623,7 @@ impl Overlays {
             fds: vec![-1; dirs.len()],
             lower: vec![[0; LOWER_LEN]; dirs.len()],
             dirs,
+            inner,
         }))
     }
 
@@ -678,14 +691,32 @@ impl Overlays {
             // Put the overlay on the folder in this namespace, then give
             // its root to bwrap in the place of the folder. The slot holds
             // the checked folder, so the kernel never gives its number.
+            // bwrap 0.11 binds the path of the descriptor, not the object,
+            // so an inner folder goes on the overlay of its outer folder,
+            // which is on its path now. bwrap refuses a mount that is not
+            // at the path.
+            let target = if self.inner[k] {
+                libc::open(
+                    self.dirs[k].1.as_ptr(),
+                    libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            } else {
+                lo
+            };
+            if target < 0 {
+                return err();
+            }
             let moved = libc::syscall(
                 libc::SYS_move_mount,
                 m,
                 c"".as_ptr(),
-                lo,
+                target,
                 c"".as_ptr(),
                 MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
             );
+            if target != lo {
+                libc::close(target);
+            }
             if moved != 0 || libc::dup2(m, slot) < 0 {
                 return err();
             }
