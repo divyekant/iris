@@ -680,4 +680,17 @@ fn a_notice_of_mail_the_model_did_not_read_shows_no_mail_words() {
     assert!(notices_now(&s).is_empty());
     assert_eq!(words(refused).1, "Pay now");
     assert_eq!(words(failed), unchecked);
+    // With no notify rule left, the pass still writes the words of a
+    // notice whose understanding finished.
+    activate(&s, &ANN.replace("notify", "hide"));
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET understood_at = ?2 WHERE id = ?1",
+            params![failed, NOW],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notices_now(&s).is_empty());
+    assert_eq!(words(failed).1, "Lunch?");
 }

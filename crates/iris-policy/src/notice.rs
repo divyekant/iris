@@ -23,9 +23,9 @@ pub const LATE_MS: i64 = 24 * WINDOW_MS;
 /// the words of the mail (issue #1045).
 pub const MODEL_WAIT_MS: i64 = 5 * 60_000;
 
-/// The title of a notice of a mail that the model did not read yet.
+/// The title of a notice of a mail whose understanding did not finish ([`CHECKED`]).
 pub const UNCHECKED_TITLE: &str = "Mail not checked yet";
-/// The text of a notice of a mail that the model did not read yet.
+/// The text of a notice of a mail whose understanding did not finish.
 pub const UNCHECKED_TEXT: &str = "Iris shows the sender and the subject after the phishing check.";
 
 /// The most characters of the title and of the text of a notice.
@@ -64,12 +64,16 @@ pub struct Notice {
 /// too: its link check did not run yet (migration 20). When a model is set,
 /// a mail that understanding did not read yet waits up to [`MODEL_WAIT_MS`]
 /// after its fetch, for a model `phishing` mark, while the model can read
-/// it (`iris_store::model_can_read!`). The notice of a mail that the model
-/// did not read shows no words of the mail, until the model reads it. Each guard reads the store in the
+/// it (`iris_store::model_can_read!`). The notice of a mail whose
+/// understanding did not finish shows no words of the mail, until it
+/// finishes ([`CHECKED`]). Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
     store.write(|tx| {
+        // Before each other step: a notice that a removed rule gave stays
+        // open, and gets its words too.
+        fill_checked(tx)?;
         let active = crate::active(tx)?;
         let Some(version) = active.version else {
             return Ok(Vec::new());
@@ -106,25 +110,6 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                 |r| r.get(0),
             )?
             .collect::<rusqlite::Result<_>>()?;
-        // A notice of a mail that the model read after the notice gets the
-        // words of the mail. A hostile mail keeps the words of the notice:
-        // its notice is not open.
-        let checked: Vec<i64> = tx
-            .prepare(concat!(
-                "SELECT m.id FROM notice n JOIN message m ON m.id = n.message_id
-                 WHERE n.title = ?1 AND n.text = ?2 AND m.understood_at IS NOT NULL
-                   AND NOT ", iris_store::may_be_hostile!(), "
-                   AND NOT ", iris_store::hostile_mail!(),
-            ))?
-            .query_map(params![UNCHECKED_TITLE, UNCHECKED_TEXT], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for id in checked {
-            let (title, text) = words(tx, id, true)?;
-            tx.execute(
-                "UPDATE notice SET title = ?2, text = ?3 WHERE message_id = ?1",
-                params![id, title, text],
-            )?;
-        }
         let now = now_ms.div_euclid(1000);
         let mut out = Vec::new();
         for id in ids {
@@ -163,15 +148,49 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
     })
 }
 
-/// True if no model is set or the model read message `id`: its notice can
-/// show the words of the mail.
+/// The SQL condition "the notice of message `m` can show the words of the
+/// mail": no model is set, or the understanding of `m` finished
+/// (`understood_at`). The understanding finishes after the model read the
+/// mail, or with no model call when a fixed rule completes it or the
+/// sender is a declined stranger (spec 1 section 7.3, decision D29): the
+/// same end of understanding that guard 4 waits for (issue #321).
+const CHECKED: &str = "(NOT EXISTS (SELECT 1 FROM model_setting) OR m.understood_at IS NOT NULL)";
+
+/// True if the notice of message `id` can show the words of the mail
+/// ([`CHECKED`]).
 fn checked_mail(tx: &Connection, id: i64) -> Result<bool> {
-    Ok(tx.query_row(
-        "SELECT NOT EXISTS (SELECT 1 FROM model_setting)
-             OR EXISTS (SELECT 1 FROM message WHERE id = ?1 AND understood_at IS NOT NULL)",
-        [id],
-        |r| r.get(0),
-    )?)
+    Ok(tx
+        .query_row(
+            &format!("SELECT {CHECKED} FROM message m WHERE m.id = ?1"),
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// Writes the words of the mail into each notice with the words
+/// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`] whose mail is [`CHECKED`]
+/// now. A hostile mail keeps the neutral words: its notice is not open.
+fn fill_checked(tx: &Connection) -> Result<()> {
+    let ids: Vec<i64> = tx
+        .prepare(&format!(
+            "SELECT m.id FROM notice n JOIN message m ON m.id = n.message_id
+             WHERE n.title = ?1 AND n.text = ?2 AND {CHECKED}
+               AND NOT {} AND NOT {}",
+            iris_store::may_be_hostile!(),
+            iris_store::hostile_mail!()
+        ))?
+        .query_map(params![UNCHECKED_TITLE, UNCHECKED_TEXT], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in ids {
+        let (title, text) = words(tx, id, true)?;
+        tx.execute(
+            "UPDATE notice SET title = ?2, text = ?3 WHERE message_id = ?1",
+            params![id, title, text],
+        )?;
+    }
+    Ok(())
 }
 
 /// The sender and the subject of a message, one line each. A mail that is
