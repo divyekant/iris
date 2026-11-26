@@ -52,6 +52,12 @@ pub struct Notice {
     pub text: String,
     /// Milliseconds since 1970-01-01 UTC.
     pub created_at: i64,
+    /// False for a rule notice whose mail is not checked now
+    /// ([`checked_sql`], issue #1045): `title` and `text` are then
+    /// [`UNCHECKED_TITLE`] and [`UNCHECKED_TEXT`], and each output that adds
+    /// words of the mail to the notice (a sender, a subject) must leave them
+    /// out. True for a job notice.
+    pub checked: bool,
 }
 
 /// Adds a notice for each new mail that a `notify` rule of the active
@@ -125,7 +131,8 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
             // The row keeps the words of the mail. Each read shows them only
             // while the mail is checked ([`shown_words`]).
             let (title, text) = words(tx, id)?;
-            let (shown_title, shown_text) = if checked_mail(tx, id)? {
+            let checked = checked_mail(tx, id)?;
+            let (shown_title, shown_text) = if checked {
                 (title.clone(), text.clone())
             } else {
                 (UNCHECKED_TITLE.to_string(), UNCHECKED_TEXT.to_string())
@@ -145,6 +152,7 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                     title: shown_title,
                     text: shown_text,
                     created_at: now_ms,
+                    checked,
                 });
             }
         }
@@ -333,6 +341,7 @@ fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec
                 title,
                 text,
                 created_at: r.get(8)?,
+                checked,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

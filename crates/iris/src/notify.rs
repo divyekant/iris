@@ -261,6 +261,7 @@ mod tests {
             title: "t".into(),
             text: "x".into(),
             created_at: 0,
+            checked: true,
         }
     }
 
@@ -275,6 +276,7 @@ mod tests {
             title: "j-7".into(),
             text: "é".repeat(300),
             created_at: 0,
+            checked: true,
         };
         let n = Shown::rule(&d);
         assert_eq!(n.notice, Some(9));
