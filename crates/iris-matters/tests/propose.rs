@@ -995,3 +995,48 @@ fn a_cancelled_call_starts_no_wait_and_counts_for_the_hour() {
     assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, None);
     assert_eq!(f.data.borrow().len(), 1);
 }
+
+/// A model that must get no call.
+struct NoCall;
+
+impl Model for NoCall {
+    fn name(&self) -> &str {
+        "fake"
+    }
+    fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
+        panic!("no request goes out")
+    }
+    fn ask_cancel(&self, _: &str, _: &str, _: &dyn Fn() -> bool) -> Result<Reply, ModelError> {
+        panic!("no request goes out")
+    }
+}
+
+/// Issue #1175: a waiter of the run lock that comes before the request
+/// stops the step with no request. The attempt is undone: no run row stays,
+/// `tried_at` keeps its old value, and the next hourly step calls.
+#[test]
+fn a_waiter_before_the_call_keeps_the_hourly_slot() {
+    let b = setup("waitfirst", 3, &titles(3), &["record"]);
+    let want = b.store.dir().join(iris_understand::batch::WANT_FILE);
+    let held = RefCell::new(None);
+    let connect = |_: &ModelRow| -> Result<std::boxed::Box<dyn Model>, String> {
+        // The waiter comes after the step took the run lock.
+        *held.borrow_mut() = iris_store::FileLock::try_take(&want).unwrap();
+        assert!(held.borrow().is_some());
+        Ok(std::boxed::Box::new(NoCall))
+    };
+    let o = propose(&b.store, &connect, Gate::Hourly, NOW).unwrap();
+    drop(held.take());
+    assert!(!o.failed);
+    assert_eq!(col(&b, "SELECT count(*) FROM understand_run"), 0);
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM matter_run WHERE tried_at IS NOT NULL"
+        ),
+        0
+    );
+    let f = fake(vec![]);
+    assert_eq!(run(&b, &f, Gate::Hourly, NOW + 1).skip, None);
+    assert_eq!(f.data.borrow().len(), 1);
+}
