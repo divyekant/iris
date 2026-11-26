@@ -286,8 +286,9 @@ Ask when they can do them. Do not repeat all of the mail.";
 ///
 /// A nudge of another version is not ready, so a change of the rules of a
 /// nudge (as the words check of #1075) makes each older nudge stale, and
-/// the late thread gets a new one.
-pub const NUDGE_PROMPT: &str = "nudge/0.4";
+/// the late thread gets a new one. 0.5: the words check leaves out the
+/// names of the people and checks the short words of a short commitment.
+pub const NUDGE_PROMPT: &str = "nudge/0.5";
 
 /// The instruction of a nudge.
 fn nudge_instruction() -> String {
@@ -830,14 +831,91 @@ const COMMON: &[&str] = &[
     "about", "after", "again", "also", "before", "could", "from", "have", "just", "know", "let",
     "like", "need", "please", "send", "sent", "that", "them", "then", "there", "they", "this",
     "what", "when", "will", "with", "would", "your", "yours", "thanks", "thank",
+    // Words of 3 letters: a weak key word is none of these (issue #1154).
+    "all", "and", "any", "are", "ask", "but", "can", "did", "for", "get", "got", "had", "has",
+    "her", "him", "his", "how", "its", "may", "not", "now", "our", "out", "see", "she", "the",
+    "too", "was", "way", "who", "why", "yes", "yet", "you",
 ];
 
+/// The names and addresses of the people of the thread `thread`: the
+/// owner `me`, the person `to` of the nudge, the `From`, `To` and `Cc` of
+/// each message of the snapshot `msgs`, the `From` of each message of the
+/// thread, and each display name that the store has for one of these
+/// addresses (also for a sender of an older message of the thread). The
+/// header keeps only bare `To` and `Cc` addresses, so the name of a
+/// recipient comes from the mail that the recipient sent. The memory grows
+/// with the count of distinct names of these addresses.
+fn people_texts(
+    c: &Connection,
+    thread: i64,
+    me: &str,
+    to: Option<&str>,
+    msgs: &[Msg],
+) -> rusqlite::Result<Vec<String>> {
+    let mut out = vec![me.to_string()];
+    out.extend(to.map(str::to_string));
+    let mut addrs = vec![me.to_lowercase()];
+    addrs.extend(to.map(str::to_lowercase));
+    for m in msgs {
+        for v in [&m.from_name, &m.from_addr, &m.to_addrs, &m.cc_addrs] {
+            out.extend(v.clone());
+        }
+        addrs.extend(m.from_addr.iter().map(|a| a.to_lowercase()));
+        // The parser of the stored lists: a `,` in a quoted local part
+        // does not split an entry.
+        for v in [&m.to_addrs, &m.cc_addrs] {
+            addrs.extend(v.iter().flat_map(|l| entries(l)).map(|a| a.to_lowercase()));
+        }
+    }
+    let mut st = c.prepare_cached(&format!(
+        "SELECT DISTINCT h.from_name, h.from_addr {IN_THREAD} AND h.from_addr IS NOT NULL"
+    ))?;
+    for r in st.query_map([thread], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+    })? {
+        let (name, addr) = r?;
+        out.extend(name);
+        addrs.push(addr.to_lowercase());
+        out.push(addr);
+    }
+    addrs.sort();
+    addrs.dedup();
+    let mut st = c.prepare_cached(
+        "SELECT DISTINCT from_name FROM header
+         WHERE from_addr = ?1 AND from_name IS NOT NULL",
+    )?;
+    for a in addrs.iter().filter(|a| !a.is_empty()) {
+        for n in st.query_map([a], |r| r.get::<_, String>(0))? {
+            out.push(n?);
+        }
+    }
+    Ok(out)
+}
+
+/// The words of `texts` (names and addresses, [`people_texts`]),
+/// lowercase, sorted, once each. A word of a name says nothing about one
+/// commitment (issue #1146): "Hi Priya" names no promise.
+fn people_words(texts: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = texts
+        .iter()
+        .flat_map(|t| t.split(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The key words of a commitment of a nudge: the words of its title, its
-/// quote and its amount, lowercase. A word counts if it has 4 letters or
-/// more and is not in [`COMMON`], or if it has a digit and 2 characters
-/// or more (an amount, a date).
-fn key_words(ask: &Value) -> Vec<String> {
-    let mut out = vec![];
+/// quote and its amount, lowercase, with no word of `people`
+/// ([`people_words`]). Strong words first: a word with 4 letters or more
+/// that is not in [`COMMON`], or a word with a digit and 2 characters or
+/// more (an amount, a date). True with them. If the commitment has no
+/// strong word, its weak words (issue #1154): a word with a digit (as the
+/// "5" of "Pay $5"), or a word of 3 letters that is not in [`COMMON`].
+/// False with them: the body must hold the same word.
+fn key_words(ask: &Value, people: &[String]) -> (Vec<String>, bool) {
     // The text of the scalar values only: an amount is an object, and its
     // field names ("value", "currency") are no words of the commitment.
     fn texts(v: &Value, out: &mut Vec<String>) {
@@ -853,25 +931,36 @@ fn key_words(ask: &Value) -> Vec<String> {
     for field in ["title", "quote", "amount"] {
         texts(&ask[field], &mut all);
     }
+    let (mut strong, mut weak) = (vec![], vec![]);
     for text in all {
         for w in text.split(|c: char| !c.is_alphanumeric()) {
             let w = w.to_lowercase();
+            if w.is_empty() || people.binary_search(&w).is_ok() {
+                continue;
+            }
             let n = w.chars().count();
             let digit = w.chars().any(|c| c.is_ascii_digit());
-            if (digit && n >= 2) || (!digit && n >= 4 && !COMMON.contains(&w.as_str())) {
-                out.push(w);
+            let common = COMMON.contains(&w.as_str());
+            if (digit && n >= 2) || (!digit && n >= 4 && !common) {
+                strong.push(w);
+            } else if digit || (n == 3 && !common) {
+                weak.push(w);
             }
         }
     }
-    out
+    match strong.is_empty() {
+        true => (weak, false),
+        false => (strong, true),
+    }
 }
 
-/// True if `body` names the commitment `ask` of a nudge: a word of the
-/// body starts with the first 5 characters of a key word ([`key_words`]),
-/// so "invoices" names "invoice". The model rewords each promise, so one
-/// key word is enough. A commitment with no key word passes.
-fn names(body: &str, ask: &Value) -> bool {
-    let keys = key_words(ask);
+/// True if `body` names the commitment `ask` of a nudge ([`key_words`]).
+/// A strong key word matches a word of the body that starts with its
+/// first 5 characters, so "invoices" names "invoice". A weak key word
+/// matches only the same word. The model rewords each promise, so one key
+/// word is enough. A commitment with no key word passes.
+fn names(body: &str, ask: &Value, people: &[String]) -> bool {
+    let (keys, strong) = key_words(ask, people);
     if keys.is_empty() {
         return true;
     }
@@ -882,7 +971,9 @@ fn names(body: &str, ask: &Value) -> bool {
         .collect();
     keys.iter().any(|k| {
         let stem: String = k.chars().take(5).collect();
-        words.iter().any(|w| w.starts_with(&stem))
+        words
+            .iter()
+            .any(|w| if strong { w.starts_with(&stem) } else { w == k })
     })
 }
 
@@ -1067,8 +1158,11 @@ fn write_when(
     let asks: &[Value] = nudge
         .and_then(|n| n.ask.as_array())
         .map_or(&[], Vec::as_slice);
+    let people = people_words(
+        &store.read(|c| Ok(people_texts(c, thread, &me, to.as_deref(), &snap.newest)?))?,
+    );
     let valid = |r: &iris_model::Reply| {
-        read_answer(r, asks.len()).and_then(|b| match asks.iter().all(|a| names(&b, a)) {
+        read_answer(r, asks.len()).and_then(|b| match asks.iter().all(|a| names(&b, a, &people)) {
             true => Ok(b),
             false => Err(Error::BadAnswer("the reminder leaves out a commitment")),
         })

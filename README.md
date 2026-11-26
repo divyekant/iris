@@ -344,6 +344,13 @@ read_paths = ["/home/me/.nvm/versions/node/v22.11.0", "/home/me/tools"]
   `/dev`, `/run`, `/tmp` and others); or holds a socket, a FIFO, a device,
   a mount point, or a file with more than one hard link on the device of
   the data folder or of a home folder.
+- On Linux, a folder in a read path needs a kernel that permits an
+  overlay in a user namespace (Linux 5.11 or later). If the system limits
+  user namespaces to programs with an AppArmor profile (Ubuntu 24.04 and
+  later), give the `iris` program a profile with `userns`, as for `bwrap`.
+  Else a session with a read path folder does not start. A socket that a
+  program makes in the folder during a session is not reachable from the
+  session.
 - The built-in agents get no read paths. They sign in only with their
   variables.
 

@@ -1299,14 +1299,21 @@ fn context_key(
     // The known parties of the data: all of them, or with a room of the
     // budget, the first ones that fit in it now, and "+" if the list has
     // more. So a party that starts to fit changes the record.
+    // The record hashes the text of each party that the data holds (cut and
+    // escaped), not the full party: a change after the cut is not data.
     let parties = known_parties(c, thread, message, date)?;
+    let texts: Vec<String> = parties
+        .iter()
+        .map(|p| crate::prompt::party_text(p))
+        .collect();
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
     let parties: Vec<&str> = parties.iter().map(String::as_str).collect();
     let p = match parties_room {
-        None => format!("p:{:016x}", fnv(&parties)),
+        None => format!("p:{:016x}", fnv(&texts)),
         Some(room) => {
             let n = crate::prompt::parties_in(&parties, room);
             let more = if n < parties.len() { "+" } else { "" };
-            format!("p!:{room}:{:016x}{more}", fnv(&parties[..n]))
+            format!("p!:{room}:{:016x}{more}", fnv(&texts[..n]))
         }
     };
     let cut = if held.is_some() { "!" } else { "" };

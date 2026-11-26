@@ -743,31 +743,11 @@ fn a_stop_during_the_hello_logs_the_host() {
     );
 }
 
-#[test]
-fn session_addresses_are_distinct_loopback_addresses() {
-    assert_eq!(session_peer(0), None);
-    assert_eq!(session_peer(-1), None);
-    assert_eq!(session_peer(SESSION_MAX + 1), None);
-    assert_eq!(session_peer(1), Some(Ipv4Addr::new(127, 128, 0, 1)));
-    assert_eq!(
-        session_peer(SESSION_MAX),
-        Some(Ipv4Addr::new(127, 255, 255, 254))
-    );
-    let mut r = Rng(11);
-    for _ in 0..2000 {
-        let a = 1 + r.next(SESSION_MAX as u64) as i64;
-        let b = 1 + r.next(SESSION_MAX as u64) as i64;
-        let (pa, pb) = (session_peer(a).unwrap(), session_peer(b).unwrap());
-        assert!(pa.is_loopback() && pa != Ipv4Addr::LOCALHOST);
-        assert_eq!(pa == pb, a == b, "{a} {b}");
-    }
-}
-
-/// The relay of session 8 reaches the port of session 7 (for example after
-/// an engine crash gave the port to another session): the proxy refuses it.
+/// A proxy with a peer address refuses a client from each other address.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_proxy_takes_only_its_session_address() {
+fn the_proxy_takes_only_its_peer_address() {
+    let (own, foreign) = (Ipv4Addr::new(127, 128, 0, 7), Ipv4Addr::new(127, 128, 0, 8));
     let log = std::env::temp_dir().join(format!("iris-egress-peer-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&log);
     let guard = LogFile(log.clone());
@@ -781,19 +761,19 @@ fn the_proxy_takes_only_its_session_address() {
         file,
         Box::new(Fixed(echo())),
         false,
-        session_peer(7),
+        Some(own),
         None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
     .unwrap();
     let head = "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n";
-    let other = connect_from(session_peer(8).unwrap(), proxy.port()).unwrap();
+    let other = connect_from(foreign, proxy.port()).unwrap();
     let (_s, line) = send_on(other, head);
     assert!(line.starts_with("HTTP/1.1 403"), "{line}");
     let (_s, line) = send(&proxy, head);
     assert!(line.starts_with("HTTP/1.1 403"), "{line}");
-    let own = connect_from(session_peer(7).unwrap(), proxy.port()).unwrap();
+    let own = connect_from(own, proxy.port()).unwrap();
     let (_s, line) = send_on(own, head);
     assert!(line.starts_with("HTTP/1.1 200"), "{line}");
     drop(_s);
@@ -1057,14 +1037,14 @@ fn close_comes_before_the_address_check() {
         file,
         Box::new(Fixed(echo())),
         false,
-        session_peer(7),
+        Some(Ipv4Addr::new(127, 128, 0, 7)),
         None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
     .unwrap();
     proxy.close();
-    for from in [session_peer(8).unwrap(), Ipv4Addr::LOCALHOST] {
+    for from in [Ipv4Addr::new(127, 128, 0, 8), Ipv4Addr::LOCALHOST] {
         let mut s = connect_from(from, proxy.port()).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let _ = s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
@@ -1086,4 +1066,276 @@ fn wait_until(f: impl Fn() -> bool) -> bool {
         thread::sleep(Duration::from_millis(10));
     }
     false
+}
+
+/// The ClientHello of `name` with `extra` extensions (type, body) put in
+/// its extension list at `at` (cut to the list), in TLS records of at most
+/// `record` bytes each.
+fn hello_with(name: &str, extra: &[(u16, Vec<u8>)], at: usize, record: usize) -> Vec<u8> {
+    let one = hello(name);
+    assert_eq!(one[0], 22);
+    let mut msg = one[5..].to_vec();
+    // The start of the extension list: after the type, length, version,
+    // random, session ID, cipher suites and compression methods.
+    let mut p = 4 + 2 + 32;
+    p += 1 + msg[p] as usize;
+    p += 2 + u16::from_be_bytes([msg[p], msg[p + 1]]) as usize;
+    p += 1 + msg[p] as usize;
+    let list = p + 2;
+    // The offset of the extension number `at`, or the end of the list.
+    let mut q = list;
+    for _ in 0..at {
+        if q >= msg.len() {
+            break;
+        }
+        q += 4 + u16::from_be_bytes([msg[q + 2], msg[q + 3]]) as usize;
+    }
+    let mut added = Vec::new();
+    for (t, body) in extra {
+        added.extend_from_slice(&t.to_be_bytes());
+        added.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        added.extend_from_slice(body);
+    }
+    msg.splice(q.min(msg.len())..q.min(msg.len()), added);
+    let ext_len = (msg.len() - list) as u16;
+    msg[p..p + 2].copy_from_slice(&ext_len.to_be_bytes());
+    let body_len = (msg.len() - 4) as u32;
+    msg[1..4].copy_from_slice(&body_len.to_be_bytes()[1..]);
+    let mut out = Vec::new();
+    for chunk in msg.chunks(record.max(1)) {
+        out.extend_from_slice(&[22, 3, 1]);
+        out.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+        out.extend_from_slice(chunk);
+    }
+    out
+}
+
+/// The body of an outer `encrypted_client_hello` extension: HKDF-SHA256,
+/// AES-128-GCM, config 7, a 32-byte `enc` and a 16-byte payload.
+fn ech_outer() -> Vec<u8> {
+    let mut b = vec![0, 0, 1, 0, 1, 7, 0, 32];
+    b.extend_from_slice(&[0x11; 32]);
+    b.extend_from_slice(&[0, 16]);
+    b.extend_from_slice(&[0x22; 16]);
+    b
+}
+
+/// Issue 426: a ClientHello with Encrypted Client Hello (or the older ESNI
+/// draft) and the SNI of the allowed host gets no tunnel: its true server
+/// name is hidden from the proxy.
+#[test]
+fn a_tunnel_refuses_a_hidden_server_name() {
+    let b = proxy("ech", echo(), false, LOG_LIMIT);
+    for t in HIDDEN_NAME {
+        let bytes = hello_with("api.example.test", &[(t, ech_outer())], 3, 300);
+        let (mut s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+        assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+        s.write_all(&bytes).unwrap();
+        let mut buf = [0u8; 64];
+        assert_eq!(s.read(&mut buf).unwrap_or(0), 0, "{t:#x}");
+    }
+    // An unknown extension and records of 100 bytes still pass.
+    let bytes = hello_with("api.example.test", &[(0x7a7a, vec![9])], 0, 100);
+    let (mut s, _) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    s.write_all(&bytes).unwrap();
+    let mut got = vec![0u8; bytes.len()];
+    s.read_exact(&mut got).unwrap();
+    assert_eq!(got, bytes);
+    drop(s);
+    b.proxy.stop().unwrap();
+    assert_eq!(log_text(&b.log).matches("reason=ech").count(), 2);
+}
+
+/// Property test of the extension reader: for random extension lists, at
+/// random places and in random record sizes, the check refuses the hello
+/// exactly when it holds a type that hides the name. Cut and mutated bytes
+/// never panic, and never pass with a hidden name.
+#[test]
+fn the_extension_reader_finds_each_hidden_name() {
+    let mut r = Rng(426);
+    for _ in 0..400 {
+        let mut extra = Vec::new();
+        for _ in 0..r.next(4) {
+            let t = match r.next(6) {
+                0 => HIDDEN_NAME[r.next(2) as usize],
+                // Types that rustls does not know, so no duplicate.
+                _ => 0x7000 + r.next(0x0fff) as u16,
+            };
+            if extra.iter().any(|(e, _)| *e == t) {
+                continue;
+            }
+            let body: Vec<u8> = if HIDDEN_NAME.contains(&t) && r.next(2) == 0 {
+                ech_outer()
+            } else {
+                (0..r.next(40)).map(|_| r.next(256) as u8).collect()
+            };
+            extra.push((t, body));
+        }
+        let hidden = extra.iter().any(|(t, _)| HIDDEN_NAME.contains(t));
+        let bytes = hello_with(
+            "api.example.test",
+            &extra,
+            r.next(12) as usize,
+            1 + r.next(600) as usize,
+        );
+        let types = types_of(&bytes).expect("a whole hello");
+        for (t, _) in &extra {
+            assert!(types.contains(t), "{t:#x} in {types:x?}");
+        }
+        let got = check_hello(&bytes, "api.example.test");
+        if hidden {
+            // rustls refuses an `encrypted_client_hello` body that it
+            // cannot read (`not_tls`); each other hidden name is `ech`.
+            let read = extra
+                .iter()
+                .all(|(t, b)| *t != HIDDEN_NAME[0] || *b == ech_outer());
+            assert!(
+                matches!(got, Err(Reason::Ech)) || (!read && matches!(got, Err(Reason::NotTls))),
+                "{extra:x?}"
+            );
+        } else {
+            assert!(matches!(got, Ok(true)), "{extra:x?}");
+        }
+        // A cut or a changed byte: no panic, and no pass of a hidden name.
+        let cut = &bytes[..r.next(bytes.len() as u64) as usize];
+        let _ = types_of(cut);
+        let mut bad = bytes.clone();
+        let i = r.next(bad.len() as u64) as usize;
+        bad[i] ^= 1 + r.next(255) as u8;
+        // A changed byte can also change the type of the extension.
+        if matches!(check_hello(&bad, "api.example.test"), Ok(true)) {
+            let types = types_of(&bad).expect("a passed hello is whole");
+            assert!(!types.iter().any(|t| HIDDEN_NAME.contains(t)), "{types:x?}");
+        }
+    }
+}
+
+/// The extension types of the ClientHello at the start of `buf`.
+fn types_of(buf: &[u8]) -> Option<Vec<u16>> {
+    let mut types = Vec::new();
+    hello_extensions(buf, |t| types.push(t)).map(|()| types)
+}
+
+/// A proxy of a Linux session on its socket pair, with a loopback server.
+#[cfg(target_os = "linux")]
+fn channel_proxy(name: &str) -> (Proxy, UnixStream, LogFile) {
+    let log = std::env::temp_dir().join(format!("iris-egress-{name}-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let (engine, helper) = UnixStream::pair().unwrap();
+    let proxy = Proxy::start_on(
+        Source::Channel(engine),
+        EGRESS_PORT,
+        allowed(),
+        file,
+        Box::new(Fixed(echo())),
+        false,
+        None,
+        None,
+        LOG_LIMIT,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
+    (proxy, helper, LogFile(log))
+}
+
+/// A connection of the agent, as the helper hands it over: the proxy end
+/// goes on the pair, the agent end stays with the test.
+#[cfg(target_os = "linux")]
+fn hand_over(helper: &UnixStream) -> io::Result<TcpStream> {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let agent = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+    let (inner, _) = l.accept().unwrap();
+    // SAFETY: both descriptors are open for the call.
+    if unsafe { crate::isolation::linux::send_fd(helper.as_raw_fd(), inner.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(agent)
+}
+
+/// Issue 507: the proxy of a Linux session has no port. A connection that
+/// the helper sends on the pair gets a tunnel; after the end of the proxy
+/// side, the helper cannot send one more, so it reaches no other process.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_channel_proxy_takes_connections_only_from_its_pair() {
+    let (proxy, helper, log) = channel_proxy("channel");
+    assert_eq!(proxy.endpoint().port, EGRESS_PORT);
+    let agent = hand_over(&helper).unwrap();
+    let (mut s, line) = send_on(agent, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    let mut sent = hello("api.example.test");
+    sent.extend_from_slice(b"ping");
+    s.write_all(&sent).unwrap();
+    let mut got = vec![0u8; sent.len()];
+    s.read_exact(&mut got).unwrap();
+    assert_eq!(got, sent);
+    drop(s);
+    // The engine ends: the helper end gets an error, never a new peer.
+    proxy.stop().unwrap();
+    let mut refused = 0;
+    for _ in 0..3 {
+        refused += hand_over(&helper).is_err() as usize;
+    }
+    assert_eq!(refused, 3);
+    let text = log_text(&log);
+    assert_eq!(text.lines().count(), 1, "{text}");
+}
+
+/// The helper ends first: the proxy sees the end of the pair, does not spin,
+/// and stops at once.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_channel_proxy_stops_after_the_end_of_the_helper() {
+    let (proxy, helper, _log) = channel_proxy("channel-end");
+    drop(helper);
+    thread::sleep(Duration::from_millis(100));
+    let start = Instant::now();
+    proxy.stop().unwrap();
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+/// A descriptor that is not a TCP connection is closed with no answer and
+/// no log line, a message with no descriptor is dropped, and the proxy
+/// goes on.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_channel_proxy_closes_a_descriptor_that_is_not_tcp() {
+    let (proxy, helper, log) = channel_proxy("channel-unix");
+    let (mut mine, theirs) = UnixStream::pair().unwrap();
+    // SAFETY: both descriptors are open for the call.
+    assert_eq!(
+        unsafe { crate::isolation::linux::send_fd(helper.as_raw_fd(), theirs.as_raw_fd()) },
+        0
+    );
+    drop(theirs);
+    mine.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut b = [0u8; 1];
+    assert_eq!(mine.read(&mut b).unwrap(), 0, "the proxy closed it");
+    // A message with no descriptor is dropped too; the pair still works.
+    (&helper).write_all(b"x").unwrap();
+    let agent = hand_over(&helper).unwrap();
+    let (_s, line) = send_on(agent, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    drop(_s);
+    proxy.stop().unwrap();
+    assert_eq!(log_text(&log).lines().count(), 1);
+}
+
+#[test]
+fn the_sandbox_port_is_never_the_local_port() {
+    for local in [
+        None,
+        Some(1),
+        Some(EGRESS_PORT - 1),
+        Some(EGRESS_PORT),
+        Some(EGRESS_PORT + 1),
+        Some(u16::MAX),
+    ] {
+        assert_ne!(Some(sandbox_port(local)), local);
+    }
 }

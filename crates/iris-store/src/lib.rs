@@ -19,6 +19,31 @@ macro_rules! may_be_hostile {
     };
 }
 
+/// The SQL condition "the model can read message `m` at the time `$now`
+/// (an SQL term, milliseconds)": the model health signal (issue #1045). It
+/// reads the same state as the pending rule of the runner
+/// (`iris_understand::batch`), with its times:
+/// - a model is set, and its wait after model errors
+///   (`model_setting.retry_at`) is not running at `$now` ("Try now" ends
+///   it);
+/// - the budget or the model row did not refuse the mail (`waits_model` is
+///   1); the mark 2 of the error wait ends with that wait;
+/// - the mail has a try left (`tries` below 3,
+///   `iris_understand::store::MAX_TRIES`) and its retry time
+///   (`retry_at`) is not after `$now`.
+#[macro_export]
+macro_rules! model_can_read {
+    ($now:literal) => {
+        concat!(
+            "(EXISTS (SELECT 1 FROM model_setting ms WHERE ms.retry_at IS NULL OR ms.retry_at <= ",
+            $now,
+            ") AND m.waits_model <> 1 AND m.tries < 3 AND (m.retry_at IS NULL OR m.retry_at <= ",
+            $now,
+            "))"
+        )
+    };
+}
+
 /// The SQL condition "message `m` is hostile mail": a hostile mark, the
 /// label `SPAM`, or a `hostile` sender (specification 1, section 6.7).
 /// Understanding deletes the unpinned items of such a message. Each read
@@ -131,8 +156,7 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{
-    Backup, BackupLock, Cleaned, PolicyExpect, PolicyWrite, SkippedDrafts, ATTACH_BATCH,
-    DRAFT_FILES_MAX, DRAFT_FILE_MAX, GONE_KEEP_MS,
+    Backup, BackupLock, Cleaned, PolicyExpect, PolicyWrite, ATTACH_BATCH, GONE_KEEP_MS,
 };
 pub use content::ContentWriter;
 pub use file_lock::{FileLock, Probe};

@@ -103,13 +103,15 @@ impl Shown {
 }
 
 /// Starts the thread that shows each notice that it gets with `show`, one
-/// at a time, if `open` is still true just before (see [`Shown::notice`]).
-/// A notice can wait in the queue while its mail becomes hostile, so the
-/// check runs at the show, not at the send (decision D33). The sender never
+/// at a time. Just before the show, `fresh` reads a notice row again (see
+/// [`Shown::notice`]): `None` if it is no longer open, else the words to
+/// show now. A notice can wait in the queue while its mail becomes hostile
+/// or its check changes, so the check runs at the show, not at the send
+/// (decision D33, issue #1045). The sender never
 /// waits: a slow command must not hold the attention thread (spec: the pass
 /// runs each 10 seconds).
 pub fn spawn(
-    open: impl Fn(i64) -> bool + Send + 'static,
+    fresh: impl Fn(i64) -> Option<Shown> + Send + 'static,
     show: fn(&Shown),
 ) -> std::sync::mpsc::SyncSender<Shown> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Shown>(QUEUE);
@@ -117,7 +119,10 @@ pub fn spawn(
         .name("notices".into())
         .spawn(move || {
             rx.iter()
-                .filter(|n| n.notice.is_none_or(&open))
+                .filter_map(|n| match n.notice {
+                    Some(id) => fresh(id),
+                    None => Some(n),
+                })
                 .for_each(|n| show(&n))
         });
     tx
@@ -261,6 +266,7 @@ mod tests {
             title: "t".into(),
             text: "x".into(),
             created_at: 0,
+            checked: true,
         }
     }
 
@@ -275,6 +281,7 @@ mod tests {
             title: "j-7".into(),
             text: "é".repeat(300),
             created_at: 0,
+            checked: true,
         };
         let n = Shown::rule(&d);
         assert_eq!(n.notice, Some(9));
@@ -286,7 +293,10 @@ mod tests {
     #[test]
     fn slow_system_notices_never_hold_the_sender() {
         // Each notice takes 1 second to show. The sends still end at once.
-        let tx = spawn(|_| true, |_| std::thread::sleep(Duration::from_secs(1)));
+        let tx = spawn(
+            |id| Some(Shown::rule(&notice(id))),
+            |_| std::thread::sleep(Duration::from_secs(1)),
+        );
         let t = Instant::now();
         for id in 0..(QUEUE as i64 + 20) {
             let _ = tx.try_send(Shown::rule(&notice(id)));
@@ -303,7 +313,7 @@ mod tests {
         static SHOWN: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
         // Notice 2 became hostile while it waited in the queue.
         let tx = spawn(
-            |id| id != 2,
+            |id| (id != 2).then(|| Shown::rule(&notice(id))),
             |n| SHOWN.lock().unwrap().push(n.notice.unwrap_or(0)),
         );
         for id in 1..=3 {
