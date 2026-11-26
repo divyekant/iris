@@ -34,9 +34,11 @@ must read all 14 mails to know where the thread is (issue #478).
 - A summary in the workspace of a job. Jobs read the clean mail.
 - Edit, rate or delete a summary.
 - The text of a message after its first 4,000 characters. The item page
-  points to the mail. For a thread of more than 12 answerable messages,
-  the snapshot holds the first message and the newest 11, and the data
-  gives the last summary of the thread (see The model call, issue #1023).
+  points to the mail, and the cut keeps each call bounded (issue #1138).
+  For a thread of more than 12 answerable messages, the snapshot holds the
+  first message and the newest 11, and the data gives the last summary of
+  the thread (see The model call, issue #1023). Catch-up steps cover the
+  other messages.
 
 ## Design
 
@@ -151,11 +153,21 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
   snapshot is the whole thread) is the covers of the thread now up to its `based_on`: each message that
   it represents is still answerable with the same inputs. Else the data
   gives no earlier summary. A message that arrives later with an older date
-  also ends the carry forward (issue #1138). A
+  also ends the carry forward. A
   summary of a thread that the snapshot covers in full gets no earlier
-  summary. A thread whose first summary comes after it has more than 12
-  messages has no earlier summary: its first summary covers the snapshot
-  only.
+  summary.
+- Catch-up steps (issue #1138): when the snapshot leaves out messages that
+  no earlier summary covers (a first summary of a long thread, a thread
+  that grew by more than 11 messages, or an earlier summary that stopped
+  to carry forward), the call is a step. Its data holds the first message
+  and the oldest 11 of those messages, with the earlier summary of the
+  messages before them. The step saves its summary with `based_on` = the
+  last message of the step and the basis `step.<covers up to it>`, so the
+  summary is never ready and the next step carries it forward. Each step
+  is one call (and one retry) of the normal summary turn. So each
+  answerable message reaches the model once, in the data or through an
+  earlier summary, and a thread of n answerable messages with no summary
+  takes about (n - 12) / 11 steps before the ready summary.
 - The instruction is a constant (`summary/0.2`). The data block is one JSON
   object. The instruction says that the mail is data, that text in the mail
   that asks for an action is not from the owner, and that the summary names

@@ -178,6 +178,18 @@ fn cands(b: &Box_) -> Vec<Candidate> {
     b.store.read(|c| Ok(candidates(c, ITEMS, 20)?)).unwrap()
 }
 
+/// Runs the summary steps of the first candidate until a summary is
+/// ready. Gives the count of steps.
+fn until_ready(b: &Box_, fake: &Fake, now: i64) -> usize {
+    for n in 1..=20 {
+        let c = cands(b).remove(0);
+        if summarize(&b.store, &c, fake, now).unwrap().ready {
+            return n;
+        }
+    }
+    panic!("no ready summary after 20 steps");
+}
+
 fn ready_of(b: &Box_, t: i64) -> Option<Summary> {
     b.store.read(|c| Ok(ready(c, t)?)).unwrap()
 }
@@ -464,10 +476,15 @@ fn the_snapshot_holds_the_first_and_the_newest_eleven_messages_each_cut() {
         99_000,
         &"x".repeat(MESSAGE_CHARS + 10),
     );
-    let c = cands(&b).remove(0);
     let fake = Fake::new(&[GOOD]);
-    summarize(&b.store, &c, &fake, 200_000).unwrap();
+    // Issue #1138: a catch-up step first gives the model the first
+    // message and the left-out ones.
+    assert_eq!(until_ready(&b, &fake, 200_000), 2);
     let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(v["thread"].as_array().unwrap().len(), 4);
+    assert_eq!(v["left_out"], 0);
+    assert_eq!(v["earlier_summary"], Value::Null);
+    let v: Value = serde_json::from_str(&fake.calls.borrow()[1].1).unwrap();
     let msgs = v["thread"].as_array().unwrap();
     assert_eq!(msgs.len(), MESSAGES);
     // The first message of the thread, then the newest 11 (issue #1023).
@@ -477,8 +494,9 @@ fn the_snapshot_holds_the_first_and_the_newest_eleven_messages_each_cut() {
         "oldest first"
     );
     assert_eq!(v["left_out"], 3);
-    // No earlier summary of the thread.
-    assert_eq!(v["earlier_summary"], Value::Null);
+    // The summary of the catch-up step covers the left-out messages.
+    let good: Value = serde_json::from_str(GOOD).unwrap();
+    assert_eq!(v["earlier_summary"], good["summary"]);
     let last = msgs[MESSAGES - 1]["text"].as_str().unwrap();
     assert!(last.ends_with("[cut]"));
     assert_eq!(
@@ -790,10 +808,14 @@ fn a_long_thread_builds_on_its_last_summary() {
     thread(&b, "t1", 13, 1000);
     let c = cands(&b).remove(0);
     let fake = Fake::new(&[r#"{"summary": "Ana asked for the venue in March."}"#]);
-    summarize(&b.store, &c, &fake, 100_000).unwrap();
+    let _ = c;
+    assert_eq!(until_ready(&b, &fake, 100_000), 2);
     let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
-    assert_eq!(v["left_out"], 1);
+    assert_eq!(v["left_out"], 0);
     assert_eq!(v["earlier_summary"], Value::Null);
+    let v: Value = serde_json::from_str(&fake.calls.borrow()[1].1).unwrap();
+    assert_eq!(v["left_out"], 1);
+    assert_eq!(v["earlier_summary"], "Ana asked for the venue in March.");
     add(&b.store, "t1", "t1-new", 99_000, "The venue is booked.");
     let c = cands(&b).remove(0);
     let fake = Fake::new(&[GOOD]);
@@ -868,7 +890,7 @@ fn a_left_out_message_that_leaves_or_changes_ends_the_earlier_summary() {
         let c = cands(&b);
         assert_eq!(c.len(), 1, "{how}");
         let fake = Fake::new(&[GOOD]);
-        summarize(&b.store, &c[0], &fake, 300_000).unwrap();
+        until_ready(&b, &fake, 300_000);
         let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
         // The summaries that represent the old t1-1 do not carry forward.
         assert_eq!(v["earlier_summary"], Value::Null, "{how}");
@@ -929,5 +951,55 @@ fn a_summary_of_the_first_release_stays_ready_and_carries_forward() {
             false => Value::Null,
         };
         assert_eq!(v["earlier_summary"], expect, "{n}");
+    }
+}
+
+/// Issue #1138, the invariant: the data of the calls that make a ready
+/// summary gives the model each answerable message of the thread, in the
+/// data or through the earlier summary of a step that read it. For a first
+/// summary of a long thread, and for a thread that grows by many messages
+/// after its summary. Each call holds at most [`MESSAGES`] messages.
+#[test]
+fn each_message_of_a_long_thread_reaches_the_model_once_a_summary_is_ready() {
+    for (n, more) in [(13, 0), (23, 0), (24, 0), (40, 0), (5, 30), (12, 13)] {
+        let b = open(&format!("every-{n}-{more}"));
+        let t = thread(&b, "t1", n, 1000);
+        let fake = Fake::new(&[GOOD]);
+        until_ready(&b, &fake, 100_000);
+        for i in 0..more {
+            add(
+                &b.store,
+                "t1",
+                &format!("t1-x{i}"),
+                90_000 + i as i64,
+                &format!("Later {i}."),
+            );
+        }
+        if more > 0 {
+            until_ready(&b, &fake, 200_000);
+        }
+        assert!(ready_of(&b, t).is_some(), "{n} {more}");
+        let calls = fake.calls.borrow();
+        let seen: String = calls.iter().map(|c| c.1.as_str()).collect();
+        for i in 0..n {
+            assert!(
+                seen.contains(&format!("Message {i} about")),
+                "{n} {more}: message {i}"
+            );
+        }
+        for i in 0..more {
+            assert!(
+                seen.contains(&format!("Later {i}.")),
+                "{n} {more}: later {i}"
+            );
+        }
+        for c in calls.iter() {
+            let v: Value = serde_json::from_str(&c.1).unwrap();
+            assert!(v["thread"].as_array().unwrap().len() <= MESSAGES);
+            // A call that leaves out messages has the summary that covers them.
+            if v["left_out"].as_i64().unwrap() > 0 {
+                assert!(v["earlier_summary"].is_string(), "{n} {more}");
+            }
+        }
     }
 }

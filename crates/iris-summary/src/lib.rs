@@ -371,6 +371,10 @@ pub struct Saved {
     pub thread: i64,
     pub based_on: i64,
     pub text: String,
+    /// False for a catch-up step of a long thread (issue #1138): the saved
+    /// summary covers the thread only up to `based_on`, and the next step
+    /// goes on.
+    pub ready: bool,
 }
 
 /// One message of the snapshot.
@@ -397,9 +401,10 @@ struct Snapshot {
     count: i64,
     /// The answerable messages that the snapshot leaves out.
     left_out: i64,
-    /// The last saved summary of the thread, only when `left_out` > 0: it
-    /// carries the facts of the left-out messages forward.
-    earlier: Option<String>,
+    /// The last saved summary of the thread and the message that it is
+    /// based on, only when `left_out` > 0: it carries the facts of the
+    /// left-out messages up to that message forward.
+    earlier: Option<(String, i64)>,
     not_ready: i64,
     hostile: i64,
     /// [`basis_sql`] of the thread.
@@ -463,11 +468,11 @@ fn snapshot(c: &Transaction<'_>, thread: i64) -> Result<Snapshot> {
     let earlier = match left_out > 0 {
         true => c
             .prepare_cached(&format!(
-                "SELECT s.text FROM thread_summary s WHERE s.thread_id = ?1
+                "SELECT s.text, s.based_on FROM thread_summary s WHERE s.thread_id = ?1
                    AND substr(s.basis, instr(s.basis, '.') + 1) = {}",
                 covers_upto_sql("?1", "s.based_on")
             ))?
-            .query_row([thread], |r| r.get(0))
+            .query_row([thread], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?,
         false => None,
     };
@@ -481,6 +486,79 @@ fn snapshot(c: &Transaction<'_>, thread: i64) -> Result<Snapshot> {
         basis: basis.unwrap_or_default(),
         newest,
     })
+}
+
+/// The order key of message `id` (an SQL expression): [`OLDEST`] as a row
+/// value.
+fn key(id: &str) -> String {
+    format!("(SELECT coalesce(u.internal_date, 0), u.id FROM message u WHERE u.id = {id})")
+}
+
+/// Issue #1138: the data of a catch-up step, when `snap` leaves out
+/// messages that no earlier summary covers: the messages after the first
+/// message, or after the message of the earlier summary, and before the
+/// newest ones of the snapshot. The data then holds the first message and
+/// the oldest [`MESSAGES`] - 1 of these messages, with the earlier summary.
+/// Its summary covers the thread up to the last of them, and the next step
+/// carries it forward. So each answerable message reaches the model once,
+/// in the data or through an earlier summary, with one bounded call for
+/// each step. `None` when the earlier summary covers each left-out message.
+fn window(c: &Transaction<'_>, thread: i64, snap: &Snapshot) -> Result<Option<Snapshot>> {
+    let Some(first) = snap.newest.first().filter(|_| snap.left_out > 0) else {
+        return Ok(None);
+    };
+    let from = snap.earlier.as_ref().map_or(first.id, |(_, on)| *on);
+    let msgs = messages_sql("?1");
+    let mut st = c.prepare_cached(&format!(
+        "SELECT {}
+         {msgs}
+         {ANSWERABLE} AND m.id NOT IN ({})
+           AND (coalesce(m.internal_date, 0), m.id) > {}
+         {OLDEST} LIMIT ?3",
+        columns(),
+        snapshot_ids("?1"),
+        key("?2"),
+    ))?;
+    let gap = st
+        .query_map(params![thread, from, MESSAGES as i64 - 1], |r| {
+            Ok(Msg {
+                id: r.get(0)?,
+                from_addr: r.get(1)?,
+                from_name: r.get(2)?,
+                subject: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                date: r.get(4)?,
+                text: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                sent: r.get(6)?,
+                more: r.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some(start) = gap.first() else {
+        return Ok(None);
+    };
+    // The messages between the first message and the window: the earlier
+    // summary covers them.
+    let left_out: i64 = c
+        .prepare_cached(&format!(
+            "SELECT count(*) {msgs} {ANSWERABLE}
+               AND (coalesce(m.internal_date, 0), m.id) > {}
+               AND (coalesce(m.internal_date, 0), m.id) < {}",
+            key("?2"),
+            key("?3"),
+        ))?
+        .query_row(params![thread, first.id, start.id], |r| r.get(0))?;
+    let mut newest = vec![first.clone()];
+    newest.extend(gap);
+    Ok(Some(Snapshot {
+        left_out,
+        earlier: if left_out > 0 {
+            snap.earlier.clone()
+        } else {
+            None
+        },
+        newest,
+        ..snap.clone()
+    }))
 }
 
 /// `text` with at most `limit` characters, and the cut mark after a cut.
@@ -512,7 +590,7 @@ fn data(s: &Snapshot) -> String {
             "text": cut(&m.text, MESSAGE_CHARS, m.more),
         })).collect::<Vec<_>>(),
         "left_out": s.left_out,
-        "earlier_summary": s.earlier.as_deref().map(|t| cut(t, MAX_TEXT, false)),
+        "earlier_summary": s.earlier.as_ref().map(|(t, _)| cut(t, MAX_TEXT, false)),
     })
     .to_string()
 }
@@ -566,9 +644,9 @@ pub fn summarize(
     now_ms: i64,
 ) -> Result<Saved> {
     let thread = candidate.thread;
-    let snap = store.read(|c| {
+    let (step, snap) = store.read(|c| {
         let tx = c.unchecked_transaction()?;
-        Ok(snapshot(&tx, thread))
+        Ok(snapshot(&tx, thread).and_then(|s| Ok((window(&tx, thread, &s)?, s))))
         // The drop of `tx` ends the read.
     })??;
     if snap.hostile > 0 {
@@ -584,7 +662,10 @@ pub fn summarize(
         }
         Some(_) => {}
     }
-    let data = data(&snap);
+    // A catch-up step (issue #1138) sends its window, and saves a summary
+    // that is not ready: it covers the thread up to the last message of the
+    // window, and the next step carries it forward.
+    let data = data(step.as_ref().unwrap_or(&snap));
     let ask = || model.ask(INSTRUCTION, &data).map_err(Error::Model);
     let reply = ask()?;
     // An answer that is not a valid summary gets one more call with the same
@@ -596,14 +677,29 @@ pub fn summarize(
         }
         r => r?,
     };
-    store
+    let based_on = store
         .write(|tx| {
             // A sync that added, removed or changed a message during the call
             // makes this run save nothing.
             match snapshot(tx, thread) {
                 Ok(now) if now == snap => {}
-                _ => return Ok(false),
+                _ => return Ok(None),
             }
+            // The basis of a catch-up summary: a mark that no basis of a
+            // thread has, then the covers of the thread up to the window.
+            // So it is never ready, and the next snapshot carries it.
+            let (based_on, basis) = match step.as_ref().and_then(|w| w.newest.last()) {
+                None => (candidate.based_on, snap.basis.clone()),
+                Some(last) => {
+                    let covers: Option<String> = tx
+                        .prepare_cached(&format!(
+                            "SELECT {}",
+                            covers_upto_sql("?1", "?2")
+                        ))?
+                        .query_row(params![thread, last.id], |r| r.get(0))?;
+                    (last.id, format!("step.{}", covers.unwrap_or_default()))
+                }
+            };
             tx.execute(
                 "INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt,
                                             created_at)
@@ -611,16 +707,16 @@ pub fn summarize(
                  ON CONFLICT(thread_id) DO UPDATE SET based_on = excluded.based_on,
                    basis = excluded.basis, text = excluded.text, model = excluded.model, prompt = excluded.prompt,
                    created_at = excluded.created_at",
-                params![thread, candidate.based_on, text, model.name(), PROMPT, now_ms, snap.basis],
+                params![thread, based_on, text, model.name(), PROMPT, now_ms, basis],
             )?;
-            Ok(true)
+            Ok(Some(based_on))
         })?
-        .then_some(())
         .ok_or(Error::Changed)?;
     Ok(Saved {
         thread,
-        based_on: candidate.based_on,
+        based_on,
         text,
+        ready: step.is_none(),
     })
 }
 
