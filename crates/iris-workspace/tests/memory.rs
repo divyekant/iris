@@ -1,5 +1,7 @@
 //! The build reads one message body at a time. A test of its own, so no
 //! other test of the process moves the high-water mark of its memory.
+//! Linux only: it reads the peak memory in `/proc`.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 
@@ -7,8 +9,7 @@ use iris_job::{add_scope, create, By, Ref};
 use iris_store::Store;
 use iris_workspace::build;
 
-/// The peak resident memory of the process, in KiB (Linux only).
-#[cfg(target_os = "linux")]
+/// The peak resident memory of the process, in KiB.
 fn peak_kib() -> u64 {
     let s = fs::read_to_string("/proc/self/status").unwrap();
     let line = s.lines().find(|l| l.starts_with("VmHWM:")).unwrap();
@@ -17,7 +18,6 @@ fn peak_kib() -> u64 {
 
 /// One granted message in a thread with 60 messages of about 1 MB each that
 /// are outside the grant: the build does not hold their bodies.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_large_thread_does_not_fill_the_memory() {
     let dir = std::env::temp_dir().join(format!("iris-ws-memory-{}", std::process::id()));
