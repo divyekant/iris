@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use mac_notification_sys::{Notification, NotificationResponse};
 use tauri::image::Image;
@@ -41,6 +42,9 @@ struct Shell {
     socket: PathBuf,
     /// The route to open after the next page load.
     route: Mutex<Option<String>>,
+    /// The route of the newest notice click or menu choice, and its time
+    /// (issue #603).
+    click: Mutex<Option<(String, Instant)>>,
     /// The origin of the engine of the last sign-in address, for example
     /// `http://127.0.0.1:4800`. Only this origin loads in the window.
     origin: Mutex<Option<String>>,
@@ -60,6 +64,7 @@ pub fn run() {
             home,
             socket,
             route: Mutex::new(None),
+            click: Mutex::new(None),
             origin: Mutex::new(None),
             count: Mutex::new(None),
             open: AtomicU64::new(u64::MAX),
@@ -123,6 +128,9 @@ pub fn run() {
 
 /// Open the window, or bring it to the front. With a route, show that view.
 fn show(app: &AppHandle, route: Option<String>) {
+    if let Some(r) = &route {
+        *app.state::<Shell>().click.lock().unwrap() = Some((r.clone(), Instant::now()));
+    }
     if let Some(w) = app.get_webview_window(MAIN) {
         if let Some(r) = route {
             let _ = w.eval(format!("location.hash = {}", serde_json::Value::from(r)));
@@ -256,7 +264,7 @@ fn notices(app: AppHandle) {
     let waiting = Arc::new(AtomicUsize::new(0));
     let mut poll = engine::Poll::default();
     loop {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let page = engine::request(&socket, "app.notices", poll.args())
             .ok()
             .and_then(|r| poll.read(&r));
@@ -281,17 +289,22 @@ fn notices(app: AppHandle) {
 
 /// The engine started again with a new web secret: load a new sign-in
 /// address in the open window (issue #547). The window keeps its view: the
-/// page load handler applies the route of the old page, also one that a
-/// notice click set just before (issue #603).
+/// page load handler applies the route of the newest notice click (while it
+/// is younger than `engine::CLICK_HOLD`) or of the old page (issue #603).
 fn sign_in_again(app: &AppHandle) {
     let h = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = h.get_webview_window(MAIN) {
             let shell = h.state::<Shell>();
-            let view = w.url().ok().and_then(|u| engine::view_route(u.as_str()));
+            let click = shell.click.lock().unwrap().clone();
+            let url = w.url().ok();
+            let view = engine::kept_view(
+                click.as_ref().map(|(r, t)| (r.as_str(), t.elapsed())),
+                url.as_ref().and_then(|u| u.fragment()),
+            );
             if let WebviewUrl::External(u) = address(&shell) {
                 if let Some(r) = view {
-                    shell.route.lock().unwrap().get_or_insert(r);
+                    *shell.route.lock().unwrap() = Some(r);
                 }
                 let _ = w.navigate(u);
             }
