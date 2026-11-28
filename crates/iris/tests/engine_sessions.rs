@@ -1016,7 +1016,8 @@ fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
     // the end. For each file `knock-<n>` in the workspace, it hands one
     // connection to the proxy on the socket pair of the session (the
     // descriptor of the helper, which this plain isolation passes on), as
-    // the Linux relay does, and sends a head that is not `CONNECT`.
+    // the handoff does (it waits for the receipt byte of the proxy before
+    // it closes its copy), and sends a head that is not `CONNECT`.
     let f = fixture_with("egressend", "", "allow_hosts = [\"example.com\"]\n");
     let knocker = f.root.join("knock.py");
     fs::write(
@@ -1030,6 +1031,7 @@ fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
          \x20       c = socket.create_connection(l.getsockname())\n\
          \x20       s, _ = l.accept()\n\
          \x20       socket.send_fds(pair, [b'x'], [s.fileno()])\n\
+         \x20       pair.recv(1)\n\
          \x20       s.close()\n\
          \x20       c.sendall(b'GET / HTTP/1.1\\r\\n\\r\\n')\n\
          \x20       n += 1\n\
@@ -1066,7 +1068,13 @@ fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
             std::thread::sleep(Duration::from_millis(50));
         }
     };
-    knock("not_connect");
+    // On macOS the proxy checks the token of the session first, and the
+    // head has none.
+    knock(if cfg!(target_os = "macos") {
+        "not_session"
+    } else {
+        "not_connect"
+    });
     iris_job::end(&f.store, id, EndReason::Stop, None, now()).unwrap();
     s.turn(now());
     // The proxy is closed, and its end of the pair stays open until the
