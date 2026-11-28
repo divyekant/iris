@@ -121,26 +121,31 @@ pub fn checked_url(url: &str) -> Option<&str> {
     (port_ok && code_ok).then_some(url)
 }
 
-/// How long the route of a notice click counts as the view of the window.
-/// The click changes the hash of the page with a script that runs some
-/// milliseconds later, so the address of the window can still show the old
-/// view in this time.
-pub const CLICK_HOLD: Duration = Duration::from_secs(5);
+/// The query name of the sign-in address that carries the view of the old
+/// page to the new page (issue #603).
+pub const VIEW_PARAM: &str = "view";
 
-/// The view that a new sign-in of the window keeps (issue #603). `click` is
-/// the route of the newest notice click and its age. `fragment` is the
-/// fragment of the window address now, from the parsed URL. The click wins
-/// while it is younger than [`CLICK_HOLD`]; else the fragment counts, but
-/// only a route of the web client (`/...`), never a sign-in code.
-pub fn kept_view(click: Option<(&str, Duration)>, fragment: Option<&str>) -> Option<String> {
-    if let Some((route, age)) = click {
-        if age < CLICK_HOLD {
-            return Some(route.to_string());
-        }
-    }
-    fragment
-        .filter(|f| f.starts_with('/'))
-        .map(|f| format!("#{f}"))
+/// The script that a new sign-in of an open window runs in the old page
+/// (issue #603). The page reads its own hash and loads `sign_in` with that
+/// hash in the query [`VIEW_PARAM`]. The script runs after each earlier
+/// script of the window, also the hash change of a notice click, and after
+/// each route change of the person in the page. So the hash that it reads
+/// is the newest view by construction. Only a route of the web client
+/// (`#/...`) goes into the query, never a sign-in code.
+pub fn keep_view_script(sign_in: &str) -> String {
+    let to = serde_json::Value::from(sign_in);
+    let name = serde_json::Value::from(VIEW_PARAM);
+    format!(
+        "(() => {{ const u = new URL({to}); const h = location.hash; \
+         if (h.startsWith('#/')) u.searchParams.set({name}, h); \
+         location.replace(u.href); }})()"
+    )
+}
+
+/// The view that the page load handler applies after a new sign-in: the
+/// value of [`VIEW_PARAM`] if it is a route of the web client.
+pub fn kept_view(value: &str) -> Option<String> {
+    value.starts_with("#/").then(|| value.to_string())
 }
 
 /// One notice to show.
@@ -293,7 +298,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_new_sign_in_keeps_the_newest_click_or_the_route_of_the_page() {
+    fn a_new_sign_in_keeps_only_a_route_of_the_web_client() {
         let seed = std::cell::Cell::new(7u64);
         let next = |n: u64| {
             seed.set(
@@ -303,49 +308,54 @@ mod tests {
             );
             (seed.get() >> 33) % n
         };
-        let pieces = ["/", "mail/m-4", "code=ab12", "brief", "#", "", "/x?y"];
+        let pieces = [
+            "#",
+            "/",
+            "mail/m-4",
+            "code=ab12",
+            "brief",
+            "",
+            "\"",
+            "'",
+            "\n",
+            "</script>",
+        ];
         for _ in 0..5_000 {
-            let fragment: Option<String> = (next(4) > 0).then(|| {
-                (0..next(3))
-                    .map(|_| pieces[next(pieces.len() as u64) as usize])
-                    .collect()
-            });
-            let age = Duration::from_millis(next(10_000));
-            let click = (next(2) == 0).then_some(("#/mail/m-9", age));
-            let got = kept_view(click, fragment.as_deref());
-            let want = match (click, fragment.as_deref()) {
-                (Some((r, a)), _) if a < CLICK_HOLD => Some(r.to_string()),
-                (_, Some(f)) if f.starts_with('/') => Some(format!("#{f}")),
-                _ => None,
-            };
-            assert_eq!(got, want, "{click:?} {fragment:?}");
-            // Never a sign-in code, and always a route of the web client.
-            assert!(got.as_deref().is_none_or(|g| g.starts_with("#/")));
+            let s: String = (0..next(4))
+                .map(|_| pieces[next(pieces.len() as u64) as usize])
+                .collect();
+            // Only a `#/` route counts, unchanged.
+            let want = s.starts_with("#/").then(|| s.clone());
+            assert_eq!(kept_view(&s), want, "{s:?}");
+            // The address goes into the script as one JSON string: no text of
+            // it can end the string or add code.
+            let script = keep_view_script(&s);
+            let lit = serde_json::Value::from(s.as_str()).to_string();
+            assert!(script.contains(&format!("new URL({lit})")), "{script}");
+            let rest = script.replacen(&lit, "X", 1);
+            assert_eq!(
+                rest,
+                keep_view_script("X").replacen("\"X\"", "X", 1),
+                "{s:?}"
+            );
         }
-        // The order of issue #603: a click, then the new sign-in before the
-        // hash change of the click ran in the page.
-        assert_eq!(
-            kept_view(Some(("#/mail/m-9", Duration::ZERO)), Some("/brief")).as_deref(),
-            Some("#/mail/m-9")
-        );
-        // An old click does not win over where the person went since.
-        assert_eq!(
-            kept_view(Some(("#/mail/m-9", CLICK_HOLD)), Some("/brief")).as_deref(),
-            Some("#/brief")
-        );
-        // The wiring in mac.rs: each route of `show` is a click, and the new
-        // sign-in reads the view before the navigate.
+        // The script reads the hash of the page when it runs, and puts only
+        // a route in the query.
+        let script = keep_view_script("http://127.0.0.1:4800/#code=ab12");
+        assert!(script.contains("location.hash"));
+        assert!(script.contains("h.startsWith('#/')"));
+        assert!(script.contains("location.replace("));
+        // The wiring in mac.rs: the new sign-in runs the script in an engine
+        // page, and the navigation handler takes the view from the query.
         let mac = include_str!("mac.rs");
-        let show = &mac[mac.find("fn show(").unwrap()..];
-        let show = &show[..show.find("\n}\n").unwrap()];
-        assert!(show.contains(".click.lock()"), "{show}");
         let again = &mac[mac.find("fn sign_in_again").unwrap()..];
         let again = &again[..again.find("\n}\n").unwrap()];
-        let read = again.find("engine::kept_view(").unwrap();
-        let navigate = again.find(".navigate(").unwrap();
-        assert!(read < navigate, "{again}");
-        assert!(again.contains(".fragment()"), "{again}");
-        assert!(again.contains(".route.lock()"), "{again}");
+        assert!(again.contains("engine::keep_view_script("), "{again}");
+        let nav = &mac[mac.find("fn navigate(").unwrap()..];
+        let nav = &nav[..nav.find("\n}\n").unwrap()];
+        assert!(nav.contains("engine::VIEW_PARAM"), "{nav}");
+        assert!(nav.contains("engine::kept_view("), "{nav}");
+        assert!(nav.contains(".route.lock()"), "{nav}");
     }
 
     #[test]

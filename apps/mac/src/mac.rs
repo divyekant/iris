@@ -42,9 +42,6 @@ struct Shell {
     socket: PathBuf,
     /// The route to open after the next page load.
     route: Mutex<Option<String>>,
-    /// The route of the newest notice click or menu choice, and its time
-    /// (issue #603).
-    click: Mutex<Option<(String, Instant)>>,
     /// The origin of the engine of the last sign-in address, for example
     /// `http://127.0.0.1:4800`. Only this origin loads in the window.
     origin: Mutex<Option<String>>,
@@ -64,7 +61,6 @@ pub fn run() {
             home,
             socket,
             route: Mutex::new(None),
-            click: Mutex::new(None),
             origin: Mutex::new(None),
             count: Mutex::new(None),
             open: AtomicU64::new(u64::MAX),
@@ -128,9 +124,6 @@ pub fn run() {
 
 /// Open the window, or bring it to the front. With a route, show that view.
 fn show(app: &AppHandle, route: Option<String>) {
-    if let Some(r) = &route {
-        *app.state::<Shell>().click.lock().unwrap() = Some((r.clone(), Instant::now()));
-    }
     if let Some(w) = app.get_webview_window(MAIN) {
         if let Some(r) = route {
             let _ = w.eval(format!("location.hash = {}", serde_json::Value::from(r)));
@@ -210,7 +203,16 @@ fn navigate(app: &AppHandle, url: &Url) -> bool {
         }
         return false;
     }
-    if url.scheme() == "tauri" || is_engine(&app.state::<Shell>(), url) {
+    let shell = app.state::<Shell>();
+    if url.scheme() == "tauri" {
+        return true;
+    }
+    if is_engine(&shell, url) {
+        // The view of the old page at a new sign-in (issue #603).
+        let view = url.query_pairs().find(|(k, _)| k == engine::VIEW_PARAM);
+        if let Some(r) = view.and_then(|(_, v)| engine::kept_view(&v)) {
+            *shell.route.lock().unwrap() = Some(r);
+        }
         return true;
     }
     if matches!(url.scheme(), "http" | "https" | "mailto") {
@@ -288,25 +290,22 @@ fn notices(app: AppHandle) {
 }
 
 /// The engine started again with a new web secret: load a new sign-in
-/// address in the open window (issue #547). The window keeps its view: the
-/// page load handler applies the route of the newest notice click (while it
-/// is younger than `engine::CLICK_HOLD`) or of the old page (issue #603).
+/// address in the open window (issue #547). An engine page keeps its view:
+/// it loads the address itself, with its hash in the query, after each
+/// earlier script of the window, also the hash change of a notice click
+/// (`engine::keep_view_script`, issue #603). `navigate` takes the view, and
+/// the page load handler applies it. A local page has no view to keep.
 fn sign_in_again(app: &AppHandle) {
     let h = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = h.get_webview_window(MAIN) {
             let shell = h.state::<Shell>();
-            let click = shell.click.lock().unwrap().clone();
-            let url = w.url().ok();
-            let view = engine::kept_view(
-                click.as_ref().map(|(r, t)| (r.as_str(), t.elapsed())),
-                url.as_ref().and_then(|u| u.fragment()),
-            );
+            let engine_page = w.url().is_ok_and(|u| is_engine(&shell, &u));
             if let WebviewUrl::External(u) = address(&shell) {
-                if let Some(r) = view {
-                    *shell.route.lock().unwrap() = Some(r);
+                let kept = engine_page && w.eval(engine::keep_view_script(u.as_str())).is_ok();
+                if !kept {
+                    let _ = w.navigate(u);
                 }
-                let _ = w.navigate(u);
             }
         }
     });
