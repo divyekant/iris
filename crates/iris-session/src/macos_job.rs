@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use iris_job::format_session_id;
 
+use crate::egress::{start_handoff, AfterEnd, EGRESS_FD, EGRESS_LISTEN_FD};
 use crate::hold;
 use crate::isolation::macos::Seatbelt;
 use crate::isolation::{Command, Isolation};
@@ -33,6 +34,16 @@ pub const CONNECT_WAIT: Duration = Duration::from_secs(1);
 const HANDOFF_MAX: usize = 1024 * 1024;
 /// The count of file descriptors in the handoff: 0, 1, 2 and the folder.
 const HANDOFF_FDS: usize = 4;
+/// The count with an egress port: also the helper end of the pair of the
+/// proxy and the listener of the port (issue 1159).
+const HANDOFF_EGRESS_FDS: usize = 6;
+
+/// The egress descriptors of a session: the helper end of the socket pair
+/// of the proxy, and the TCP listener of the egress port.
+pub struct EgressFds {
+    pub channel: OwnedFd,
+    pub listener: OwnedFd,
+}
 
 /// The calls of macOS that the shim makes.
 pub trait Launchd {
@@ -263,8 +274,9 @@ fn files(data_dir: &Path, session: i64) -> Files {
 
 /// The shim: `iris session-hold <data dir> <session> <program> [<arg>...]`
 /// on macOS. It loads the launchd job of the session, gives it the three
-/// streams, the working folder, the environment and the hold arguments,
-/// and exits with the exit code of the job process (1 if none came).
+/// streams, the working folder, the environment, the hold arguments and,
+/// with an egress port, the egress descriptors, and exits with the exit
+/// code of the job process (1 if none came).
 pub fn shim(
     seatbelt: &Seatbelt,
     launchd: &dyn Launchd,
@@ -272,6 +284,7 @@ pub fn shim(
     data_dir: &Path,
     args: &[OsString],
     env: Vec<(OsString, OsString)>,
+    egress: Option<EgressFds>,
 ) -> i32 {
     let Some(session) = args
         .first()
@@ -281,7 +294,15 @@ pub fn shim(
     else {
         return hold::BAD_ARGS;
     };
-    match shim_run(seatbelt, launchd, iris, data_dir, session, args, env) {
+    // An egress port needs its descriptors, and only an egress port has
+    // them.
+    if egress_port(&env).is_some() != egress.is_some() {
+        eprintln!("iris: the egress port and the egress descriptors of the session do not agree");
+        return 1;
+    }
+    match shim_run(
+        seatbelt, launchd, iris, data_dir, session, args, env, egress,
+    ) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("iris: the launchd job of the session did not start: {e}");
@@ -290,6 +311,7 @@ pub fn shim(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shim_run(
     seatbelt: &Seatbelt,
     launchd: &dyn Launchd,
@@ -298,6 +320,7 @@ fn shim_run(
     session: i64,
     args: &[OsString],
     env: Vec<(OsString, OsString)>,
+    egress: Option<EgressFds>,
 ) -> io::Result<i32> {
     let f = files(data_dir, session);
     let sessions = f.socket.parent().expect("a sessions folder");
@@ -339,13 +362,18 @@ fn shim_run(
     };
     let _ = fs::remove_file(&f.socket);
     let cwd = fs::File::open(".")?;
-    let fds = [0, 1, 2, cwd.as_raw_fd()];
+    let mut fds = vec![0, 1, 2, cwd.as_raw_fd()];
+    if let Some(e) = &egress {
+        fds.extend([e.channel.as_raw_fd(), e.listener.as_raw_fd()]);
+    }
     let handoff = Handoff {
         args: args.to_vec(),
         env,
     };
     send_with_fds(&stream, &fds, &handoff.encode())?;
     drop(cwd);
+    // The job process holds the egress descriptors now.
+    drop(egress);
     // The exit code of the job process, then the end.
     let mut code = [0u8; 1];
     Ok(match (&stream).read(&mut code) {
@@ -432,7 +460,12 @@ pub fn job(seatbelt: &Seatbelt, data_dir: &Path, args: &[OsString]) -> i32 {
     let Ok(stream) = UnixStream::connect(&f.socket) else {
         return 1;
     };
-    let Ok((fds, msg)) = recv_with_fds(&stream, HANDOFF_FDS) else {
+    let count = if port.is_some() {
+        HANDOFF_EGRESS_FDS
+    } else {
+        HANDOFF_FDS
+    };
+    let Ok((mut fds, msg)) = recv_with_fds(&stream, count) else {
         return 1;
     };
     let Some(handoff) = Handoff::decode(&msg) else {
@@ -441,11 +474,71 @@ pub fn job(seatbelt: &Seatbelt, data_dir: &Path, args: &[OsString]) -> i32 {
     if apply(seatbelt, session, &fds, &handoff).is_err() {
         return 1;
     }
+    // The egress listener and the pair go to the handoff thread, which this
+    // process keeps until its end (issue 1159).
+    if let Some(port) = port {
+        let listener = fds.pop().expect("six descriptors");
+        let channel = fds.pop().expect("six descriptors");
+        if hold_egress(listener, channel, port).is_err() {
+            return 1;
+        }
+    }
     // The copies on 0, 1 and 2 and the folder stay; the originals close.
     drop(fds);
     let code = run_hold(seatbelt, session, &handoff.args, &stream);
     let _ = (&stream).write_all(&[code.clamp(0, 255) as u8]);
     code
+}
+
+/// Starts the handoff of the egress port: the listener must be a TCP
+/// listener on `127.0.0.1:<port>`. Each connection of the agent goes to the
+/// proxy on `channel`. After the end of the engine, the listener stays open
+/// until this process ends, so no other process can take the port while the
+/// agent runs (issue 1159).
+fn hold_egress(listener: OwnedFd, channel: OwnedFd, port: u16) -> io::Result<()> {
+    let listener = std::net::TcpListener::from(listener);
+    let at = listener.local_addr()?;
+    if at != std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)) {
+        return Err(io::Error::other(
+            "the egress listener is not on the port of the session",
+        ));
+    }
+    listener.set_nonblocking(false)?;
+    start_handoff(listener, channel, AfterEnd::Hold)
+}
+
+/// Takes the egress descriptors that the launch gives the helper:
+/// [`EGRESS_FD`] and [`EGRESS_LISTEN_FD`]. Each gets close-on-exec, so
+/// neither goes to `launchctl` or to another child of the shim. `None` if
+/// neither is open; an error if only one is.
+pub fn take_egress() -> io::Result<Option<EgressFds>> {
+    let open = |fd: RawFd| -> bool {
+        // SAFETY: fstat on a number that may or may not be open.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        unsafe { libc::fstat(fd, &mut st) == 0 }
+    };
+    match (open(EGRESS_FD), open(EGRESS_LISTEN_FD)) {
+        (false, false) => Ok(None),
+        (true, true) => {
+            for fd in [EGRESS_FD, EGRESS_LISTEN_FD] {
+                // SAFETY: fcntl on an open descriptor.
+                if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            // SAFETY: both are open, and nothing else in this process owns
+            // them: the launch put them there for the shim.
+            Ok(Some(unsafe {
+                EgressFds {
+                    channel: OwnedFd::from_raw_fd(EGRESS_FD),
+                    listener: OwnedFd::from_raw_fd(EGRESS_LISTEN_FD),
+                }
+            }))
+        }
+        _ => Err(io::Error::other(
+            "the helper has only one egress descriptor",
+        )),
+    }
 }
 
 /// The streams, the working folder and the environment of the handoff,
@@ -564,6 +657,13 @@ pub fn helper_main(data_dir: &Path, args: &[OsString]) -> i32 {
             return 1;
         };
         let real = fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+        let egress = match take_egress() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("iris: {e}");
+                return 1;
+            }
+        };
         shim(
             &seatbelt,
             &MacLaunchd,
@@ -571,6 +671,7 @@ pub fn helper_main(data_dir: &Path, args: &[OsString]) -> i32 {
             &real,
             args,
             std::env::vars_os().collect(),
+            egress,
         )
     }
     #[cfg(not(target_os = "macos"))]

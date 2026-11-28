@@ -102,19 +102,24 @@ pub fn sandbox_port(local: Option<u16>) -> u16 {
     }
 }
 
-/// The file descriptor of the helper end of the socket pair in the hold
-/// helper of a Linux session ([`Proxy::start_channel`]).
+/// The file descriptor of the helper end of the socket pair in the helper
+/// of a session ([`Proxy::start_channel`], [`Proxy::start_held`]).
 pub const EGRESS_FD: RawFd = 3;
+/// The file descriptor of the egress listener in the helper of a macOS
+/// session ([`Proxy::start_held`]).
+pub const EGRESS_LISTEN_FD: RawFd = 4;
 
 /// The proxy endpoint that the agent of a session gets: the port, and on
 /// macOS the token of the session (macOS sandbox spec, "Egress on macOS").
-/// On Linux, `channel` is the helper end of the socket pair of the proxy
-/// ([`Proxy::start_channel`]): the launch gives it to the helper.
+/// `channel` is the helper end of the socket pair of the proxy: the launch
+/// gives it to the helper. On macOS, `listener` is the TCP listener of the
+/// port, which the launch also gives to the helper (issue 1159).
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     pub port: u16,
     pub token: Option<String>,
     pub channel: Option<Arc<OwnedFd>>,
+    pub listener: Option<Arc<OwnedFd>>,
 }
 
 /// A new random token of 32 bytes, as 64 hex digits, from the random
@@ -396,36 +401,12 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    /// Starts the proxy on a free port of `127.0.0.1` (macOS). `log` is the
-    /// egress log of the session, open for append. `peer` is `127.0.0.1`:
-    /// the proxy refuses a client from another address. With a `token`, the
-    /// proxy answers each `CONNECT` that does not give it with `407`.
-    pub fn start(
-        allowed: Vec<String>,
-        log: File,
-        resolver: Box<dyn Resolve>,
-        peer: Ipv4Addr,
-        token: Option<String>,
-    ) -> io::Result<Proxy> {
-        Proxy::start_with(
-            allowed,
-            log,
-            resolver,
-            true,
-            Some(peer),
-            token,
-            LOG_LIMIT,
-            workers(),
-        )
-    }
-
     /// Starts the proxy of a Linux session on a new socket pair, and gives
     /// the helper end of the pair. The proxy has no port: the helper sends
     /// it each connection of the agent as a file descriptor. The pair has no
     /// name, so no other process can take the place of either end (issue
     /// 507). `port` is the port of the listener in the namespace of the
     /// session ([`sandbox_port`]), which the agent gets.
-    #[cfg(target_os = "linux")]
     pub fn start_channel(
         allowed: Vec<String>,
         log: File,
@@ -448,8 +429,42 @@ impl Proxy {
         Ok((proxy, helper.into()))
     }
 
+    /// Starts the proxy of a macOS session on a new socket pair, with a new
+    /// TCP listener on a free port of `127.0.0.1` (issue 1159). Gives the
+    /// helper end of the pair and the listener: the launch gives both to the
+    /// helper, and the engine keeps no copy. The helper accepts each
+    /// connection and sends it on the pair ([`start_handoff`] with
+    /// [`AfterEnd::Hold`]). So the port lives as long as the helper, also
+    /// after an end of the engine, and no other process can take it while
+    /// the agent runs. With a `token`, the proxy answers each `CONNECT`
+    /// that does not give it with `407`.
+    pub fn start_held(
+        allowed: Vec<String>,
+        log: File,
+        resolver: Box<dyn Resolve>,
+        token: Option<String>,
+    ) -> io::Result<(Proxy, OwnedFd, TcpListener)> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = listener.local_addr()?.port();
+        let (engine, helper) = UnixStream::pair()?;
+        let proxy = Proxy::start_on(
+            Source::Channel(engine),
+            port,
+            allowed,
+            log,
+            resolver,
+            true,
+            None,
+            token,
+            LOG_LIMIT,
+            workers(),
+        )?;
+        Ok((proxy, helper.into(), listener))
+    }
+
     /// `public_only` is false only in tests, which use a loopback server.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn start_with(
         allowed: Vec<String>,
         file: File,
@@ -543,6 +558,7 @@ impl Proxy {
             port: self.port,
             token: self.shared.token.clone(),
             channel: None,
+            listener: None,
         }
     }
 
@@ -615,11 +631,11 @@ fn workers() -> Arc<AtomicUsize> {
 
 /// Where the clients of a proxy come from.
 enum Source {
-    /// A TCP listener on `127.0.0.1` (macOS, and tests).
+    /// A TCP listener on `127.0.0.1` (tests).
+    #[cfg_attr(not(test), allow(dead_code))]
     Tcp(TcpListener),
-    /// The engine end of the socket pair of a Linux session. Each message
-    /// holds one TCP connection of the agent as a file descriptor.
-    #[cfg(target_os = "linux")]
+    /// The engine end of the socket pair of a session. Each message holds
+    /// one TCP connection of the agent as a file descriptor.
     Channel(UnixStream),
 }
 
@@ -636,7 +652,6 @@ impl Source {
     fn fd(&self) -> RawFd {
         match self {
             Source::Tcp(l) => l.as_raw_fd(),
-            #[cfg(target_os = "linux")]
             Source::Channel(c) => c.as_raw_fd(),
         }
     }
@@ -644,7 +659,6 @@ impl Source {
     fn set_nonblocking(&self) -> io::Result<()> {
         match self {
             Source::Tcp(l) => l.set_nonblocking(true),
-            #[cfg(target_os = "linux")]
             Source::Channel(c) => c.set_nonblocking(true),
         }
     }
@@ -655,9 +669,13 @@ impl Source {
                 Ok((s, from)) => Next::Client(s, Some(from)),
                 Err(_) => Next::Nothing,
             },
-            #[cfg(target_os = "linux")]
             Source::Channel(c) => match recv_fd(c.as_raw_fd()) {
-                Ok(Some(fd)) if is_tcp_stream(&fd) => Next::Client(TcpStream::from(fd), None),
+                Ok(Some(fd)) if is_tcp_stream(&fd) => {
+                    // The receipt byte: the handoff can close its copy now
+                    // ([`start_handoff`]). The pair does not block.
+                    let _ = (&*c).write(&[1]);
+                    Next::Client(TcpStream::from(fd), None)
+                }
                 // Not a TCP connection: the descriptor closes here.
                 Ok(Some(_)) => Next::Nothing,
                 Ok(None) => Next::Ended,
@@ -671,7 +689,6 @@ impl Source {
 }
 
 /// The errors of [`recv_fd`] after which the pair still works.
-#[cfg(target_os = "linux")]
 const NOT_ENDED: [io::ErrorKind; 3] = [
     io::ErrorKind::WouldBlock,
     io::ErrorKind::Interrupted,
@@ -679,7 +696,6 @@ const NOT_ENDED: [io::ErrorKind; 3] = [
 ];
 
 /// True if `fd` is a TCP stream socket.
-#[cfg(target_os = "linux")]
 fn is_tcp_stream(fd: &OwnedFd) -> bool {
     let s = socket2::SockRef::from(fd);
     matches!(s.r#type(), Ok(socket2::Type::STREAM))
@@ -690,7 +706,6 @@ fn is_tcp_stream(fd: &OwnedFd) -> bool {
 /// Unix socket `sock`. Gives the file descriptor of the message, `None` at
 /// the end of the stream, or an error: `InvalidData` for a message with no
 /// descriptor. Each descriptor gets close-on-exec.
-#[cfg(target_os = "linux")]
 pub(crate) fn recv_fd(sock: RawFd) -> io::Result<Option<OwnedFd>> {
     use std::os::fd::FromRawFd;
     let mut byte = [0u8; 1];
@@ -707,7 +722,11 @@ pub(crate) fn recv_fd(sock: RawFd) -> io::Result<Option<OwnedFd>> {
         msg.msg_iovlen = 1;
         msg.msg_control = space.as_mut_ptr() as *mut libc::c_void;
         msg.msg_controllen = std::mem::size_of_val(&space) as _;
-        let n = libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC | libc::MSG_DONTWAIT);
+        #[cfg(target_os = "linux")]
+        let flags = libc::MSG_CMSG_CLOEXEC | libc::MSG_DONTWAIT;
+        #[cfg(not(target_os = "linux"))]
+        let flags = libc::MSG_DONTWAIT;
+        let n = libc::recvmsg(sock, &mut msg, flags);
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -727,9 +746,113 @@ pub(crate) fn recv_fd(sock: RawFd) -> io::Result<Option<OwnedFd>> {
                 ))
             };
         }
-        let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const RawFd);
-        Ok(Some(OwnedFd::from_raw_fd(fd)))
+        let fd = OwnedFd::from_raw_fd(std::ptr::read_unaligned(
+            libc::CMSG_DATA(cmsg) as *const RawFd
+        ));
+        // macOS has no MSG_CMSG_CLOEXEC. No process of the engine starts
+        // between the receive and this call while the proxy runs a session.
+        #[cfg(not(target_os = "linux"))]
+        if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(fd))
     }
+}
+
+/// Sends `fd` on the Unix socket `sock` (`SCM_RIGHTS`). Gives 0 or -1.
+///
+/// # Safety
+///
+/// Only system calls on the stack: safe in the child of a fork.
+pub(crate) unsafe fn send_fd(sock: RawFd, fd: RawFd) -> i32 {
+    let mut byte = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
+        iov_len: 1,
+    };
+    let mut space = [0u64; 4];
+    let mut msg: libc::msghdr = std::mem::zeroed();
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = space.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as _;
+    let cmsg = libc::CMSG_FIRSTHDR(&msg);
+    (*cmsg).cmsg_level = libc::SOL_SOCKET;
+    (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+    (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+    std::ptr::write_unaligned(libc::CMSG_DATA(cmsg) as *mut RawFd, fd);
+    // macOS has no MSG_NOSIGNAL: a Rust program ignores SIGPIPE.
+    #[cfg(target_os = "linux")]
+    let flags = libc::MSG_NOSIGNAL;
+    #[cfg(not(target_os = "linux"))]
+    let flags = 0;
+    if libc::sendmsg(sock, &msg, flags) == 1 {
+        0
+    } else {
+        -1
+    }
+}
+
+/// The longest wait of the handoff for the receipt byte of the proxy.
+const RECEIPT_WAIT: Duration = Duration::from_secs(5);
+
+/// What the handoff of [`start_handoff`] does after the end of the engine
+/// end of its pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterEnd {
+    /// Close the listener (Linux: the listener is in the network namespace
+    /// of the session, so no other process can take its port).
+    Close,
+    /// Keep the listener open until the helper ends, and close each later
+    /// connection with no byte (macOS: the port is on the host, so a free
+    /// port could go to another process while the agent runs, issue 1159).
+    Hold,
+}
+
+/// Starts the handoff thread of the egress listener: it sends each
+/// connection to `listener` to the proxy of the session on `channel`, and
+/// keeps its copy only until the receipt byte of the proxy (at most
+/// [`RECEIPT_WAIT`]). The handoff makes no connection on the host. If the
+/// engine end of the pair closed (the engine ended), the send fails, and
+/// the thread does what `after` says (issues 507 and 1159).
+pub(crate) fn start_handoff(
+    listener: TcpListener,
+    channel: OwnedFd,
+    after: AfterEnd,
+) -> io::Result<()> {
+    let channel = UnixStream::from(channel);
+    channel.set_read_timeout(Some(RECEIPT_WAIT))?;
+    thread::Builder::new()
+        .name("iris-handoff".into())
+        .spawn(move || {
+            let mut ended = false;
+            for inner in listener.incoming() {
+                let Ok(inner) = inner else {
+                    // For example no file descriptor: wait, do not spin.
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                };
+                if ended {
+                    continue; // the connection closes here
+                }
+                // SAFETY: both descriptors are open for the call.
+                let ok = unsafe { send_fd(channel.as_raw_fd(), inner.as_raw_fd()) } == 0;
+                if ok {
+                    // Keep `inner` open until the proxy has its copy: macOS
+                    // flushes a socket whose only references are in a
+                    // message that waits (the agent then sees a reset).
+                    let _ = (&channel).read(&mut [0u8; 1]);
+                }
+                drop(inner);
+                if !ok {
+                    match after {
+                        AfterEnd::Close => return, // the listener closes
+                        AfterEnd::Hold => ended = true,
+                    }
+                }
+            }
+        })?;
+    Ok(())
 }
 
 /// Waits until `source` has a client (true) or the wake pipe is closed

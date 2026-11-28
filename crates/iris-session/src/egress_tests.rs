@@ -1217,7 +1217,6 @@ fn types_of(buf: &[u8]) -> Option<Vec<u16>> {
 }
 
 /// A proxy of a Linux session on its socket pair, with a loopback server.
-#[cfg(target_os = "linux")]
 fn channel_proxy(name: &str) -> (Proxy, UnixStream, LogFile) {
     let log = std::env::temp_dir().join(format!("iris-egress-{name}-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&log);
@@ -1245,22 +1244,27 @@ fn channel_proxy(name: &str) -> (Proxy, UnixStream, LogFile) {
 
 /// A connection of the agent, as the helper hands it over: the proxy end
 /// goes on the pair, the agent end stays with the test.
-#[cfg(target_os = "linux")]
 fn hand_over(helper: &UnixStream) -> io::Result<TcpStream> {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let agent = TcpStream::connect(l.local_addr().unwrap()).unwrap();
     let (inner, _) = l.accept().unwrap();
     // SAFETY: both descriptors are open for the call.
-    if unsafe { crate::isolation::linux::send_fd(helper.as_raw_fd(), inner.as_raw_fd()) } != 0 {
+    if unsafe { crate::egress::send_fd(helper.as_raw_fd(), inner.as_raw_fd()) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    // As the handoff does: keep `inner` until the receipt byte of the proxy.
+    helper
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut b = [0u8; 1];
+    assert_eq!((&*helper).read(&mut b).unwrap(), 1, "the receipt byte");
+    drop(inner);
     Ok(agent)
 }
 
-/// Issue 507: the proxy of a Linux session has no port. A connection that
+/// Issue 507: the proxy of a session takes its clients only from its pair. A connection that
 /// the helper sends on the pair gets a tunnel; after the end of the proxy
 /// side, the helper cannot send one more, so it reaches no other process.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_channel_proxy_takes_connections_only_from_its_pair() {
     let (proxy, helper, log) = channel_proxy("channel");
@@ -1288,7 +1292,6 @@ fn a_channel_proxy_takes_connections_only_from_its_pair() {
 
 /// The helper ends first: the proxy sees the end of the pair, does not spin,
 /// and stops at once.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_channel_proxy_stops_after_the_end_of_the_helper() {
     let (proxy, helper, _log) = channel_proxy("channel-end");
@@ -1302,14 +1305,13 @@ fn a_channel_proxy_stops_after_the_end_of_the_helper() {
 /// A descriptor that is not a TCP connection is closed with no answer and
 /// no log line, a message with no descriptor is dropped, and the proxy
 /// goes on.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_channel_proxy_closes_a_descriptor_that_is_not_tcp() {
     let (proxy, helper, log) = channel_proxy("channel-unix");
     let (mut mine, theirs) = UnixStream::pair().unwrap();
     // SAFETY: both descriptors are open for the call.
     assert_eq!(
-        unsafe { crate::isolation::linux::send_fd(helper.as_raw_fd(), theirs.as_raw_fd()) },
+        unsafe { crate::egress::send_fd(helper.as_raw_fd(), theirs.as_raw_fd()) },
         0
     );
     drop(theirs);
@@ -1324,6 +1326,53 @@ fn a_channel_proxy_closes_a_descriptor_that_is_not_tcp() {
     drop(_s);
     proxy.stop().unwrap();
     assert_eq!(log_text(&log).lines().count(), 1);
+}
+
+/// Issue 1159: the port of a macOS session lives as long as its helper.
+/// The helper holds the listener of [`Proxy::start_held`] and sends each
+/// connection on the pair. After the end of the engine (the proxy), the
+/// port stays bound, so no other process can take it, and each later
+/// connection closes with no byte.
+#[test]
+fn a_held_port_stays_bound_after_the_end_of_the_engine() {
+    let log = std::env::temp_dir().join(format!("iris-egress-heldport-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let guard = LogFile(log.clone());
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let (proxy, helper, listener) = Proxy::start_held(
+        allowed(),
+        file,
+        Box::new(Fixed(echo())),
+        Some("t0ken".into()),
+    )
+    .unwrap();
+    let port = proxy.endpoint().port;
+    assert_eq!(listener.local_addr().unwrap().port(), port);
+    assert_eq!(proxy.endpoint().token.as_deref(), Some("t0ken"));
+    start_handoff(listener, helper, AfterEnd::Hold).unwrap();
+    // A connection with no token reaches the proxy through the helper and
+    // gets 407.
+    let agent = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (_s, line) = send_on(agent, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 407"), "{line}");
+    // The engine ends.
+    proxy.stop().unwrap();
+    for _ in 0..3 {
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "no other process can take the port"
+        );
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = c.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+        let mut b = [0u8; 1];
+        assert_eq!(c.read(&mut b).unwrap_or(0), 0, "closed with no byte");
+    }
+    assert_eq!(log_text(&guard).lines().count(), 1);
 }
 
 #[test]

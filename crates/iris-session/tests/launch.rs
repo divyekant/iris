@@ -496,6 +496,7 @@ fn a_local_port_equal_to_the_egress_port_stops_the_start() {
                 port: 4000,
                 token: None,
                 channel: None,
+                listener: None,
             }))
         },
         stop_marks: &Mutex::default(),

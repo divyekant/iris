@@ -87,7 +87,7 @@ impl Launchd for FakeLaunchd {
             let Ok(s) = UnixStream::connect(&f.socket) else {
                 return;
             };
-            if let Ok((fds, msg)) = recv_with_fds(&s, HANDOFF_FDS) {
+            if let Ok((fds, msg)) = recv_with_fds(&s, HANDOFF_EGRESS_FDS) {
                 *got.lock().unwrap() = Some((fds.len(), Handoff::decode(&msg).unwrap()));
                 let _ = (&s).write_all(&[7]);
             }
@@ -136,7 +136,15 @@ fn run_shim(
     };
     let args: Vec<OsString> = vec!["3".into(), "/usr/bin/sandbox-exec".into(), "-p".into()];
     let env = vec![("HTTPS_PROXY".into(), "http://iris:t@127.0.0.1:4000".into())];
-    let code = shim(&sb, &launchd, Path::new("/opt/iris/iris"), &d, &args, env);
+    let code = shim(
+        &sb,
+        &launchd,
+        Path::new("/opt/iris/iris"),
+        &d,
+        &args,
+        env,
+        Some(egress_fds().0),
+    );
     let bootouts = launchd.bootouts.lock().unwrap().clone();
     let got = launchd.got.lock().unwrap().take();
     (Dir(d), code, bootouts, got, sb)
@@ -148,7 +156,7 @@ fn the_shim_hands_off_to_the_job_of_the_record_and_exits_with_its_code() {
     assert_eq!(code, 7);
     assert!(bootouts.is_empty());
     let (fds, h) = got.unwrap();
-    assert_eq!(fds, HANDOFF_FDS);
+    assert_eq!(fds, HANDOFF_EGRESS_FDS);
     assert_eq!(h.args, ["3", "/usr/bin/sandbox-exec", "-p"]);
     assert_eq!(h.env[0].1, "http://iris:t@127.0.0.1:4000");
     let plist = fs::read_to_string(files(&d.0, 3).plist).unwrap();
@@ -157,6 +165,47 @@ fn the_shim_hands_off_to_the_job_of_the_record_and_exits_with_its_code() {
         !plist.contains("iris:t"),
         "the token is not in the job definition"
     );
+}
+
+/// The egress descriptors of a session for a test: the helper end of a
+/// pair, and a listener on a free port of `127.0.0.1`. Gives the engine end
+/// and the port too.
+fn egress_fds() -> (EgressFds, UnixStream, u16) {
+    let (engine, helper) = UnixStream::pair().unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let fds = EgressFds {
+        channel: helper.into(),
+        listener: l.into(),
+    };
+    (fds, engine, port)
+}
+
+/// Issue 1159: an egress port needs its descriptors, and descriptors need
+/// a port. The shim refuses each other case before any launchd call.
+#[test]
+fn the_shim_refuses_an_egress_port_with_no_descriptors() {
+    let d = std::env::temp_dir().join(format!("iris-shim-noegress-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    let guard = Dir(fs::canonicalize(&d).unwrap());
+    let sb = Seatbelt::with(&guard.0, Box::new(FakeSys(Mutex::default()))).unwrap();
+    let launchd = FakeLaunchd {
+        data: guard.0.clone(),
+        session: 3,
+        job: Job::Good,
+        peer_uid: 501,
+        bootouts: Mutex::default(),
+        got: Arc::default(),
+    };
+    let args: Vec<OsString> = vec!["3".into(), "/usr/bin/sandbox-exec".into()];
+    let proxy = vec![("HTTPS_PROXY".into(), "http://iris:t@127.0.0.1:4000".into())];
+    for (env, egress) in [(proxy, None), (vec![], Some(egress_fds().0))] {
+        let code = shim(&sb, &launchd, Path::new("/i"), &guard.0, &args, env, egress);
+        assert_eq!(code, 1);
+    }
+    assert!(!files(&guard.0, 3).plist.exists(), "no job definition");
+    assert!(launchd.got.lock().unwrap().is_none());
 }
 
 #[test]
@@ -333,7 +382,8 @@ fn job_child() {
     let sys = FakeSys(Mutex::new(BTreeMap::from([(me, 50)])));
     let dir = PathBuf::from(dir);
     let sb = Seatbelt::with(&dir, Box::new(sys)).unwrap();
-    let code = job(&sb, &dir, &["3".into(), "4000".into()]);
+    let port = std::env::var("IRIS_TEST_JOB_PORT").unwrap();
+    let code = job(&sb, &dir, &["3".into(), port.into()]);
     std::process::exit(code);
 }
 
@@ -346,6 +396,9 @@ struct Started {
     dir: PathBuf,
     /// The descriptors of the test process that a child inherits.
     inherited: Vec<i32>,
+    /// The engine end of the pair of the egress proxy, and the port.
+    proxy: UnixStream,
+    port: u16,
     _dir: Dir,
 }
 
@@ -367,9 +420,11 @@ fn start_job(name: &str, agent: &str) -> Started {
             f >= 0 && f & libc::FD_CLOEXEC == 0
         })
         .collect();
+    let (egress, proxy, port) = egress_fds();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "macos_job::tests::job_child", "--test-threads=1"])
         .env("IRIS_TEST_JOB_DIR", &d)
+        .env("IRIS_TEST_JOB_PORT", port.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -385,6 +440,8 @@ fn start_job(name: &str, agent: &str) -> Started {
         log_w.as_raw_fd(),
         status_w.as_raw_fd(),
         work.as_raw_fd(),
+        egress.channel.as_raw_fd(),
+        egress.listener.as_raw_fd(),
     ];
     let h = Handoff {
         args: vec!["3".into(), "/bin/sh".into(), "-c".into(), agent.into()],
@@ -394,7 +451,7 @@ fn start_job(name: &str, agent: &str) -> Started {
         ],
     };
     send_with_fds(&s, &fds, &h.encode()).unwrap();
-    drop((engine_r, log_w, status_w, work, log_r));
+    drop((engine_r, log_w, status_w, work, log_r, egress));
     Started {
         child,
         sock: s,
@@ -402,6 +459,8 @@ fn start_job(name: &str, agent: &str) -> Started {
         status: status_r,
         dir: d,
         inherited,
+        proxy,
+        port,
         _dir: guard,
     }
 }
@@ -420,7 +479,7 @@ fn the_job_runs_the_hold_with_the_handoff() {
     // The record came before the connection.
     let sb = Seatbelt::with(&d, Box::new(FakeSys(Mutex::default()))).unwrap();
     let rec = sb.record(3).unwrap().unwrap();
-    assert_eq!((rec.coalition, rec.port), (50, Some(4000)));
+    assert_eq!((rec.coalition, rec.port), (50, Some(j.port)));
     // No agent before `start`.
     thread::sleep(Duration::from_millis(200));
     assert!(!d.join("work/seen").exists());
@@ -480,5 +539,67 @@ fn the_end_of_the_shim_stops_the_agent() {
     let mut status = String::new();
     j.status.read_to_string(&mut status).unwrap();
     assert!(status.starts_with("started "), "{status}");
+    drop(j.engine);
+}
+
+/// Issue 1159: the job process holds the egress port of the session. Each
+/// connection to the port goes to the engine end of the pair. After the
+/// end of the engine, the port stays bound while the agent runs, so no other
+/// process can take it, and a connection closes with no byte. At the end
+/// of the job, the port is free.
+#[test]
+fn the_job_holds_the_egress_port_until_its_end() {
+    let mut j = start_job("egress", "echo up > up; exec sleep 60");
+    j.engine.write_all(b"start\n").unwrap();
+    let up = j.dir.join("work/up");
+    let t = Instant::now();
+    while !up.exists() {
+        assert!(t.elapsed() < Duration::from_secs(10), "no agent");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let port = j.port;
+    // A connection goes to the engine end of the pair, and keeps working.
+    let mut a = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    j.proxy.set_nonblocking(false).unwrap();
+    let t = Instant::now();
+    let far = loop {
+        match crate::egress::recv_fd(j.proxy.as_raw_fd()) {
+            Ok(Some(fd)) => break fd,
+            Ok(None) => panic!("the pair ended"),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                assert!(t.elapsed() < Duration::from_secs(5), "no connection");
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let mut far = std::net::TcpStream::from(far);
+    a.write_all(b"a").unwrap();
+    let mut got = [0u8; 1];
+    // The receipt byte of a proxy.
+    (&j.proxy).write_all(&[1]).unwrap();
+    far.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"a");
+    // The engine ends: the pair closes. The agent still runs.
+    drop(j.proxy);
+    for _ in 0..3 {
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "the port stays bound"
+        );
+        if let Ok(mut c) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut b = [0u8; 1];
+            assert_eq!(c.read(&mut b).unwrap_or(0), 0, "closed with no byte");
+        }
+    }
+    // The end of the job (the shim ends) frees the port.
+    drop(j.sock);
+    let t = Instant::now();
+    while j.child.try_wait().unwrap().is_none() {
+        assert!(t.elapsed() < Duration::from_secs(20), "the job did not end");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     drop(j.engine);
 }

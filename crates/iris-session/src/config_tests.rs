@@ -336,6 +336,7 @@ fn env_of(a: &Adapter, port: Option<u16>) -> HashMap<String, String> {
             port,
             token: None,
             channel: None,
+            listener: None,
         }),
     )
 }
@@ -384,6 +385,7 @@ fn the_agent_env_has_only_the_listed_variables() {
             port: 4003,
             token: Some("ab12".into()),
             channel: None,
+            listener: None,
         }),
     );
     assert_eq!(t["HTTPS_PROXY"], "http://iris:ab12@127.0.0.1:4003");
