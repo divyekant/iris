@@ -390,10 +390,11 @@ proxy started):
    takes no new request (exit code 3).
 2. Close the egress proxy of the session (`Proxy::close`, see "Model
    egress"). This comes before each wait: no step below keeps a tunnel
-   open. The proxy keeps its port bound (macOS) or its end of the socket
-   pair open (Linux). The engine stops the proxy (`Proxy::stop`, which
-   frees the port or closes the pair) only after the reap check of the
-   session passes. A launch that fails before the helper starts closes
+   open. The proxy keeps the engine end of its socket pair open. The
+   engine stops the proxy (`Proxy::stop`, which closes the pair) only
+   after the reap check of the session passes. On macOS the helper, not
+   the proxy, holds the TCP listener of the egress port, until the helper
+   ends, also after an engine crash (issue 1159). A launch that fails before the helper starts closes
    and keeps its proxy in the same way, and the supervisor stops it after
    the reap check.
 3. Finish the accepted requests: each request that passed the check of the
@@ -581,10 +582,13 @@ no network stops them. The engine gives each session one narrow path out:
   connection to the proxy as a file descriptor (sandbox spec, "Egress on
   Linux"). The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and the
   same value in `https_proxy`.
-- On macOS, the proxy takes a client only from `127.0.0.1`, and only with
+- On macOS, the engine binds the TCP listener of the egress port on
+  `127.0.0.1` and gives it to the helper with the helper end of a socket
+  pair; the engine keeps no copy. The helper holds the listener until it
+  ends, also after an engine crash, and sends each connection to the
+  proxy on the pair (issue 1159). The proxy takes a `CONNECT` only with
   the token of its session in `Proxy-Authorization: Basic` (user `iris`).
-  A client from another address gets `403`, and a `CONNECT` with no
-  token or another token gets `407`, both with the log word
+  A `CONNECT` with no token or another token gets `407` with the log word
   `not_session` (macOS sandbox spec, "Egress on macOS"). The agent gets
   `HTTPS_PROXY=http://iris:<token>@127.0.0.1:<port>` and the same value
   in `https_proxy`.
@@ -624,8 +628,10 @@ no network stops them. The engine gives each session one narrow path out:
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
   starts one proxy for each session that it registers, after the bind and
-  before the helper, with the log of that session: on macOS with the
-  peer address `127.0.0.1` and a new token, on Linux on a new socket pair.
+  before the helper, with the log of that session, on a new socket pair.
+  On macOS, the proxy also gets a new token: the job process accepts on a
+  listener that is bound to `127.0.0.1` only, and sends each connection on
+  the pair, so the proxy has no TCP peer address to check.
   A revoke retry registers a second session, so it gets its own proxy. If
   the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
@@ -637,7 +643,7 @@ no network stops them. The engine gives each session one narrow path out:
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
   `sni_not_allowed`, `ech`, `no_resources` when the engine has no file
   descriptor or thread for the connection, `not_session` on macOS for a
-  client that is not from `127.0.0.1` or has no token of the session) and no text of the request. For a connection that closes, or
+  client that has no token of the session) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
   Only the proxy writes this file,
@@ -661,10 +667,10 @@ no network stops them. The engine gives each session one narrow path out:
   `iris job stop` or a revoke through the engine also wakes it. The close
   ends each open tunnel and each resolve in progress, and from then on
   the proxy answers each new connection with a close and the log line
-  `ended reason=stopped`. The close keeps the port bound (macOS) or the
-  engine end of the pair open (Linux), and the engine stops the proxy
-  (`Proxy::stop`, which frees the port or closes the pair) only when the
-  reap check of the session passes.
+  `ended reason=stopped`. The close keeps the engine end of the pair
+  open, and the engine stops the proxy (`Proxy::stop`, which closes the
+  pair) only when the reap check of the session passes. On macOS the
+  helper keeps the listener of the port until it ends.
 - Known limit (issue): an end that a store trigger or another process
   writes is not in step with the proxy. Between the commit of `ended_at`
   and the next supervisor turn (at most about 1 second), an open tunnel
@@ -675,16 +681,18 @@ no network stops them. The engine gives each session one narrow path out:
   agent sent before. A gate in each tunnel that reads the store for each
   byte costs more than this window is worth.
   On macOS, the agent connects to the port while the helper lives, and
-  the reap check confirms that the helper ended. So, while the engine
-  runs, the port number cannot go to the proxy of another session while a
-  process of this session can reach it (after an engine crash: issue
-  #1159). On Linux, the proxy has no host port: the helper sends each
+  the helper holds the listener of the port until it ends, also after an
+  engine crash (issue 1159). So the port number cannot go to another
+  process while the helper lives. A process of the session that escapes
+  the stop of the helper (issue #599) can outlive the helper; the token
+  check keeps it out of the proxy of each other session, and the reap
+  waits until `stop` ends it. On Linux, the proxy has no host port: the helper sends each
   connection on the socket pair of the session, and the engine closes its
   end of the pair only after the reap check
   (`docs/specs/2026-11-17-session-sandbox.md`, "Egress on Linux").
 
-The engine knows the session from the port (macOS) or from the pair
-(Linux), never from the request. An
+The engine knows the session from the pair of its proxy, and on macOS
+also from the token, never from the request. An
 adapter with no allowed host gets no egress port and no `HTTPS_PROXY`.
 
 The agent sends the files of the workspace, which hold granted mail, to

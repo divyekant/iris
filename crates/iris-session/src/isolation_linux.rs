@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use iris_job::format_session_id;
 
 use super::{Command, Isolation};
+use crate::egress::{send_fd, start_handoff, AfterEnd};
 
 /// The file descriptor on which `bwrap` writes its info line.
 const INFO_FD: RawFd = 3;
@@ -332,7 +333,7 @@ impl Bwrap {
             self.write_record(session, &info)?;
             if let Some((port, channel)) = egress {
                 let listener = listen_in(info.pid, port, deadline)?;
-                start_handoff(listener, channel)?;
+                start_handoff(listener, channel, AfterEnd::Close)?;
             }
             if let Some(port) = local_port {
                 // The server on the port is a program of the person, not
@@ -1154,35 +1155,6 @@ unsafe fn join_and_bind(net: &CString, own_user: u64, port: u16, sock: RawFd) ->
     0
 }
 
-/// Sends `fd` on the Unix socket `sock` (`SCM_RIGHTS`). Gives 0 or -1.
-///
-/// # Safety
-///
-/// Only system calls on the stack: safe in the child of a fork.
-pub(crate) unsafe fn send_fd(sock: RawFd, fd: RawFd) -> i32 {
-    let mut byte = [0u8; 1];
-    let mut iov = libc::iovec {
-        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
-        iov_len: 1,
-    };
-    let mut space = [0u64; 4];
-    let mut msg: libc::msghdr = std::mem::zeroed();
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = space.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as _;
-    let cmsg = libc::CMSG_FIRSTHDR(&msg);
-    (*cmsg).cmsg_level = libc::SOL_SOCKET;
-    (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-    (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
-    std::ptr::write_unaligned(libc::CMSG_DATA(cmsg) as *mut RawFd, fd);
-    if libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL) == 1 {
-        0
-    } else {
-        -1
-    }
-}
-
 /// Receives one file descriptor from [`send_fd`], in `wait`.
 fn recv_fd(sock: &std::os::unix::net::UnixStream, wait: Duration) -> io::Result<OwnedFd> {
     if !readable(sock.as_raw_fd(), wait)? {
@@ -1214,30 +1186,6 @@ fn take_channel() -> io::Result<OwnedFd> {
     // SAFETY: the launch gave this descriptor to the helper, and nothing
     // else in the helper owns it.
     Ok(unsafe { OwnedFd::from_raw_fd(crate::egress::EGRESS_FD) })
-}
-
-/// Starts the handoff thread of the egress listener: it sends each
-/// connection to `listener` (in the sandbox) to the proxy of the session
-/// on `channel`, and keeps no copy. The relay makes no connection on the
-/// host. If the engine end of the pair closed (the engine ended), the send
-/// fails, the thread ends and the listener closes (issue 507).
-pub(crate) fn start_handoff(listener: TcpListener, channel: OwnedFd) -> io::Result<()> {
-    thread::Builder::new()
-        .name("iris-handoff".into())
-        .spawn(move || {
-            for inner in listener.incoming() {
-                let Ok(inner) = inner else {
-                    // For example no file descriptor: wait, do not spin.
-                    thread::sleep(Duration::from_millis(50));
-                    continue;
-                };
-                // SAFETY: both descriptors are open for the call.
-                if unsafe { send_fd(channel.as_raw_fd(), inner.as_raw_fd()) } != 0 {
-                    return; // the listener closes
-                }
-            }
-        })?;
-    Ok(())
 }
 
 /// Starts the relay thread: each connection to `listener` (in the sandbox)

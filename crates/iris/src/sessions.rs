@@ -12,8 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Read;
-#[cfg(not(target_os = "linux"))]
-use std::net::Ipv4Addr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -564,9 +562,10 @@ impl Sessions {
     }
 
     /// The egress proxy of a session, with its log, and the endpoint of
-    /// the agent. Linux: the proxy takes its clients from a new socket pair
-    /// (the endpoint holds the helper end). macOS: a port of 127.0.0.1 and
-    /// a new token of the session tell its processes from all others.
+    /// the agent. The proxy takes its clients from a new socket pair (the
+    /// endpoint holds the helper end). macOS: the endpoint also holds the
+    /// listener of a port of 127.0.0.1, which the helper keeps, and a new
+    /// token of the session tells its processes from all others.
     fn egress(&self, session: i64, adapter: &Adapter) -> Result<(Proxy, Endpoint), String> {
         let allowed = adapter.allow_hosts.clone();
         let dir = self.data_dir().join("sessions");
@@ -594,15 +593,16 @@ impl Sessions {
         #[cfg(not(target_os = "linux"))]
         {
             let token = new_token().map_err(|e| format!("no token: {e}"))?;
-            let p = Proxy::start(
-                allowed,
-                log,
-                Box::new(SystemResolver),
-                Ipv4Addr::LOCALHOST,
-                Some(token),
-            )
-            .map_err(|e| e.to_string())?;
-            let end = p.endpoint();
+            let (p, helper, listener) =
+                Proxy::start_held(allowed, log, Box::new(SystemResolver), Some(token))
+                    .map_err(|e| e.to_string())?;
+            // The launch gives both to the helper; the engine keeps no copy
+            // after the launch (issue 1159).
+            let end = Endpoint {
+                channel: Some(Arc::new(helper)),
+                listener: Some(Arc::new(listener.into())),
+                ..p.endpoint()
+            };
             Ok((p, end))
         }
     }

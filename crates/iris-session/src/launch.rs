@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
@@ -24,7 +24,7 @@ use iris_job::{format_session_id, EndReason};
 use iris_store::Store;
 
 use crate::config::{self, Adapter};
-use crate::egress::Endpoint;
+use crate::egress::{Endpoint, EGRESS_FD, EGRESS_LISTEN_FD};
 use crate::isolation::Isolation;
 use crate::reap::reap_check;
 
@@ -480,24 +480,39 @@ impl Launcher<'_> {
         args.extend(command.args);
         let env = config::agent_env(adapter, egress, |n| (self.env)(n));
         let mut helper = (self.helper)(&args);
-        if let Some(channel) = egress.and_then(|e| e.channel.as_ref()) {
-            let fd = channel.as_raw_fd();
+        // The helper end of the pair goes to EGRESS_FD, and on macOS the
+        // listener of the port to EGRESS_LISTEN_FD (issue 1159).
+        let pass: Vec<(RawFd, RawFd)> = egress
+            .map(|e| {
+                let channel = e.channel.as_ref().map(|c| (c.as_raw_fd(), EGRESS_FD));
+                let listener = e
+                    .listener
+                    .as_ref()
+                    .map(|l| (l.as_raw_fd(), EGRESS_LISTEN_FD));
+                channel.into_iter().chain(listener).collect()
+            })
+            .unwrap_or_default();
+        if !pass.is_empty() {
             // SAFETY: the closure runs in the child between fork and exec,
-            // and calls only dup2, which is async-signal-safe. dup2 clears
-            // close-on-exec on the new descriptor only, so only this helper
-            // gets the pair.
+            // and calls only fcntl and dup2, which are async-signal-safe.
+            // First each source gets a copy above the targets with
+            // close-on-exec, so that no dup2 overwrites a source that is
+            // still to come. dup2 clears close-on-exec on the target only,
+            // so only this helper gets the descriptors.
             unsafe {
                 helper.pre_exec(move || {
-                    if fd == crate::egress::EGRESS_FD {
-                        // dup2 onto itself keeps close-on-exec: clear it.
-                        let flags = libc::fcntl(fd, libc::F_GETFD);
-                        if flags < 0
-                            || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-                        {
+                    let mut copies = [(-1, -1); 2];
+                    for (i, (src, dst)) in pass.iter().enumerate() {
+                        let c = libc::fcntl(*src, libc::F_DUPFD_CLOEXEC, 10);
+                        if c < 0 {
                             return Err(io::Error::last_os_error());
                         }
-                    } else if libc::dup2(fd, crate::egress::EGRESS_FD) < 0 {
-                        return Err(io::Error::last_os_error());
+                        copies[i] = (c, *dst);
+                    }
+                    for (c, dst) in &copies[..pass.len()] {
+                        if libc::dup2(*c, *dst) < 0 {
+                            return Err(io::Error::last_os_error());
+                        }
                     }
                     Ok(())
                 });
