@@ -63,8 +63,8 @@ pub enum Reason {
     Ech,
     /// The proxy had no file descriptor or thread for the connection.
     NoResources,
-    /// The client is not of the session: on macOS, not from `127.0.0.1`
-    /// or with no token of the session.
+    /// The client is not of the session: on macOS, with no token of the
+    /// session (and in tests, not from the peer address).
     NotSession,
 }
 
@@ -436,7 +436,7 @@ impl Proxy {
     /// connection and sends it on the pair ([`start_handoff`] with
     /// [`AfterEnd::Hold`]). So the port lives as long as the helper, also
     /// after an end of the engine, and no other process can take it while
-    /// the agent runs. With a `token`, the proxy answers each `CONNECT`
+    /// the helper lives. With a `token`, the proxy answers each `CONNECT`
     /// that does not give it with `407`.
     pub fn start_held(
         allowed: Vec<String>,
@@ -805,7 +805,7 @@ pub enum AfterEnd {
     Close,
     /// Keep the listener open until the helper ends, and close each later
     /// connection with no byte (macOS: the port is on the host, so a free
-    /// port could go to another process while the agent runs, issue 1159).
+    /// port could go to another process while the helper lives, issue 1159).
     Hold,
 }
 

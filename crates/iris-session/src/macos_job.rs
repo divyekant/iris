@@ -493,8 +493,8 @@ pub fn job(seatbelt: &Seatbelt, data_dir: &Path, args: &[OsString]) -> i32 {
 /// Starts the handoff of the egress port: the listener must be a TCP
 /// listener on `127.0.0.1:<port>`. Each connection of the agent goes to the
 /// proxy on `channel`. After the end of the engine, the listener stays open
-/// until this process ends, so no other process can take the port while the
-/// agent runs (issue 1159).
+/// until this process ends, so no other process can take the port while this
+/// process lives (issue 1159).
 fn hold_egress(listener: OwnedFd, channel: OwnedFd, port: u16) -> io::Result<()> {
     let listener = std::net::TcpListener::from(listener);
     let at = listener.local_addr()?;

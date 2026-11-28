@@ -628,8 +628,10 @@ no network stops them. The engine gives each session one narrow path out:
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
   starts one proxy for each session that it registers, after the bind and
-  before the helper, with the log of that session: on macOS with the
-  peer address `127.0.0.1` and a new token, on Linux on a new socket pair.
+  before the helper, with the log of that session, on a new socket pair.
+  On macOS, the proxy also gets a new token: the job process accepts on a
+  listener that is bound to `127.0.0.1` only, and sends each connection on
+  the pair, so the proxy has no TCP peer address to check.
   A revoke retry registers a second session, so it gets its own proxy. If
   the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
@@ -641,7 +643,7 @@ no network stops them. The engine gives each session one narrow path out:
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
   `sni_not_allowed`, `ech`, `no_resources` when the engine has no file
   descriptor or thread for the connection, `not_session` on macOS for a
-  client that is not from `127.0.0.1` or has no token of the session) and no text of the request. For a connection that closes, or
+  client that has no token of the session) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
   Only the proxy writes this file,

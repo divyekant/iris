@@ -544,7 +544,7 @@ fn the_end_of_the_shim_stops_the_agent() {
 
 /// Issue 1159: the job process holds the egress port of the session. Each
 /// connection to the port goes to the engine end of the pair. After the
-/// end of the engine, the port stays bound while the agent runs, so no other
+/// end of the engine, the port stays bound while the job lives, so no other
 /// process can take it, and a connection closes with no byte. At the end
 /// of the job, the port is free.
 #[test]

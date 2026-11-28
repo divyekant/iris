@@ -312,8 +312,11 @@ The helper holds the egress port, not the engine (issue 1159):
   agent then sees a reset. The Mac test of issue 1159 showed this.
 - After an engine crash, the pair ends. The job process keeps the
   listener open until it ends, and closes each later connection with no
-  byte. So no other process can take the port while the agent runs. The
-  hold stops the agent at the end of the pipe from the engine.
+  byte. So no other process can take the port while the helper lives.
+  The hold stops the agent at the end of the pipe from the engine. A
+  process of the session that escapes the stop of the helper (issue #599)
+  can outlive the helper. Then the port is free, and the token check keeps
+  such a process out of the proxy of each other session.
 
 A port of `127.0.0.1` alone does not tell the processes of a session
 from other processes of the user. macOS has only `127.0.0.1` on the
