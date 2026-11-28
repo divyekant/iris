@@ -121,6 +121,15 @@ pub fn checked_url(url: &str) -> Option<&str> {
     (port_ok && code_ok).then_some(url)
 }
 
+/// The view of the web client in the window address `url`: its fragment
+/// when it is a route (`#/...`), for example `#/mail/m-4`. `None` for a
+/// sign-in fragment (`#code=...`) or no fragment. A new sign-in keeps this
+/// view (issue #603).
+pub fn view_route(url: &str) -> Option<String> {
+    let (_, fragment) = url.split_once('#')?;
+    fragment.starts_with('/').then(|| format!("#{fragment}"))
+}
+
 /// One notice to show.
 #[derive(Debug, PartialEq)]
 pub struct Notice {
@@ -269,6 +278,28 @@ pub fn osascript(title: &str, body: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_sign_in_keeps_only_a_route_of_the_web_client() {
+        for (url, route) in [
+            ("http://127.0.0.1:4800/#/mail/m-4", Some("#/mail/m-4")),
+            ("http://127.0.0.1:4800/#/brief", Some("#/brief")),
+            ("http://127.0.0.1:4800/#code=ab12", None),
+            ("http://127.0.0.1:4800/", None),
+            ("http://127.0.0.1:4800/#", None),
+        ] {
+            assert_eq!(view_route(url).as_deref(), route, "{url}");
+        }
+        // The window reads its view before the new sign-in address loads,
+        // and the page load handler applies it (mac.rs).
+        let mac = include_str!("mac.rs");
+        let again = &mac[mac.find("fn sign_in_again").unwrap()..];
+        let again = &again[..again.find("\n}\n").unwrap()];
+        let read = again.find("engine::view_route(").unwrap();
+        let navigate = again.find(".navigate(").unwrap();
+        assert!(read < navigate, "{again}");
+        assert!(again.contains(".route.lock()"), "{again}");
+    }
 
     #[test]
     fn a_stalled_command_ends_at_the_time_limit() {

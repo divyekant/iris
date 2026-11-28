@@ -280,12 +280,19 @@ fn notices(app: AppHandle) {
 }
 
 /// The engine started again with a new web secret: load a new sign-in
-/// address in the open window (issue #547).
+/// address in the open window (issue #547). The window keeps its view: the
+/// page load handler applies the route of the old page, also one that a
+/// notice click set just before (issue #603).
 fn sign_in_again(app: &AppHandle) {
     let h = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = h.get_webview_window(MAIN) {
-            if let WebviewUrl::External(u) = address(&h.state::<Shell>()) {
+            let shell = h.state::<Shell>();
+            let view = w.url().ok().and_then(|u| engine::view_route(u.as_str()));
+            if let WebviewUrl::External(u) = address(&shell) {
+                if let Some(r) = view {
+                    shell.route.lock().unwrap().get_or_insert(r);
+                }
                 let _ = w.navigate(u);
             }
         }
