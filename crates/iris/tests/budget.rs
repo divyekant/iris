@@ -171,8 +171,14 @@ impl Drop for KillOnDrop {
 /// `START_TRIES` starts: a program that is always slow still fails.
 const START_TRIES: usize = 3;
 
+/// The two tests that start `iris serve` take this lock, so that the sync
+/// of the memory test does not load the CPU during the start test of this
+/// binary (on a Mac the start then took 2 s).
+static SERVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn serve_stays_inside_the_memory_and_start_budget() {
+    let _one = SERVE.lock().unwrap_or_else(|e| e.into_inner());
     let mut fastest: Option<(Duration, (u64, u64))> = None;
     for i in 0..START_TRIES {
         let begin = Instant::now();
@@ -318,6 +324,7 @@ fn wait_for_http_fails_when_the_server_sends_bytes_and_never_closes() {
 // shortcut: 2,000 messages in a debug build; the 100,000-message scale tests of iris-sync and iris-store cover the large load.
 #[test]
 fn serve_stays_inside_the_memory_budget_after_a_first_sync() {
+    let _one = SERVE.lock().unwrap_or_else(|e| e.into_inner());
     let fake =
         iris_fakegmail::FakeGmail::start(iris_synth::Mailbox::new(11, SYNC_MESSAGES)).unwrap();
     let tokens = common::token_server();

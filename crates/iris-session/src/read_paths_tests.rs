@@ -55,8 +55,15 @@ fn a_folder_of_files_passes_with_its_real_path() {
 #[test]
 fn a_socket_or_a_fifo_in_the_tree_is_refused() {
     let (_d, tool, data) = setup("socket");
-    let _l = UnixListener::bind(tool.join("lib/agent.sock")).unwrap();
-    refused(check(&tool, &data, None), "socket");
+    let sock = tool.join("lib/agent.sock");
+    // A socket path has at most 104 bytes on macOS. A checkout in a deep
+    // folder (a git worktree) gets a longer test path: then only the FIFO
+    // case runs. Linux CI has a short path.
+    let short = sock.as_os_str().len() < 104;
+    let _l = short.then(|| UnixListener::bind(&sock).unwrap());
+    if short {
+        refused(check(&tool, &data, None), "socket");
+    }
     let (_d2, tool2, data2) = setup("fifo");
     let fifo = CString::new(tool2.join("pipe").as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
@@ -167,8 +174,11 @@ fn a_line_of_another_form_fails_the_parse() {
 
 #[test]
 fn a_nested_mount_is_refused_by_the_walk() {
-    // /sys/fs/cgroup is a mount on most systems; the test needs one.
-    let fs_dir = open_no_links(Path::new("/sys/fs")).unwrap();
+    // /sys/fs/cgroup is a mount on most Linux systems; the test needs one.
+    // macOS has no /sys.
+    let Ok(fs_dir) = open_no_links(Path::new("/sys/fs")) else {
+        return;
+    };
     let cg = mount_at(fs_dir.as_raw_fd(), c"cgroup");
     let Ok(cg) = cg else { return };
     let own = mount_of(&fs_dir).unwrap();

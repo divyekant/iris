@@ -248,6 +248,7 @@ fn the_network_is_only_the_egress_port() {
     let other_port = other.local_addr().unwrap().port();
     let got = thread::spawn(move || {
         let mut s = TcpStream::from(recv_fd(&engine, Duration::from_secs(10)).unwrap());
+        (&engine).write_all(&[1]).unwrap(); // the receipt byte of a proxy
         let mut b = [0u8; 2];
         s.read_exact(&mut b).unwrap();
         s.write_all(b"ok").unwrap();
@@ -652,9 +653,10 @@ fn the_handoff_reaches_only_the_engine_end_of_its_pair() {
     let (engine, helper) = std::os::unix::net::UnixStream::pair().unwrap();
     let inner = TcpListener::bind("127.0.0.1:0").unwrap();
     let inner_port = inner.local_addr().unwrap().port();
-    start_handoff(inner, helper.into()).unwrap();
+    start_handoff(inner, helper.into(), AfterEnd::Close).unwrap();
     let mut a = TcpStream::connect(("127.0.0.1", inner_port)).unwrap();
     let mut far = TcpStream::from(recv_fd(&engine, Duration::from_secs(5)).unwrap());
+    (&engine).write_all(&[1]).unwrap(); // the receipt byte of a proxy
     a.write_all(b"a").unwrap();
     let mut got = [0u8; 1];
     far.read_exact(&mut got).unwrap();
@@ -753,6 +755,7 @@ fn the_helper_takes_its_pair_and_hands_over_each_connection() {
     let h = helper(Some(ours.as_raw_fd()));
     drop(ours);
     let mut s = TcpStream::from(recv_fd(&engine, Duration::from_secs(20)).unwrap());
+    (&engine).write_all(&[1]).unwrap(); // the receipt byte of a proxy
     let mut b = [0u8; 2];
     s.read_exact(&mut b).unwrap();
     assert_eq!(&b, b"hi");

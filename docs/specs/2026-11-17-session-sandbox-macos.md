@@ -293,23 +293,48 @@ There is no network namespace, so no relay. The agent connects to
 `127.0.0.1:<egress port>` directly, and the profile permits only that port
 and the `allow_local` port of the adapter, if the person lists one
 (`docs/specs/2026-11-25-agents-read-paths-local-port.md`). The agent gets that port in `IRIS_LOCAL_PORT`.
-The proxy of the session takes clients from `127.0.0.1` on macOS: the
-engine passes `Ipv4Addr::LOCALHOST` as the peer (`sessions.rs`). macOS has
-only `127.0.0.1` on the loopback interface, so a session address of each
-session does not work there. (Linux had such addresses until issue 507;
-now its proxy has no port at all.)
+
+The helper holds the egress port, not the engine (issue 1159):
+
+- The engine binds the TCP listener on `127.0.0.1:0` and makes a socket
+  pair (`Proxy::start_held`). The proxy takes its clients from the engine
+  end of the pair.
+- The launch gives the helper end of the pair on descriptor 3 and the
+  listener on descriptor 4. The engine keeps no copy after the launch.
+- The shim gives both to the job process in the handoff (six
+  descriptors). The job process checks that the listener is on
+  `127.0.0.1:<egress port>` of its arguments, then accepts each connection
+  and sends it on the pair. Both descriptors are close-on-exec, so the agent
+  gets neither.
+- The handoff keeps its copy of each connection until the proxy writes
+  one receipt byte on the pair (at most 5 seconds). macOS flushes a socket
+  whose only references are in a message that waits on a Unix socket; the
+  agent then sees a reset. The Mac test of issue 1159 showed this.
+- After an engine crash, the pair ends. The job process keeps the
+  listener open until it ends, and closes each later connection with no
+  byte. So no other process can take the port while the helper lives.
+  The hold stops the agent at the end of the pipe from the engine. A
+  process of the session that escapes the stop of the helper (issue #599)
+  can outlive the helper. Then the port is free, and the token check keeps
+  such a process out of the proxy of each other session.
+
+A port of `127.0.0.1` alone does not tell the processes of a session
+from other processes of the user. macOS has only `127.0.0.1` on the
+loopback interface, so a session address of each session does not work
+there. (Linux had such addresses until issue 507; now its proxy has no
+port at all.)
 
 Invariant: a process of a session reaches only the proxy of its own
 session, also after an engine crash and with another data folder. A port
-check cannot give this: after a crash, a new engine (perhaps of another
-data folder) can get the port of a session that is not reaped. So each
+check alone cannot give this: a process of session A that escaped the
+reap can connect to the port of session B. So each
 proxy on macOS needs a secret of its session:
 
 - The launch makes a random token of 32 bytes for each session, with the
   egress port, and gives it to the agent only in its environment:
   `HTTPS_PROXY=http://iris:<token>@127.0.0.1:<port>`. The token is not in
   the record, the store or a log.
-- `Proxy::start` gets an optional token. With a token, the proxy answers
+- `Proxy::start_held` gets an optional token. With a token, the proxy answers
   each `CONNECT` with no `Proxy-Authorization: Basic` header that holds
   `iris:<token>` with `407` and the log word `not_session`, before it
   opens a connection. The compare takes constant time.
@@ -399,10 +424,11 @@ before the agent runs, or `ended` is false.
   `stop`, `ended`, check) and `isolation_macos_tests.rs`.
 - `crates/iris-session/src/hold.rs` or the helper entry of the program:
   the shim and the `session-job` verb on macOS.
-- `crates/iris/src/sessions.rs`: the egress peer `127.0.0.1` and the token
+- `crates/iris/src/sessions.rs`: the held egress listener (`Proxy::start_held`) and the token
   of each session on macOS.
 - `crates/iris-session/src/egress.rs`: the optional token of
-  `Proxy::start` and the `407` answer.
+  `Proxy::start_held`, the `407` answer, and the handoff with the receipt
+  byte.
 - `crates/iris-session/src/config.rs` or the launch: the token in
   `HTTPS_PROXY` of the agent environment.
 - The launcher spec, "Isolation", goal 3 and the failure list: the macOS

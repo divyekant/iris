@@ -458,14 +458,13 @@ fn busy_connections_do_not_hold_wait_past_its_time_limit() {
     });
     let start = std::time::Instant::now();
     let result = sign_in.wait(Duration::from_millis(300));
+    // The time of the wait only: on macOS a connect to a full queue waits
+    // for SYN retries, so the join of the noise thread can take seconds.
+    let took = start.elapsed();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     noise.join().unwrap();
     assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
-    assert!(
-        start.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        start.elapsed()
-    );
+    assert!(took < Duration::from_secs(2), "{took:?}");
 }
 
 #[test]
