@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use mac_notification_sys::{Notification, NotificationResponse};
 use tauri::image::Image;
@@ -202,7 +203,16 @@ fn navigate(app: &AppHandle, url: &Url) -> bool {
         }
         return false;
     }
-    if url.scheme() == "tauri" || is_engine(&app.state::<Shell>(), url) {
+    let shell = app.state::<Shell>();
+    if url.scheme() == "tauri" {
+        return true;
+    }
+    if is_engine(&shell, url) {
+        // The view of the old page at a new sign-in (issue #603).
+        let view = url.query_pairs().find(|(k, _)| k == engine::VIEW_PARAM);
+        if let Some(r) = view.and_then(|(_, v)| engine::kept_view(&v)) {
+            *shell.route.lock().unwrap() = Some(r);
+        }
         return true;
     }
     if matches!(url.scheme(), "http" | "https" | "mailto") {
@@ -256,7 +266,7 @@ fn notices(app: AppHandle) {
     let waiting = Arc::new(AtomicUsize::new(0));
     let mut poll = engine::Poll::default();
     loop {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let page = engine::request(&socket, "app.notices", poll.args())
             .ok()
             .and_then(|r| poll.read(&r));
@@ -280,13 +290,22 @@ fn notices(app: AppHandle) {
 }
 
 /// The engine started again with a new web secret: load a new sign-in
-/// address in the open window (issue #547).
+/// address in the open window (issue #547). An engine page keeps its view:
+/// it loads the address itself, with its hash in the query, after each
+/// earlier script of the window, also the hash change of a notice click
+/// (`engine::keep_view_script`, issue #603). `navigate` takes the view, and
+/// the page load handler applies it. A local page has no view to keep.
 fn sign_in_again(app: &AppHandle) {
     let h = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = h.get_webview_window(MAIN) {
-            if let WebviewUrl::External(u) = address(&h.state::<Shell>()) {
-                let _ = w.navigate(u);
+            let shell = h.state::<Shell>();
+            let engine_page = w.url().is_ok_and(|u| is_engine(&shell, &u));
+            if let WebviewUrl::External(u) = address(&shell) {
+                let kept = engine_page && w.eval(engine::keep_view_script(u.as_str())).is_ok();
+                if !kept {
+                    let _ = w.navigate(u);
+                }
             }
         }
     });

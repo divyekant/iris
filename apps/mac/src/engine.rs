@@ -121,6 +121,33 @@ pub fn checked_url(url: &str) -> Option<&str> {
     (port_ok && code_ok).then_some(url)
 }
 
+/// The query name of the sign-in address that carries the view of the old
+/// page to the new page (issue #603).
+pub const VIEW_PARAM: &str = "view";
+
+/// The script that a new sign-in of an open window runs in the old page
+/// (issue #603). The page reads its own hash and loads `sign_in` with that
+/// hash in the query [`VIEW_PARAM`]. The script runs after each earlier
+/// script of the window, also the hash change of a notice click, and after
+/// each route change of the person in the page. So the hash that it reads
+/// is the newest view by construction. Only a route of the web client
+/// (`#/...`) goes into the query, never a sign-in code.
+pub fn keep_view_script(sign_in: &str) -> String {
+    let to = serde_json::Value::from(sign_in);
+    let name = serde_json::Value::from(VIEW_PARAM);
+    format!(
+        "(() => {{ const u = new URL({to}); const h = location.hash; \
+         if (h.startsWith('#/')) u.searchParams.set({name}, h); \
+         location.replace(u.href); }})()"
+    )
+}
+
+/// The view that the page load handler applies after a new sign-in: the
+/// value of [`VIEW_PARAM`] if it is a route of the web client.
+pub fn kept_view(value: &str) -> Option<String> {
+    value.starts_with("#/").then(|| value.to_string())
+}
+
 /// One notice to show.
 #[derive(Debug, PartialEq)]
 pub struct Notice {
@@ -269,6 +296,67 @@ pub fn osascript(title: &str, body: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_sign_in_keeps_only_a_route_of_the_web_client() {
+        let seed = std::cell::Cell::new(7u64);
+        let next = |n: u64| {
+            seed.set(
+                seed.get()
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407),
+            );
+            (seed.get() >> 33) % n
+        };
+        let pieces = [
+            "#",
+            "/",
+            "mail/m-4",
+            "code=ab12",
+            "brief",
+            "",
+            "\"",
+            "'",
+            "\n",
+            "</script>",
+        ];
+        for _ in 0..5_000 {
+            let s: String = (0..next(4))
+                .map(|_| pieces[next(pieces.len() as u64) as usize])
+                .collect();
+            // Only a `#/` route counts, unchanged.
+            let want = s.starts_with("#/").then(|| s.clone());
+            assert_eq!(kept_view(&s), want, "{s:?}");
+            // The address goes into the script as one JSON string: no text of
+            // it can end the string or add code.
+            let script = keep_view_script(&s);
+            let lit = serde_json::Value::from(s.as_str()).to_string();
+            assert!(script.contains(&format!("new URL({lit})")), "{script}");
+            let rest = script.replacen(&lit, "X", 1);
+            assert_eq!(
+                rest,
+                keep_view_script("X").replacen("\"X\"", "X", 1),
+                "{s:?}"
+            );
+        }
+        // The script reads the hash of the page when it runs, and puts only
+        // a route in the query.
+        let script = keep_view_script("http://127.0.0.1:4800/#code=ab12");
+        assert!(script.contains("location.hash"));
+        assert!(script.contains("h.startsWith('#/')"));
+        assert!(script.contains("location.replace("));
+        // The wiring in mac.rs: the new sign-in runs the script in an engine
+        // page, and the navigation handler takes the view from the query.
+        let mac = include_str!("mac.rs");
+        let again = &mac[mac.find("fn sign_in_again").unwrap()..];
+        let again = &again[..again.find("\n}\n").unwrap()];
+        assert!(again.contains("engine::keep_view_script("), "{again}");
+        let nav = &mac[mac.find("fn navigate(").unwrap()..];
+        let nav = &nav[..nav.find("\n}\n").unwrap()];
+        assert!(nav.contains("engine::VIEW_PARAM"), "{nav}");
+        assert!(nav.contains("engine::kept_view("), "{nav}");
+        assert!(nav.contains(".route.lock()"), "{nav}");
+    }
 
     #[test]
     fn a_stalled_command_ends_at_the_time_limit() {
